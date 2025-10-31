@@ -10,8 +10,9 @@ from __future__ import annotations
 import sys
 from typing import Optional
 
-from PySide6.QtWidgets import QApplication, QWidget
+from PySide6.QtWidgets import QApplication
 
+from .main_window import MainWindow
 
 def _get_or_create_app(argv: Optional[list[str]] = None) -> QApplication:
     """Return the existing QApplication or create a new one for this process."""
@@ -26,9 +27,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     """Launch the GridLamEdit window and return the Qt event loop exit code."""
     app = _get_or_create_app(argv)
 
-    window = QWidget()
-    window.setWindowTitle("GridLamEdit")
-    window.resize(800, 600)
+    app.setStyle("Fusion")
+
+    window = MainWindow()
     window.show()
 
     return app.exec()
