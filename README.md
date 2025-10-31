@@ -19,3 +19,7 @@ python -m gridlamedit.app.main
 ```
 
 Uma janela simples chamada **GridLamEdit** será exibida, pronta para ser expandida com novos módulos.
+
+## Testes
+1. Instale as dependências de teste (por exemplo, `pip install pytest`).
+2. Execute a suíte: `python -m pytest -q`.
