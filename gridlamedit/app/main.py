@@ -32,6 +32,13 @@ def main(argv: Optional[list[str]] = None) -> int:
     window = MainWindow()
     window.show()
 
+    screen = app.primaryScreen()
+    if screen is not None:
+        geometry = screen.availableGeometry()
+        frame = window.frameGeometry()
+        frame.moveCenter(geometry.center())
+        window.move(frame.topLeft())
+
     return app.exec()
 
 
