@@ -1,0 +1,769 @@
+"""Spreadsheet import pipeline and UI binding for GridLamEdit."""
+
+from __future__ import annotations
+
+import logging
+import math
+import re
+import unicodedata
+import zipfile
+from collections import OrderedDict
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Dict, Iterable, List, Optional, Protocol
+
+import pandas as pd
+from PySide6.QtCore import QAbstractTableModel, QModelIndex, Qt
+from PySide6.QtGui import QColor
+from PySide6.QtWidgets import (
+    QAbstractItemView,
+    QComboBox,
+    QHeaderView,
+    QListWidget,
+    QTableView,
+)
+
+_OPEN_EXCEL_EXCEPTIONS: tuple[type[BaseException], ...] = (zipfile.BadZipFile,)
+try:  # pragma: no cover - dependente de openpyxl
+    from openpyxl.utils.exceptions import InvalidFileException
+except Exception:  # pragma: no cover - fallback quando openpyxl não disponível
+    InvalidFileException = None  # type: ignore[assignment]
+else:  # pragma: no cover - depende de openpyxl
+    _OPEN_EXCEL_EXCEPTIONS = _OPEN_EXCEL_EXCEPTIONS + (InvalidFileException,)  # type: ignore[assignment]
+
+try:  # pragma: no cover - dependente de xlrd
+    import xlrd  # type: ignore
+except Exception:  # pragma: no cover - fallback quando xlrd não disponível
+    xlrd = None  # type: ignore[assignment]
+
+logger = logging.getLogger(__name__)
+
+ALLOWED_ANGLES = {-90, -45, 0, 45, 90}
+
+# Normalized column aliases (accents, casing, and spaces are ignored).
+LAMINATE_ALIASES = ("Laminate", "Laminate Name", "Laminado", "Name", "Nome")
+COLOR_ALIASES = ("Color", "Colour", "Cor")
+TYPE_ALIASES = ("Type", "Tipo")
+CELLS_ALIASES = ("Cells", "Células", "Celulas", "Cell List")
+MATERIAL_ALIASES = ("Material",)
+ORIENTATION_ALIASES = ("Orientation", "Orientação", "Orientacao", "Angle", "Ângulo", "Angulo")
+ACTIVE_ALIASES = ("Active", "Ativo", "Status")
+SYMMETRY_ALIASES = ("Symmetry", "Simetria")
+INDEX_ALIASES = ("Index", "#", "Idx", "Ordem", "Sequência", "Sequencia")
+CELL_ID_ALIASES = ("Cell", "Cell ID", "Célula", "Celula", "ID")
+
+
+@dataclass
+class Camada:
+    """Representa uma camada do laminado."""
+
+    idx: int
+    material: str
+    orientacao: int
+    ativo: bool
+    simetria: bool
+
+
+@dataclass
+class Laminado:
+    """Agregado de metadados e camadas de um laminado."""
+
+    nome: str
+    cor_hex: str
+    tipo: str
+    celulas: list[str] = field(default_factory=list)
+    camadas: list[Camada] = field(default_factory=list)
+
+
+@dataclass
+class GridModel:
+    """Modelo raiz carregado da planilha do Grid Design."""
+
+    laminados: Dict[str, Laminado] = field(default_factory=OrderedDict)
+    celulas_ordenadas: list[str] = field(default_factory=list)
+
+    def laminados_da_celula(self, cell_id: str) -> list[Laminado]:
+        """Retorna laminados associados a uma célula."""
+        return [
+            laminado
+            for laminado in self.laminados.values()
+            if cell_id in laminado.celulas
+        ]
+
+
+def normalize_angle(value: object) -> int:
+    """Normaliza a orientação para inteiro dentro do conjunto permitido."""
+    if value is None:
+        raise ValueError("orientação ausente")
+
+    if isinstance(value, bool):
+        raise ValueError(f"valor booleano inválido para orientação: {value!r}")
+
+    if isinstance(value, (int, float)):
+        if isinstance(value, float) and math.isnan(value):
+            raise ValueError("orientação ausente")
+        angle = int(round(float(value)))
+    else:
+        text = str(value).strip()
+        if not text:
+            raise ValueError("orientação ausente")
+        cleaned = re.sub(r"[^\d\-]+", "", text)
+        if not cleaned:
+            raise ValueError(f"orientação inválida: {value!r}")
+        angle = int(cleaned)
+
+    if angle not in ALLOWED_ANGLES:
+        raise ValueError(
+            f"orientação {angle} fora do conjunto permitido {sorted(ALLOWED_ANGLES)}"
+        )
+    return angle
+
+
+def normalize_bool(value: object) -> bool:
+    """Normaliza textos 'Sim/Não' ou 'Yes/No' (e similares) em booleano."""
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    if isinstance(value, (int, float)):
+        if isinstance(value, float) and math.isnan(value):
+            return False
+        return float(value) != 0.0
+
+    text = str(value).strip()
+    if not text:
+        return False
+
+    normalized = _normalize_header(text)
+    true_values = {"yes", "y", "true", "1", "sim", "s"}
+    false_values = {"no", "n", "false", "0", "nao"}
+
+    if normalized in true_values:
+        return True
+    if normalized in false_values:
+        return False
+
+    logger.warning("Valor booleano desconhecido '%s'; assumindo False.", value)
+    return False
+
+
+def normalize_color(value: object, default: str = "#FFFFFF") -> str:
+    """Normaliza cores em #RRGGBB, aceitando nomes padrão."""
+    if value is None:
+        return default
+    if isinstance(value, (int, float)):
+        if isinstance(value, float) and math.isnan(value):
+            return default
+        value = str(value)
+
+    text = str(value).strip()
+    if not text:
+        return default
+
+    if re.fullmatch(r"#?[0-9a-fA-F]{6}", text):
+        formatted = text.upper()
+        return formatted if formatted.startswith("#") else f"#{formatted}"
+
+    color = QColor(text)
+    if color.isValid():
+        return color.name().upper()
+
+    logger.warning("Cor inválida '%s'; usando %s.", value, default)
+    return default
+
+
+def safe_col(df: pd.DataFrame, *aliases: str) -> pd.Series:
+    """Retorna a primeira coluna que casar com os aliases informados."""
+    column_name = _resolve_column(df, aliases)
+    return df[column_name]
+
+
+def load_grid_spreadsheet(path: str) -> GridModel:
+    """Carrega a planilha do Grid Design em um GridModel."""
+    file_path = Path(path)
+    if not file_path.exists():
+        raise ValueError(f"Arquivo '{path}' não encontrado.")
+
+    ext = file_path.suffix.lower()
+    if ext not in {".xls", ".xlsx"}:
+        raise ValueError("Formato de planilha não suportado (use .xls ou .xlsx).")
+
+    if ext == ".xls":
+        if xlrd is None:
+            raise ValueError(
+                "Leitura de arquivos .xls requer a dependência 'xlrd==1.2.0'."
+            )
+        workbook: _WorkbookProtocol = _XlrdWorkbook(file_path)
+    else:
+        try:
+            workbook = pd.ExcelFile(file_path, engine="openpyxl")  # type: ignore[assignment]
+        except _OPEN_EXCEL_EXCEPTIONS as exc:
+            workbook = _open_with_xlrd(file_path, exc)
+        except ValueError as exc:
+            if "not a zip file" in str(exc).lower():
+                workbook = _open_with_xlrd(file_path, exc)
+            else:
+                raise ValueError(f"Não foi possível abrir '{path}': {exc}") from exc
+        except Exception as exc:  # pragma: no cover - proteção
+            raise ValueError(f"Não foi possível abrir '{path}': {exc}") from exc
+
+    metadata_info: Optional[tuple[str, pd.DataFrame]] = None
+    stacking_info: Optional[tuple[str, pd.DataFrame]] = None
+    cells_info: Optional[tuple[str, pd.DataFrame]] = None
+
+    for sheet_name in workbook.sheet_names:
+        df = workbook.parse(sheet_name)
+        df = df.dropna(how="all")
+        if df.empty:
+            continue
+
+        classification = _classify_sheet(df)
+        if classification == "stacking" and stacking_info is None:
+            stacking_info = (sheet_name, df.reset_index(drop=True))
+        elif classification == "metadata" and metadata_info is None:
+            metadata_info = (sheet_name, df.reset_index(drop=True))
+        elif classification == "cells" and cells_info is None:
+            cells_info = (sheet_name, df.reset_index(drop=True))
+
+    if metadata_info is None:
+        raise ValueError("A planilha não possui aba de metadados de laminados.")
+    if stacking_info is None:
+        raise ValueError("A planilha não possui aba de stacking de camadas.")
+
+    laminados = _parse_metadata(metadata_info[1])
+    _parse_stacking_into_laminados(stacking_info[1], laminados)
+    celulas_ordenadas = _parse_cells_sheet(cells_info[1]) if cells_info else _infer_cells(laminados)
+
+    if cells_info:
+        reconhecidas = set(celulas_ordenadas)
+        for laminado in laminados.values():
+            for cell_id in laminado.celulas:
+                if cell_id not in reconhecidas:
+                    logger.warning(
+                        "Célula '%s' referenciada no laminado '%s' não existe na aba de células.",
+                        cell_id,
+                        laminado.nome,
+                    )
+
+    total_camadas = sum(len(laminado.camadas) for laminado in laminados.values())
+    logger.info(
+        "Planilha carregada com %d laminados, %d camadas e %d células.",
+        len(laminados),
+        total_camadas,
+        len(celulas_ordenadas),
+    )
+
+    return GridModel(laminados=laminados, celulas_ordenadas=celulas_ordenadas)
+
+
+class StackingTableModel(QAbstractTableModel):
+    """Apresenta as camadas do laminado na tabela de stacking."""
+
+    headers = ["Material", "Orientação", "Ativo", "Simetria"]
+
+    def __init__(self, camadas: list[Camada] | None = None) -> None:
+        super().__init__()
+        self._camadas: list[Camada] = list(camadas or [])
+
+    def update_layers(self, camadas: list[Camada]) -> None:
+        self.beginResetModel()
+        self._camadas = list(camadas)
+        self.endResetModel()
+
+    def rowCount(self, parent: QModelIndex = QModelIndex()) -> int:  # noqa: N802
+        if parent.isValid():
+            return 0
+        return len(self._camadas)
+
+    def columnCount(self, parent: QModelIndex = QModelIndex()) -> int:  # noqa: N802
+        if parent.isValid():
+            return 0
+        return len(self.headers)
+
+    def headerData(  # noqa: N802
+        self,
+        section: int,
+        orientation: Qt.Orientation,
+        role: int = Qt.DisplayRole,
+    ) -> Optional[str]:
+        if role != Qt.DisplayRole:
+            return None
+        if orientation == Qt.Horizontal and 0 <= section < len(self.headers):
+            return self.headers[section]
+        if orientation == Qt.Vertical:
+            return str(section + 1)
+        return None
+
+    def data(self, index: QModelIndex, role: int = Qt.DisplayRole) -> Optional[str]:  # noqa: N802
+        if not index.isValid() or not (0 <= index.row() < len(self._camadas)):
+            return None
+
+        camada = self._camadas[index.row()]
+
+        if role == Qt.DisplayRole:
+            coluna = index.column()
+            if coluna == 0:
+                return camada.material
+            if coluna == 1:
+                return f"{camada.orientacao}\N{DEGREE SIGN}"
+            if coluna == 2:
+                return "Sim" if camada.ativo else "Não"
+            if coluna == 3:
+                return "Sim" if camada.simetria else "Não"
+        elif role == Qt.TextAlignmentRole:
+            if index.column() == 0:
+                return int(Qt.AlignVCenter | Qt.AlignLeft)
+            return int(Qt.AlignVCenter | Qt.AlignCenter)
+
+        return None
+
+
+def bind_model_to_ui(model: GridModel, ui) -> None:
+    """Efetua o binding do modelo carregado com os widgets da UI."""
+    binding = getattr(ui, "_grid_binding", None)
+    if binding is not None:
+        binding.teardown()
+    ui._grid_binding = _GridUiBinding(model, ui)  # type: ignore[attr-defined]
+
+
+# Helpers ------------------------------------------------------------------ #
+
+
+class _WorkbookProtocol(Protocol):
+    sheet_names: list[str]
+
+    def parse(self, sheet_name: str) -> pd.DataFrame:
+        ...
+
+
+def _normalize_header(value: str) -> str:
+    normalized = unicodedata.normalize("NFKD", value)
+    ascii_only = "".join(ch for ch in normalized if not unicodedata.combining(ch))
+    ascii_only = ascii_only.lower()
+    return re.sub(r"[^a-z0-9]+", "", ascii_only)
+
+
+def _resolve_column(df: pd.DataFrame, aliases: Iterable[str]) -> str:
+    normalized_map: dict[str, str] = {}
+    for column in df.columns:
+        if not isinstance(column, str):
+            continue
+        key = _normalize_header(column)
+        if key:
+            normalized_map.setdefault(key, column)
+
+    for alias in aliases:
+        key = _normalize_header(alias)
+        if key and key in normalized_map:
+            return normalized_map[key]
+
+    friendly = ", ".join(aliases)
+    raise ValueError(f"Coluna obrigatória ausente ({friendly}).")
+
+
+def _classify_sheet(df: pd.DataFrame) -> Optional[str]:
+    columns = {_normalize_header(str(col)) for col in df.columns if isinstance(col, str)}
+
+    def has_alias(aliases: Iterable[str]) -> bool:
+        return any(_normalize_header(alias) in columns for alias in aliases)
+
+    if has_alias(LAMINATE_ALIASES) and has_alias(MATERIAL_ALIASES) and has_alias(ORIENTATION_ALIASES):
+        return "stacking"
+    if has_alias(LAMINATE_ALIASES) and (
+        has_alias(COLOR_ALIASES) or has_alias(TYPE_ALIASES) or has_alias(CELLS_ALIASES)
+    ):
+        return "metadata"
+    if has_alias(CELL_ID_ALIASES):
+        return "cells"
+    return None
+
+
+def _parse_metadata(df: pd.DataFrame) -> OrderedDict[str, Laminado]:
+    name_series = safe_col(df, *LAMINATE_ALIASES)
+    try:
+        color_series = safe_col(df, *COLOR_ALIASES)
+    except ValueError:
+        color_series = None
+    try:
+        type_series = safe_col(df, *TYPE_ALIASES)
+    except ValueError:
+        type_series = None
+    try:
+        cells_series = safe_col(df, *CELLS_ALIASES)
+    except ValueError:
+        cells_series = None
+
+    laminados: OrderedDict[str, Laminado] = OrderedDict()
+
+    for idx in range(len(df)):
+        raw_name = name_series.iat[idx]
+        name = str(raw_name).strip() if not pd.isna(raw_name) else ""
+        if not name:
+            raise ValueError(f"Linha {idx + 2}: laminado sem nome.")
+
+        raw_color = color_series.iat[idx] if color_series is not None else None
+        color = normalize_color(raw_color)
+
+        raw_type = type_series.iat[idx] if type_series is not None else ""
+        laminate_type = ""
+        if raw_type is not None and not (isinstance(raw_type, float) and math.isnan(raw_type)):  # type: ignore[arg-type]
+            laminate_type = str(raw_type).strip()
+
+        raw_cells = cells_series.iat[idx] if cells_series is not None else ""
+        cells = _split_cells(raw_cells)
+
+        laminados[name] = Laminado(
+            nome=name,
+            cor_hex=color,
+            tipo=laminate_type,
+            celulas=cells,
+            camadas=[],
+        )
+
+    return laminados
+
+
+def _parse_stacking_into_laminados(df: pd.DataFrame, laminados: OrderedDict[str, Laminado]) -> None:
+    laminate_series = safe_col(df, *LAMINATE_ALIASES)
+    material_series = safe_col(df, *MATERIAL_ALIASES)
+    orientation_series = safe_col(df, *ORIENTATION_ALIASES)
+
+    try:
+        active_series = safe_col(df, *ACTIVE_ALIASES)
+    except ValueError:
+        active_series = None
+    try:
+        symmetry_series = safe_col(df, *SYMMETRY_ALIASES)
+    except ValueError:
+        symmetry_series = None
+    try:
+        index_series = safe_col(df, *INDEX_ALIASES)
+    except ValueError:
+        index_series = None
+
+    layers_by_laminate: dict[str, list[Camada]] = {name: [] for name in laminados.keys()}
+
+    for idx in range(len(df)):
+        raw_laminate = laminate_series.iat[idx]
+        laminate_name = str(raw_laminate).strip() if not pd.isna(raw_laminate) else ""
+        if not laminate_name:
+            raise ValueError(f"Linha {idx + 2}: camada sem laminado associado.")
+
+        raw_material = material_series.iat[idx]
+        material = str(raw_material).strip() if not pd.isna(raw_material) else ""
+        if not material:
+            raise ValueError(f"Laminado '{laminate_name}' possui camada sem material.")
+
+        try:
+            orientation = normalize_angle(orientation_series.iat[idx])
+        except ValueError as exc:
+            raise ValueError(
+                f"Laminado '{laminate_name}' possui camada com orientação inválida: {exc}"
+            ) from exc
+
+        active = (
+            normalize_bool(active_series.iat[idx])
+            if active_series is not None
+            else True
+        )
+        symmetry = (
+            normalize_bool(symmetry_series.iat[idx])
+            if symmetry_series is not None
+            else False
+        )
+
+        if index_series is not None:
+            raw_index = index_series.iat[idx]
+            if pd.isna(raw_index):
+                layer_index = len(layers_by_laminate.get(laminate_name, []))
+            else:
+                try:
+                    layer_index = int(raw_index)
+                except (TypeError, ValueError):
+                    layer_index = len(layers_by_laminate.get(laminate_name, []))
+        else:
+            layer_index = len(layers_by_laminate.get(laminate_name, []))
+
+        if laminate_name not in laminados:
+            logger.warning(
+                "Laminado '%s' encontrado no stacking mas não presente na aba de metadados; usando valores padrão.",
+                laminate_name,
+            )
+            laminados[laminate_name] = Laminado(
+                nome=laminate_name,
+                cor_hex="#FFFFFF",
+                tipo="",
+                celulas=[],
+                camadas=[],
+            )
+            layers_by_laminate.setdefault(laminate_name, [])
+
+        camada = Camada(
+            idx=layer_index,
+            material=material,
+            orientacao=orientation,
+            ativo=active,
+            simetria=symmetry,
+        )
+        layers_by_laminate.setdefault(laminate_name, []).append(camada)
+
+    for laminate_name, layers in layers_by_laminate.items():
+        for new_idx, camada in enumerate(layers):
+            camada.idx = new_idx
+        laminados[laminate_name].camadas = layers
+
+
+def _parse_cells_sheet(df: pd.DataFrame) -> list[str]:
+    cell_series = safe_col(df, *CELL_ID_ALIASES)
+    ordered_cells: list[str] = []
+    seen: set[str] = set()
+
+    for value in cell_series:
+        if pd.isna(value):
+            continue
+        cell_id = str(value).strip()
+        if not cell_id or cell_id in seen:
+            continue
+        ordered_cells.append(cell_id)
+        seen.add(cell_id)
+    return ordered_cells
+
+
+def _infer_cells(laminados: OrderedDict[str, Laminado]) -> list[str]:
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for laminado in laminados.values():
+        for cell_id in laminado.celulas:
+            if cell_id not in seen:
+                ordered.append(cell_id)
+                seen.add(cell_id)
+    return ordered
+
+
+def _split_cells(value: object) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, (int, float)):
+        if isinstance(value, float) and math.isnan(value):
+            return []
+        value = str(value)
+
+    text = str(value).strip()
+    if not text:
+        return []
+    parts = re.split(r"[;,]", text)
+    return [part.strip() for part in parts if part.strip()]
+
+
+class _GridUiBinding:
+    """Encapsula o binding entre GridModel e widgets do MainWindow."""
+
+    def __init__(self, model: GridModel, ui) -> None:
+        self.model = model
+        self.ui = ui
+        self._updating = False
+        self._current_laminate: Optional[str] = None
+        self._laminates_by_cell: dict[str, list[str]] = self._build_cell_index()
+        self.stacking_model = StackingTableModel()
+
+        self._setup_widgets()
+        self._connect_signals()
+        self._select_initial_entries()
+
+    def teardown(self) -> None:
+        """Remove conexões quando um novo binding for aplicado."""
+        try:
+            self.ui.cells_list.currentTextChanged.disconnect(self._on_cell_selected)
+        except (AttributeError, TypeError):
+            pass
+        try:
+            self.ui.laminate_name_combo.currentTextChanged.disconnect(self._on_laminate_selected)
+        except (AttributeError, TypeError):
+            pass
+
+    # Internal helpers -------------------------------------------------- #
+
+    def _build_cell_index(self) -> dict[str, list[str]]:
+        mapping: dict[str, list[str]] = {}
+        for name, laminado in self.model.laminados.items():
+            for cell_id in laminado.celulas:
+                mapping.setdefault(cell_id, []).append(name)
+        return mapping
+
+    def _setup_widgets(self) -> None:
+        cells_widget = getattr(self.ui, "cells_list", None)
+        if isinstance(cells_widget, QListWidget):
+            cells_widget.clear()
+            for cell_id in self.model.celulas_ordenadas:
+                cells_widget.addItem(cell_id)
+
+        name_combo = getattr(self.ui, "laminate_name_combo", None)
+        if isinstance(name_combo, QComboBox):
+            name_combo.blockSignals(True)
+            name_combo.clear()
+            for laminado in self.model.laminados.values():
+                name_combo.addItem(laminado.nome)
+            name_combo.blockSignals(False)
+
+        color_combo = getattr(self.ui, "laminate_color_combo", None)
+        if isinstance(color_combo, QComboBox):
+            color_combo.blockSignals(True)
+            unique_colors = list(
+                OrderedDict(
+                    (laminado.cor_hex, None) for laminado in self.model.laminados.values()
+                ).keys()
+            )
+            for color in unique_colors:
+                if color not in [color_combo.itemText(i) for i in range(color_combo.count())]:
+                    color_combo.addItem(color)
+            color_combo.blockSignals(False)
+
+        type_combo = getattr(self.ui, "laminate_type_combo", None)
+        if isinstance(type_combo, QComboBox):
+            type_combo.blockSignals(True)
+            unique_types = [
+                laminado.tipo for laminado in self.model.laminados.values() if laminado.tipo
+            ]
+            for tipo in OrderedDict((item, None) for item in unique_types):
+                if tipo not in [type_combo.itemText(i) for i in range(type_combo.count())]:
+                    type_combo.addItem(tipo)
+            type_combo.blockSignals(False)
+
+        table = getattr(self.ui, "layers_table", None)
+        if isinstance(table, QTableView):
+            table.setModel(self.stacking_model)
+            table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+            table.setSelectionBehavior(QAbstractItemView.SelectRows)
+            table.setSelectionMode(QAbstractItemView.SingleSelection)
+            header = table.horizontalHeader()
+            header.setSectionResizeMode(QHeaderView.Stretch)
+            table.verticalHeader().setVisible(False)
+
+    def _connect_signals(self) -> None:
+        cells_widget = getattr(self.ui, "cells_list", None)
+        if isinstance(cells_widget, QListWidget):
+            cells_widget.currentTextChanged.connect(self._on_cell_selected)
+
+        name_combo = getattr(self.ui, "laminate_name_combo", None)
+        if isinstance(name_combo, QComboBox):
+            name_combo.currentTextChanged.connect(self._on_laminate_selected)
+
+    def _select_initial_entries(self) -> None:
+        if self.model.celulas_ordenadas:
+            cells_widget = getattr(self.ui, "cells_list", None)
+            if isinstance(cells_widget, QListWidget):
+                cells_widget.setCurrentRow(0)
+
+        if self._current_laminate is None and self.model.laminados:
+            first_name = next(iter(self.model.laminados))
+            self._apply_laminate(first_name)
+
+    def _on_cell_selected(self, cell_id: str) -> None:
+        if not cell_id:
+            return
+        candidates = self._laminates_by_cell.get(cell_id, [])
+        target = None
+        if self._current_laminate in candidates:
+            target = self._current_laminate
+        elif candidates:
+            target = candidates[0]
+        elif self.model.laminados:
+            target = next(iter(self.model.laminados))
+        if target:
+            self._apply_laminate(target)
+
+    def _on_laminate_selected(self, laminate_name: str) -> None:
+        if not laminate_name or laminate_name not in self.model.laminados:
+            return
+        self._apply_laminate(laminate_name)
+
+    def _apply_laminate(self, laminate_name: str) -> None:
+        if self._updating:
+            return
+        laminado = self.model.laminados.get(laminate_name)
+        if laminado is None:
+            return
+
+        self._updating = True
+        try:
+            name_combo = getattr(self.ui, "laminate_name_combo", None)
+            if isinstance(name_combo, QComboBox):
+                name_combo.setEditText(laminado.nome)
+
+            color_combo = getattr(self.ui, "laminate_color_combo", None)
+            if isinstance(color_combo, QComboBox):
+                color_combo.setEditText(laminado.cor_hex)
+
+            type_combo = getattr(self.ui, "laminate_type_combo", None)
+            if isinstance(type_combo, QComboBox):
+                type_combo.setEditText(laminado.tipo)
+
+            associated_cells = getattr(self.ui, "associated_cells", None)
+            if hasattr(associated_cells, "setPlainText"):
+                associated_cells.setPlainText(", ".join(laminado.celulas))
+
+            self.stacking_model.update_layers(laminado.camadas)
+            self._current_laminate = laminado.nome
+        finally:
+            self._updating = False
+
+
+def _open_with_xlrd(file_path: Path, cause: Exception) -> _WorkbookProtocol:
+    """Fallback que usa xlrd 1.2.x para planilhas .xls renomeadas."""
+    if xlrd is None:
+        raise ValueError(
+            "A planilha parece utilizar o formato legado (.xls renomeado). "
+            "Instale a dependência 'xlrd==1.2.0' para habilitar o fallback."
+        ) from cause
+    logger.warning(
+        "Utilizando fallback xlrd para abrir '%s' devido a erro: %s",
+        file_path,
+        cause,
+    )
+    return _XlrdWorkbook(file_path)
+
+
+class _XlrdWorkbook:
+    """Wrapper simples para oferecer interface parecida com pandas.ExcelFile."""
+
+    def __init__(self, file_path: Path) -> None:
+        try:
+            self._book = xlrd.open_workbook(file_path)  # type: ignore[call-arg]
+        except Exception as exc:
+            raise ValueError(f"Não foi possível abrir '{file_path}': {exc}") from exc
+        self.sheet_names = list(self._book.sheet_names())
+
+    def parse(self, sheet_name: str) -> pd.DataFrame:
+        try:
+            sheet = self._book.sheet_by_name(sheet_name)
+        except Exception as exc:
+            raise ValueError(f"Aba '{sheet_name}' não pôde ser lida: {exc}") from exc
+
+        rows: list[list[object]] = []
+        for row_idx in range(sheet.nrows):
+            row: list[object] = []
+            for col_idx in range(sheet.ncols):
+                value = sheet.cell_value(row_idx, col_idx)
+                row.append(value)
+            rows.append(row)
+
+        while rows and all(_is_blank(cell) for cell in rows[0]):
+            rows.pop(0)
+
+        if not rows:
+            return pd.DataFrame()
+
+        header = rows[0]
+        data_rows = rows[1:]
+        df = pd.DataFrame(data_rows, columns=header)
+        return df
+
+
+def _is_blank(value: object) -> bool:
+    if value is None:
+        return True
+    if isinstance(value, str):
+        return not value.strip()
+    if isinstance(value, float):
+        return math.isnan(value)
+    return False

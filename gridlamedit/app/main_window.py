@@ -2,28 +2,34 @@
 
 from __future__ import annotations
 
-from typing import Iterable, List
+import logging
+from pathlib import Path
+from typing import Iterable, List, Optional
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QAction, QFont
 from PySide6.QtWidgets import (
     QAbstractItemView,
-    QCheckBox,
     QComboBox,
+    QFileDialog,
     QHBoxLayout,
     QLabel,
     QListWidget,
+    QMessageBox,
     QMainWindow,
     QPushButton,
     QSplitter,
     QStatusBar,
-    QTableWidget,
-    QTableWidgetItem,
+    QTableView,
     QTextEdit,
     QToolBar,
     QVBoxLayout,
     QWidget,
 )
+
+from gridlamedit.io.spreadsheet import GridModel, bind_model_to_ui, load_grid_spreadsheet
+
+logger = logging.getLogger(__name__)
 
 
 class MainWindow(QMainWindow):
@@ -33,6 +39,8 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("GridLamEdit")
         self.resize(1200, 800)
+
+        self._grid_model: Optional[GridModel] = None
 
         self._setup_toolbar()
         self._setup_central_widget()
@@ -44,18 +52,18 @@ class MainWindow(QMainWindow):
         toolbar.setToolButtonStyle(Qt.ToolButtonTextOnly)
         toolbar.setContentsMargins(8, 4, 8, 4)
 
-        actions: List[str] = [
-            "Carregar Planilha",
-            "Novo Laminado",
-            "Importar Laminado",
-            "Salvar",
-            "Desfazer",
-            "Verificar Simetria",
+        actions: List[tuple[str, callable]] = [
+            ("Carregar Planilha", self._load_spreadsheet),
+            ("Novo Laminado", self._show_todo_message),
+            ("Importar Laminado", self._show_todo_message),
+            ("Salvar", self._show_todo_message),
+            ("Desfazer", self._show_todo_message),
+            ("Verificar Simetria", self._show_todo_message),
         ]
-        for index, text in enumerate(actions):
+        for index, (text, handler) in enumerate(actions):
             action = QAction(text, self)
             action.setStatusTip(f"TODO: implementar ação '{text}'.")
-            action.triggered.connect(self._show_todo_message)  # type: ignore[arg-type]
+            action.triggered.connect(handler)  # type: ignore[arg-type]
             toolbar.addAction(action)
             if index != len(actions) - 1:
                 toolbar.addSeparator()
@@ -91,7 +99,6 @@ class MainWindow(QMainWindow):
         title.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
 
         self.cells_list = QListWidget(panel)
-        self.cells_list.addItems(["C1", "C2", "C3", "C4"])
         self.cells_list.setSelectionMode(QListWidget.SingleSelection)
 
         layout.addWidget(title)
@@ -182,48 +189,12 @@ class MainWindow(QMainWindow):
         layout.addLayout(self._create_layers_buttons())
         return container
 
-    def _create_layers_table(self, parent: QWidget) -> QTableWidget:
-        table = QTableWidget(parent)
-        table.setColumnCount(5)
-        table.setHorizontalHeaderLabels(
-            ["#", "Material", "Orientação", "Ativo", "Simetria"]
-        )
-        table.setRowCount(4)
-        sample_data = [
-            ("0", "Carbon", "0°", "Sim", False),
-            ("1", "Glass", "45°", "Sim", True),
-            ("2", "Kevlar", "-45°", "Não", False),
-            ("3", "Foam", "90°", "Sim", False),
-        ]
-
-        for row, data in enumerate(sample_data):
-            for col, value in enumerate(data[:-1]):
-                item = QTableWidgetItem(value)
-                if col == 0:
-                    item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
-                table.setItem(row, col, item)
-
-            check_box = QCheckBox(parent)
-            check_box.setChecked(data[-1])
-            check_box.setTristate(False)
-            table.setCellWidget(row, 4, check_box)
-
+    def _create_layers_table(self, parent: QWidget) -> QTableView:
+        table = QTableView(parent)
         table.setAlternatingRowColors(True)
         table.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         table.setVerticalScrollMode(QAbstractItemView.ScrollPerItem)
         table.verticalHeader().setVisible(False)
-
-        header = table.horizontalHeader()
-        header.setDefaultSectionSize(140)
-        header.setMinimumSectionSize(80)
-        table.setColumnWidth(0, 60)
-        table.setColumnWidth(1, 180)
-        table.setColumnWidth(2, 140)
-        table.setColumnWidth(3, 110)
-        table.setColumnWidth(4, 110)
-
-        table.horizontalHeaderItem(0).setTextAlignment(Qt.AlignCenter)
-        table.horizontalHeaderItem(4).setTextAlignment(Qt.AlignCenter)
         return table
 
     def _create_layers_buttons(self) -> QVBoxLayout:
@@ -256,3 +227,30 @@ class MainWindow(QMainWindow):
         """Placeholder slot for unimplemented actions."""
         if self.statusBar():
             self.statusBar().showMessage("TODO: implementar ação.", 2000)
+
+    def _load_spreadsheet(self, checked: bool = False) -> None:  # noqa: ARG002
+        """Abre um arquivo Excel e popula a interface."""
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Carregar planilha do Grid Design",
+            "",
+            "Planilhas Excel (*.xlsx *.xls);;Todos os arquivos (*)",
+        )
+        if not path:
+            return
+
+        try:
+            model = load_grid_spreadsheet(path)
+        except ValueError as exc:
+            logger.error("Falha ao carregar planilha: %s", exc)
+            QMessageBox.critical(self, "Erro ao importar planilha", str(exc))
+            if self.statusBar():
+                self.statusBar().showMessage("Falha ao carregar planilha.", 4000)
+            return
+
+        bind_model_to_ui(model, self)
+        self._grid_model = model
+        if self.statusBar():
+            self.statusBar().showMessage(
+                f"Planilha carregada: {Path(path).name}", 5000
+            )
