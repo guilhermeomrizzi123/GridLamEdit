@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Iterable, List, Optional
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QAction, QColor, QFont, QKeySequence, QShortcut
+from PySide6.QtGui import QAction, QColor, QCloseEvent, QFont, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
