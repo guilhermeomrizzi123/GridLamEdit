@@ -35,6 +35,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from gridlamedit.core.project_manager import ProjectManager
 from gridlamedit.io.spreadsheet import (
     Camada,
     GridModel,
@@ -58,7 +59,9 @@ class MainWindow(QMainWindow):
 
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("GridLamEdit")
+        self.base_title = "GridLamEdit"
+        self.project_manager = ProjectManager(self._on_project_dirty_changed)
+        self.setWindowTitle(self.base_title)
         self.resize(1200, 800)
 
         self._grid_model: Optional[GridModel] = None
@@ -67,6 +70,7 @@ class MainWindow(QMainWindow):
         self._setup_toolbar()
         self._setup_central_widget()
         self._setup_status_bar()
+        self._update_save_actions_enabled()
 
     def _setup_toolbar(self) -> None:
         toolbar = QToolBar("Main Toolbar", self)
@@ -74,23 +78,65 @@ class MainWindow(QMainWindow):
         toolbar.setToolButtonStyle(Qt.ToolButtonTextOnly)
         toolbar.setContentsMargins(8, 4, 8, 4)
 
-        actions: List[tuple[str, callable]] = [
-            ("Carregar Planilha", self._load_spreadsheet),
-            ("Novo Laminado", self._enter_creating_mode),
-            ("Importar Laminado", self._show_todo_message),
-            ("Salvar", self._show_todo_message),
-            ("Desfazer", self._show_todo_message),
-            ("Verificar Simetria", self._show_todo_message),
+        action_specs: List[
+            tuple[str, callable, str, Optional[QKeySequence], bool]
+        ] = [
+            (
+                "Abrir Projeto",
+                self._on_open_project,
+                "Abrir arquivo de projeto GridLam.",
+                QKeySequence.Open,
+                False,
+            ),
+            (
+                "Carregar Planilha",
+                self._load_spreadsheet,
+                "Importar planilha do Grid Design.",
+                None,
+                False,
+            ),
+            (
+                "Novo Laminado",
+                self._enter_creating_mode,
+                "Cadastrar um novo laminado.",
+                None,
+                True,
+            ),
+            (
+                "Salvar",
+                self._on_save_triggered,
+                "Salvar alteracoes no projeto atual.",
+                QKeySequence.Save,
+                False,
+            ),
+            (
+                "Salvar Como",
+                self._on_save_as_triggered,
+                "Salvar o projeto em um novo arquivo.",
+                QKeySequence.SaveAs,
+                False,
+            ),
         ]
-        for index, (text, handler) in enumerate(actions):
+
+        self.save_action: Optional[QAction] = None
+        self.save_as_action: Optional[QAction] = None
+
+        for text, handler, tip, shortcut, insert_separator in action_specs:
             action = QAction(text, self)
-            action.setStatusTip(f"TODO: implementar ação '{text}'.")
+            action.setStatusTip(tip)
+            if shortcut is not None:
+                action.setShortcut(shortcut)
             action.triggered.connect(handler)  # type: ignore[arg-type]
             toolbar.addAction(action)
-            if index != len(actions) - 1:
+            if text == "Salvar":
+                self.save_action = action
+            elif text == "Salvar Como":
+                self.save_as_action = action
+            if insert_separator:
                 toolbar.addSeparator()
 
         self.addToolBar(toolbar)
+        self._update_save_actions_enabled()
 
     def _setup_central_widget(self) -> None:
         self.view_editor = self._build_editor_view()
@@ -128,7 +174,7 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(16, 16, 16, 16)
         layout.setSpacing(12)
 
-        title = QLabel("Células", panel)
+        title = QLabel("Celulas", panel)
         title.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
 
         self.cells_list = QListWidget(panel)
@@ -145,7 +191,7 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(16, 16, 16, 16)
         layout.setSpacing(16)
 
-        header = QLabel("Laminado Associado a Célula", panel)
+        header = QLabel("Laminado Associado a Celula", panel)
         header_font: QFont = header.font()
         header_font.setBold(True)
         header_font.setPointSize(header_font.pointSize() + 1)
@@ -201,7 +247,7 @@ class MainWindow(QMainWindow):
         layout.setSpacing(6)
         layout.setContentsMargins(0, 0, 0, 0)
 
-        label = QLabel("Células associadas com esse laminado", container)
+        label = QLabel("Celulas associadas com esse laminado", container)
         self.associated_cells = QTextEdit(container)
         self.associated_cells.setReadOnly(True)
         self.associated_cells.setPlaceholderText("C3, C5")
@@ -237,13 +283,13 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(0, 0, 0, 0)
 
         buttons_info = [
-            "➕ Adicionar Camada",
-            "📄 Duplicar Camada",
-            "⬆️ Mover Acima",
-            "⬇️ Mover Abaixo",
-            "🧱 Alterar Material",
-            "🔄 Alterar Orientação",
-            "✅ Verificar Simetria",
+            "Adicionar Camada",
+            "Duplicar Camada",
+            "Mover Acima",
+            "Mover Abaixo",
+            "Alterar Material",
+            "Alterar Orientacao",
+            "Verificar Simetria",
         ]
 
         self.layer_buttons: list[QPushButton] = []
@@ -301,7 +347,7 @@ class MainWindow(QMainWindow):
         self.new_laminate_stacking_table = QTableWidget(view)
         self.new_laminate_stacking_table.setColumnCount(4)
         self.new_laminate_stacking_table.setHorizontalHeaderLabels(
-            ["Material", "Orientação", "Ativo", "Simetria"]
+            ["Material", "Orientacao", "Ativo", "Simetria"]
         )
         self.new_laminate_stacking_table.horizontalHeader().setSectionResizeMode(
             QHeaderView.Stretch
@@ -485,14 +531,14 @@ class MainWindow(QMainWindow):
         name = self.new_laminate_name_edit.text().strip()
         if not name:
             QMessageBox.warning(
-                self, "Campos obrigatórios", "Informe o Name do laminado."
+                self, "Campos obrigatorios", "Informe o Name do laminado."
             )
             return
         if name in self._grid_model.laminados:
             QMessageBox.warning(
                 self,
                 "Nome duplicado",
-                f"Já existe um laminado chamado '{name}'. Escolha outro nome.",
+                f"Ja existe um laminado chamado '{name}'. Escolha outro nome.",
             )
             return
 
@@ -511,7 +557,7 @@ class MainWindow(QMainWindow):
             except ValueError as exc:
                 QMessageBox.warning(
                     self,
-                    "Orientação inválida",
+                    "Orientacao invalida",
                     f"Linha {row + 1}: {exc}",
                 )
                 return
@@ -530,7 +576,7 @@ class MainWindow(QMainWindow):
         if not camadas:
             QMessageBox.warning(
                 self,
-                "Stacking obrigatório",
+                "Stacking obrigatorio",
                 "Adicione ao menos uma camada ao laminado.",
             )
             return
@@ -546,6 +592,7 @@ class MainWindow(QMainWindow):
         self._grid_model.laminados[name] = laminado
         self._refresh_after_new_laminate(name)
         self._exit_creating_mode()
+        self._mark_dirty()
 
     def _refresh_after_new_laminate(self, laminate_name: str) -> None:
         if self._grid_model is None:
@@ -561,7 +608,7 @@ class MainWindow(QMainWindow):
             try:
                 binding._apply_laminate(laminate_name)  # type: ignore[attr-defined]
             except Exception as exc:  # pragma: no cover - defensive
-                logger.warning("Não foi possível aplicar novo laminado: %s", exc)
+                logger.warning("Nao foi possivel aplicar novo laminado: %s", exc)
 
     def _text(self, item: Optional[QTableWidgetItem]) -> str:
         return item.text().strip() if item is not None else ""
@@ -590,16 +637,18 @@ class MainWindow(QMainWindow):
     def _show_todo_message(self, checked: bool = False) -> None:  # noqa: ARG002
         """Placeholder slot for unimplemented actions."""
         if self.statusBar():
-            self.statusBar().showMessage("TODO: implementar ação.", 2000)
+            self.statusBar().showMessage("TODO: implementar acao.", 2000)
 
     def _load_spreadsheet(self, checked: bool = False) -> None:  # noqa: ARG002
-        """Abre um arquivo Excel e popula a interface."""
+        """Open an Excel file and populate the UI."""
+        if not self._confirm_discard_changes():
+            return
         path, _ = QFileDialog.getOpenFileName(
             self,
             "Carregar planilha do Grid Design",
             "",
             "Planilhas Excel (*.xlsx *.xls);;Todos os arquivos (*)",
-        )
+)
         if not path:
             return
 
@@ -607,18 +656,221 @@ class MainWindow(QMainWindow):
             model = load_grid_spreadsheet(path)
         except ValueError as exc:
             logger.error("Falha ao carregar planilha: %s", exc)
-            QMessageBox.critical(self, "Erro ao importar planilha", str(exc))
+            QMessageBox.critical(self, "Erro", str(exc))
             if self.statusBar():
                 self.statusBar().showMessage("Falha ao carregar planilha.", 4000)
             return
 
+        model.source_excel_path = path
+        model.dirty = False
+        self._grid_model = model
+        self.project_manager.current_path = None
+
         if self.ui_state == UiState.CREATING:
             self._exit_creating_mode()
 
-        bind_model_to_ui(model, self)
-        bind_cells_to_ui(model, self)
-        self._grid_model = model
+        bind_model_to_ui(self._grid_model, self)
+        bind_cells_to_ui(self._grid_model, self)
+        self._apply_ui_state(self.project_manager.get_ui_state())
+        self.project_manager.capture_from_model(
+            self._grid_model, self._collect_ui_state()
+        )
+        self.project_manager.mark_dirty(True)
+        self._update_save_actions_enabled()
+        self._update_window_title()
+
         if self.statusBar():
             self.statusBar().showMessage(
                 f"Planilha carregada: {Path(path).name}", 5000
             )
+
+    def _on_open_project(self, checked: bool = False) -> None:  # noqa: ARG002
+        if not self._confirm_discard_changes():
+            return
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Abrir projeto GridLam",
+            str(self.project_manager.current_path or ""),
+            "Projetos GridLam (*.gridlam);;Todos os arquivos (*)",
+        )
+        if not path:
+            return
+        try:
+            self.project_manager.load(Path(path))
+            model = self.project_manager.build_model()
+        except ValueError as exc:
+            QMessageBox.critical(self, "Erro", str(exc))
+            return
+
+        self._grid_model = model
+        if self.ui_state == UiState.CREATING:
+            self._exit_creating_mode()
+
+        bind_model_to_ui(self._grid_model, self)
+        bind_cells_to_ui(self._grid_model, self)
+        self._apply_ui_state(self.project_manager.get_ui_state())
+        self.project_manager.capture_from_model(
+            self._grid_model, self._collect_ui_state()
+        )
+        self.project_manager.mark_dirty(False)
+        self._update_save_actions_enabled()
+        self._update_window_title()
+
+        if self.statusBar():
+            self.statusBar().showMessage(
+                f"Projeto carregado: {Path(path).name}", 4000
+            )
+
+    def _collect_ui_state(self) -> dict:
+        state: dict = {}
+        if getattr(self, "lstCelulas", None) and self.lstCelulas.currentItem():
+            state["selected_cell"] = self.lstCelulas.currentItem().text()
+        if getattr(self, "laminate_name_combo", None):
+            state["selected_laminate"] = self.laminate_name_combo.currentText()
+        return state
+
+    def _apply_ui_state(self, state: dict) -> None:
+        if not state:
+            return
+        cell_id = state.get("selected_cell")
+        list_widget = getattr(self, "lstCelulas", None)
+        if not isinstance(list_widget, QListWidget):
+            list_widget = getattr(self, "cells_list", None)
+        if cell_id and isinstance(list_widget, QListWidget):
+            matches = list_widget.findItems(cell_id, Qt.MatchExactly)
+            if matches:
+                list_widget.setCurrentItem(matches[0])
+
+        laminate_name = state.get("selected_laminate")
+        if (
+            laminate_name
+            and self._grid_model is not None
+            and laminate_name in self._grid_model.laminados
+        ):
+            combo = getattr(self, "laminate_name_combo", None)
+            if isinstance(combo, QComboBox):
+                if combo.currentText() != laminate_name:
+                    combo.blockSignals(True)
+                    index = combo.findText(laminate_name)
+                    if index >= 0:
+                        combo.setCurrentIndex(index)
+                    else:
+                        combo.setEditText(laminate_name)
+                    combo.blockSignals(False)
+            binding = getattr(self, "_grid_binding", None)
+            if binding is not None and hasattr(binding, "_apply_laminate"):
+                try:
+                    binding._apply_laminate(laminate_name)  # type: ignore[attr-defined]
+                except Exception as exc:  # pragma: no cover - defensive
+                    logger.debug("Falha ao aplicar estado de laminado: %s", exc)
+
+    def _snapshot_from_model(self) -> None:
+        if self._grid_model is None:
+            return
+        ui_state = self._collect_ui_state()
+        self.project_manager.capture_from_model(self._grid_model, ui_state)
+
+    def _perform_save(self, path: Optional[str]) -> bool:
+        if self._grid_model is None:
+            return False
+        self._snapshot_from_model()
+        try:
+            self.project_manager.save(Path(path) if path else None)
+        except ValueError as exc:
+            QMessageBox.critical(self, "Erro", str(exc))
+            return False
+        if self.statusBar():
+            target = self.project_manager.current_path
+            if target is not None:
+                self.statusBar().showMessage(
+                    f"Projeto salvo: {target.name}", 4000
+                )
+        return True
+
+    def _on_save_triggered(self, checked: bool = False) -> bool:  # noqa: ARG002
+        if self._grid_model is None:
+            QMessageBox.information(self, "Salvar", "Nao ha projeto carregado.")
+            return False
+        if self.project_manager.current_path is None:
+            return self._on_save_as_triggered()
+        if self._perform_save(None):
+            self.project_manager.mark_dirty(False)
+            self._update_window_title()
+            self._update_save_actions_enabled()
+            return True
+        return False
+
+    def _on_save_as_triggered(self, checked: bool = False) -> bool:  # noqa: ARG002
+        if self._grid_model is None:
+            QMessageBox.information(self, "Salvar", "Nao ha projeto carregado.")
+            return False
+        initial_path = (
+            str(self.project_manager.current_path)
+            if self.project_manager.current_path
+            else str(Path.cwd() / "projeto.gridlam")
+        )
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Salvar projeto",
+            initial_path,
+            "Projetos GridLam (*.gridlam);;Todos os arquivos (*)",
+        )
+        if not path:
+            return False
+        if not path.lower().endswith(".gridlam"):
+            path = f"{path}.gridlam"
+        if self._perform_save(path):
+            self.project_manager.current_path = Path(path)
+            self.project_manager.mark_dirty(False)
+            self._update_window_title()
+            self._update_save_actions_enabled()
+            return True
+        return False
+
+    def _on_project_dirty_changed(self, is_dirty: bool) -> None:
+        if self._grid_model is not None:
+            self._grid_model.dirty = is_dirty
+        self._update_window_title()
+        self._update_save_actions_enabled()
+
+    def _mark_dirty(self) -> None:
+        if self._grid_model is None:
+            return
+        self._grid_model.dirty = True
+        self.project_manager.mark_dirty(True)
+
+    def _update_save_actions_enabled(self) -> None:
+        has_model = self._grid_model is not None
+        if getattr(self, "save_action", None) is not None:
+            self.save_action.setEnabled(has_model and self.project_manager.is_dirty)
+        if getattr(self, "save_as_action", None) is not None:
+            self.save_as_action.setEnabled(has_model)
+
+    def _update_window_title(self) -> None:
+        title = self.base_title
+        if self.project_manager.current_path:
+            title = f"{title} - {self.project_manager.current_path.name}"
+        if self.project_manager.is_dirty:
+            title = f"{title} *"
+        self.setWindowTitle(title)
+
+    def _confirm_discard_changes(self) -> bool:
+        if not self.project_manager.is_dirty:
+            return True
+        response = QMessageBox.question(
+            self,
+            "Alteracoes pendentes",
+            "Voce possui alteracoes nao salvas. Deseja salvar antes de continuar?",
+            QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel,
+        )
+        if response == QMessageBox.Yes:
+            return self._on_save_triggered()
+        if response == QMessageBox.No:
+            return True
+        return False
+
+    def closeEvent(self, event: QCloseEvent) -> None:
+        if self._confirm_discard_changes():
+            event.accept()
+        else:
+            event.ignore()

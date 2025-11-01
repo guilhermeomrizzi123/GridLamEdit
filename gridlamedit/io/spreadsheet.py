@@ -44,7 +44,7 @@ LAMINATE_ALIASES = ("Laminate", "Laminate Name", "Laminado", "Nome")
 COLOR_ALIASES = ("Color", "Colour", "Cor", "ColorIdx", "Color Index")
 TYPE_ALIASES = ("Type", "Tipo")
 MATERIAL_ALIASES = ("Material",)
-ORIENTATION_ALIASES = ("Orientation", "OrientaAAo", "Orientacao", "Angle", "Angulo", "Angulo")
+ORIENTATION_ALIASES = ("Orientation", "Orientacao", "Orientacao", "Angle", "Angulo", "Angulo")
 ACTIVE_ALIASES = ("Active", "Ativo", "Status")
 SYMMETRY_ALIASES = ("Symmetry", "Simetria")
 INDEX_ALIASES = ("Index", "#", "Idx", "Ordem", "SequAancia", "Sequencia")
@@ -81,14 +81,14 @@ class GridModel:
     laminados: Dict[str, Laminado] = field(default_factory=OrderedDict)
     celulas_ordenadas: list[str] = field(default_factory=list)
     cell_to_laminate: Dict[str, str] = field(default_factory=dict)
-    source_path: Optional[str] = None
+    source_excel_path: Optional[str] = None
     dirty: bool = False
 
     def mark_dirty(self, value: bool = True) -> None:
         self.dirty = value
 
     def laminados_da_celula(self, cell_id: str) -> list[Laminado]:
-        """Retorna laminados associados a uma cAlula."""
+        """Retorna laminados associados a uma celula."""
         mapped_name = self.cell_to_laminate.get(cell_id)
         if mapped_name:
             laminado = self.laminados.get(mapped_name)
@@ -101,29 +101,29 @@ class GridModel:
 
 
 def normalize_angle(value: object) -> int:
-    """Normaliza a orientaAAo para inteiro dentro do conjunto permitido."""
+    """Normaliza a orientacao para inteiro dentro do conjunto permitido."""
     if value is None:
-        raise ValueError("orientaAAo ausente")
+        raise ValueError("orientacao ausente")
 
     if isinstance(value, bool):
-        raise ValueError(f"valor booleano invAlido para orientaAAo: {value!r}")
+        raise ValueError(f"valor booleano invalido para orientacao: {value!r}")
 
     if isinstance(value, (int, float)):
         if isinstance(value, float) and math.isnan(value):
-            raise ValueError("orientaAAo ausente")
+            raise ValueError("orientacao ausente")
         angle = int(round(float(value)))
     else:
         text = str(value).strip()
         if not text:
-            raise ValueError("orientaAAo ausente")
+            raise ValueError("orientacao ausente")
         cleaned = re.sub(r"[^\d\-]+", "", text)
         if not cleaned:
-            raise ValueError(f"orientaAAo invAlida: {value!r}")
+            raise ValueError(f"orientacao invalida: {value!r}")
         angle = int(cleaned)
 
     if angle not in ALLOWED_ANGLES:
         raise ValueError(
-            f"orientaAAo {angle} fora do conjunto permitido {sorted(ALLOWED_ANGLES)}"
+            f"orientacao {angle} fora do conjunto permitido {sorted(ALLOWED_ANGLES)}"
         )
     return angle
 
@@ -157,7 +157,7 @@ def normalize_bool(value: object) -> bool:
 
 
 def normalize_color(value: object, default: str = "#FFFFFF") -> str:
-    """Normaliza cores em #RRGGBB, aceitando nomes padrAo."""
+    """Normaliza cores em #RRGGBB, aceitando nomes padrao."""
     if value is None:
         return default
     if isinstance(value, (int, float)):
@@ -177,7 +177,7 @@ def normalize_color(value: object, default: str = "#FFFFFF") -> str:
     if color.isValid():
         return color.name().upper()
 
-    logger.warning("Cor invAlida '%s'; usando %s.", value, default)
+    logger.warning("Cor invalida '%s'; usando %s.", value, default)
     return default
 
 
@@ -198,13 +198,13 @@ def load_grid_spreadsheet(path: str) -> GridModel:
             "A planilha deve conter a aba 'Planilha1' no formato exportado pelo Grid Design."
         )
 
-    logger.info("Aba Planilha1 localizada a iniciando leitura.")
+    logger.info("Aba Planilha1 localizada - iniciando leitura.")
     df = _parse_sheet(workbook, "Planilha1")
     df = df.dropna(how="all").reset_index(drop=True)
     if df.empty:
         raise ValueError("Planilha1 nAo contAm dados para importar.")
 
-    # Extrai cAlulas e mapeamento utilizando a nova funAAo pAoblica.
+    # Extrai celulas e mapeamento utilizando a nova funcao pAoblica.
     celulas_ordenadas = parse_cells_from_planilha1(df)
     cells_info = _extract_cells_section(df)
     cell_to_laminate = cells_info.mapping
@@ -212,7 +212,7 @@ def load_grid_spreadsheet(path: str) -> GridModel:
     config_section = df.iloc[separator_idx + 1 :]
 
     if config_section.empty:
-        raise ValueError("Planilha1: seAAo de configuraAAo de laminados estA vazia.")
+        raise ValueError("Planilha1: secao de configuracao de laminados estA vazia.")
 
     laminados = _parse_configuration_section(config_section)
 
@@ -220,7 +220,7 @@ def load_grid_spreadsheet(path: str) -> GridModel:
         laminado = laminados.get(laminate_name)
         if laminado is None:
             logger.warning(
-                "CAlula '%s' associa laminado '%s', que nAo estA definido na seAAo de configuraAAo.",
+                "CAlula '%s' associa laminado '%s', que nAo estA definido na secao de configuracao.",
                 cell_id,
                 laminate_name,
             )
@@ -229,9 +229,9 @@ def load_grid_spreadsheet(path: str) -> GridModel:
             laminado.celulas.append(cell_id)
 
     total_camadas = sum(len(laminado.camadas) for laminado in laminados.values())
-    logger.info("CAlulas importadas: %s", ", ".join(celulas_ordenadas))
+    logger.info("Celulas importadas: %s", ", ".join(celulas_ordenadas))
     logger.info(
-        "Planilha carregada com %d laminados, %d camadas e %d cAlulas.",
+        "Planilha carregada com %d laminados, %d camadas e %d celulas.",
         len(laminados),
         total_camadas,
         len(celulas_ordenadas),
@@ -242,6 +242,7 @@ def load_grid_spreadsheet(path: str) -> GridModel:
         celulas_ordenadas=celulas_ordenadas,
         cell_to_laminate=dict(cell_to_laminate),
     )
+    model.source_excel_path = str(file_path)
     return model
 
 
@@ -251,13 +252,13 @@ def save_grid_spreadsheet(path: str, model: GridModel) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     rows: list[list[object]] = []
 
-    # SeAAo de cAlulas.
+    # Secao de celulas.
     rows.append(["Cells", "Laminate"])
     for cell_id in model.celulas_ordenadas:
         rows.append([cell_id, model.cell_to_laminate.get(cell_id, "")])
     rows.append(["#"])
 
-    # SeAAo de configuraAAo por laminado.
+    # Secao de configuracao por laminado.
     laminados_iter = model.laminados.values()
     for laminado in laminados_iter:
         rows.append(["Name", laminado.nome])
@@ -308,7 +309,7 @@ def save_grid_spreadsheet(path: str, model: GridModel) -> None:
 class StackingTableModel(QAbstractTableModel):
     """Apresenta as camadas do laminado na tabela de stacking."""
 
-    headers = ["Material", "OrientaAAo", "Ativo", "Simetria"]
+    headers = ["Material", "Orientacao", "Ativo", "Simetria"]
 
     def __init__(self, camadas: list[Camada] | None = None) -> None:
         super().__init__()
@@ -377,7 +378,7 @@ def bind_model_to_ui(model: GridModel, ui) -> None:
 
 def bind_cells_to_ui(model: GridModel, ui) -> None:
     """
-    Popula o listbox de cAlulas com base em ``model.celulas_ordenadas``.
+    Popula o listbox de celulas com base em ``model.celulas_ordenadas``.
     """
     list_widget = getattr(ui, "lstCelulas", None)
     if not isinstance(list_widget, QListWidget):
@@ -424,7 +425,7 @@ def _open_workbook(file_path: Path, ext: str) -> _WorkbookProtocol:
         if "not a zip file" in str(exc).lower():
             return _open_with_xlrd(file_path, exc)
         raise ValueError(f"NAo foi possAvel abrir '{file_path}': {exc}") from exc
-    except Exception as exc:  # pragma: no cover - proteAAo
+    except Exception as exc:  # pragma: no cover - protecao
         raise ValueError(f"NAo foi possAvel abrir '{file_path}': {exc}") from exc
     return workbook  # type: ignore[return-value]
 
@@ -487,7 +488,7 @@ def _first_non_blank_value(row: pd.Series) -> Optional[str]:
 
 
 def _extract_cells_section(df: pd.DataFrame) -> _CellsSection:
-    """Localiza a seAAo de cAlulas em Planilha1 e retorna dados estruturados."""
+    """Localiza a secao de celulas em Planilha1 e retorna dados estruturados."""
     separator_idx = _find_separator_row(df)
     if separator_idx is None:
         raise ValueError(
@@ -496,7 +497,7 @@ def _extract_cells_section(df: pd.DataFrame) -> _CellsSection:
 
     cells_header_idx = _find_cells_header_row(df, separator_idx)
     if cells_header_idx is None:
-        raise ValueError("NAo foi possAvel localizar a seAAo 'Cells' em Planilha1.")
+        raise ValueError("NAo foi possAvel localizar a secao 'Cells' em Planilha1.")
 
     header_row = df.iloc[cells_header_idx]
     header_keys = [
@@ -523,7 +524,7 @@ def _extract_cells_section(df: pd.DataFrame) -> _CellsSection:
         cell_id = str(cell_value).strip().upper()
         if not CELL_ID_PATTERN.match(cell_id):
             logger.warning(
-                "Linha %d da seAAo 'Cells': cAlula '%s' invAlida, ignorada.",
+                "Linha %d da secao 'Cells': celula '%s' invalida, ignorada.",
                 row_idx + 1,
                 cell_value,
             )
@@ -538,10 +539,10 @@ def _extract_cells_section(df: pd.DataFrame) -> _CellsSection:
                 cell_to_laminate[cell_id] = str(laminate_value).strip()
 
     if not cells_ordered:
-        raise ValueError("NAo hA cAlulas vAlidas entre 'Cells' e '#' em Planilha1.")
+        raise ValueError("NAo hA celulas vAlidas entre 'Cells' e '#' em Planilha1.")
 
     logger.info(
-        "SeAAo 'Cells' processada com %d cAlulas distintas.",
+        "Secao 'Cells' processada com %d celulas distintas.",
         len(cells_ordered),
     )
     return _CellsSection(cells=cells_ordered, mapping=cell_to_laminate, separator_idx=separator_idx)
@@ -617,7 +618,7 @@ def _parse_configuration_section(
                 break
 
             logger.warning(
-                "Linha %d: rA3tulo '%s' desconhecido na configuraAAo de laminados; ignorando.",
+                "Linha %d: rA3tulo '%s' desconhecido na configuracao de laminados; ignorando.",
                 idx + 1,
                 first_val,
             )
@@ -644,7 +645,7 @@ def _parse_configuration_section(
                 orientation = normalize_angle(orientation_raw)
             except ValueError as exc:
                 raise ValueError(
-                    f"Linha {idx + 1}: laminado '{laminate_name}' possui orientaAAo invAlida ({exc})."
+                    f"Linha {idx + 1}: laminado '{laminate_name}' possui orientacao invalida ({exc})."
                 ) from exc
 
             active_raw = row.iloc[2] if len(row) > 2 else None
@@ -667,7 +668,7 @@ def _parse_configuration_section(
 
         if not layers:
             logger.warning(
-                "Laminado '%s' nAo possui camadas definidas na seAAo de stacking.",
+                "Laminado '%s' nAo possui camadas definidas na secao de stacking.",
                 laminate_name,
             )
 
@@ -681,7 +682,7 @@ def _parse_configuration_section(
 
     if not laminados:
         raise ValueError(
-            "Planilha1: seAAo de configuraAAo nAo definiu nenhum laminado."
+            "Planilha1: secao de configuracao nAo definiu nenhum laminado."
         )
 
     return laminados
@@ -701,7 +702,7 @@ def _require_column(
     column = _find_column(header_keys, aliases)
     if column is None:
         raise ValueError(
-            f"Coluna obrigatA3ria '{display_name}' ausente em Planilha1 (seAAo de configuraAAo abaixo de '#')."
+            f"Coluna obrigatA3ria '{display_name}' ausente em Planilha1 (secao de configuracao abaixo de '#')."
         )
     return column
 
@@ -896,8 +897,8 @@ class _GridUiBinding:
             self._update_associated_cells_text(old)
         self._update_associated_cells_text(laminate_name)
         self._laminates_by_cell = self._build_cell_index()
-        if hasattr(self.ui, "_set_dirty"):
-            self.ui._set_dirty(True)
+        if hasattr(self.ui, "_mark_dirty"):
+            self.ui._mark_dirty()
 
     def _update_associated_cells_text(self, laminate_name: str) -> None:
         lam = self.model.laminados.get(laminate_name)
@@ -985,7 +986,7 @@ def _resolve_int(value: object, default: Optional[int] = None) -> Optional[int]:
             return int(value)
         return int(str(value).strip())
     except (TypeError, ValueError):
-        logger.warning("Valor de Andice invAlido '%s'; usando padrAo.", value)
+        logger.warning("Valor de Indice invalido '%s'; usando padrao.", value)
         return default
 
 
@@ -1004,7 +1005,7 @@ class _CellsSection:
 
 def parse_cells_from_planilha1(df: pd.DataFrame) -> list[str]:
     """
-    Retorna a lista de cAlulas listadas entre a linha 'Cells' e a linha separadora '#'.
+    Retorna a lista de celulas listadas entre a linha 'Cells' e a linha separadora '#'.
     """
     sanitized = df.dropna(how="all").reset_index(drop=True)
     section = _extract_cells_section(sanitized)
