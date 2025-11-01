@@ -40,18 +40,17 @@ logger = logging.getLogger(__name__)
 
 ALLOWED_ANGLES = {-90, -45, 0, 45, 90}
 
-# Normalized column aliases (accents, casing, and spaces are ignored).
-LAMINATE_ALIASES = ("Laminate", "Laminate Name", "Laminado", "Name", "Nome")
+LAMINATE_ALIASES = ("Laminate", "Laminate Name", "Laminado", "Nome")
 COLOR_ALIASES = ("Color", "Colour", "Cor")
 TYPE_ALIASES = ("Type", "Tipo")
-CELLS_ALIASES = ("Cells", "Células", "Celulas", "Cell List")
 MATERIAL_ALIASES = ("Material",)
 ORIENTATION_ALIASES = ("Orientation", "Orientação", "Orientacao", "Angle", "Ângulo", "Angulo")
 ACTIVE_ALIASES = ("Active", "Ativo", "Status")
 SYMMETRY_ALIASES = ("Symmetry", "Simetria")
 INDEX_ALIASES = ("Index", "#", "Idx", "Ordem", "Sequência", "Sequencia")
-CELL_ID_ALIASES = ("Cell", "Cell ID", "Célula", "Celula", "ID")
 
+CELL_MAPPING_ALIASES = ("Cell", "Celula", "Célula", "C")
+CELL_ID_PATTERN = re.compile(r"^C\d+$", re.IGNORECASE)
 
 @dataclass
 class Camada:
@@ -172,12 +171,6 @@ def normalize_color(value: object, default: str = "#FFFFFF") -> str:
     return default
 
 
-def safe_col(df: pd.DataFrame, *aliases: str) -> pd.Series:
-    """Retorna a primeira coluna que casar com os aliases informados."""
-    column_name = _resolve_column(df, aliases)
-    return df[column_name]
-
-
 def load_grid_spreadsheet(path: str) -> GridModel:
     """Carrega a planilha do Grid Design em um GridModel."""
     file_path = Path(path)
@@ -188,62 +181,61 @@ def load_grid_spreadsheet(path: str) -> GridModel:
     if ext not in {".xls", ".xlsx"}:
         raise ValueError("Formato de planilha não suportado (use .xls ou .xlsx).")
 
-    if ext == ".xls":
-        if xlrd is None:
-            raise ValueError(
-                "Leitura de arquivos .xls requer a dependência 'xlrd==1.2.0'."
-            )
-        workbook: _WorkbookProtocol = _XlrdWorkbook(file_path)
-    else:
-        try:
-            workbook = pd.ExcelFile(file_path, engine="openpyxl")  # type: ignore[assignment]
-        except _OPEN_EXCEL_EXCEPTIONS as exc:
-            workbook = _open_with_xlrd(file_path, exc)
-        except ValueError as exc:
-            if "not a zip file" in str(exc).lower():
-                workbook = _open_with_xlrd(file_path, exc)
-            else:
-                raise ValueError(f"Não foi possível abrir '{path}': {exc}") from exc
-        except Exception as exc:  # pragma: no cover - proteção
-            raise ValueError(f"Não foi possível abrir '{path}': {exc}") from exc
+    workbook = _open_workbook(file_path, ext)
+    if "Planilha1" not in workbook.sheet_names:
+        logger.error("Aba Planilha1 ausente.")
+        raise ValueError(
+            "A planilha deve conter a aba 'Planilha1' no formato exportado pelo Grid Design."
+        )
 
-    metadata_info: Optional[tuple[str, pd.DataFrame]] = None
-    stacking_info: Optional[tuple[str, pd.DataFrame]] = None
-    cells_info: Optional[tuple[str, pd.DataFrame]] = None
+    logger.info("Aba Planilha1 localizada — iniciando leitura.")
+    df = workbook.parse("Planilha1", header=None, dtype=object)
+    df = df.dropna(how="all")
+    if df.empty:
+        raise ValueError("Planilha1 não contém dados para importar.")
 
-    for sheet_name in workbook.sheet_names:
-        df = workbook.parse(sheet_name)
-        df = df.dropna(how="all")
-        if df.empty:
+    separator_idx = _find_separator_row(df)
+    if separator_idx is None:
+        raise ValueError(
+            "A aba 'Planilha1' deve conter uma linha separadora com '#' dividindo mapeamento de células e configuração de laminados."
+        )
+    logger.info("Separador '#' localizado na linha %d.", separator_idx + 1)
+
+    mapping_section = df.iloc[:separator_idx]
+    config_section = df.iloc[separator_idx + 1 :]
+
+    if mapping_section.empty:
+        raise ValueError("Planilha1: seção de mapeamento de células está vazia.")
+    if config_section.empty:
+        raise ValueError("Planilha1: seção de configuração de laminados está vazia.")
+
+    celulas_ordenadas, cell_to_laminate = _parse_mapping_section(mapping_section)
+    laminados = _parse_configuration_section(config_section)
+
+    for cell_id in celulas_ordenadas:
+        laminate_name = cell_to_laminate.get(cell_id)
+        if not laminate_name:
             continue
+        laminado = laminados.get(laminate_name)
+        if laminado is None:
+            logger.warning(
+                "Célula '%s' associa laminado '%s', que não está definido na seção de configuração.",
+                cell_id,
+                laminate_name,
+            )
+            continue
+        if cell_id not in laminado.celulas:
+            laminado.celulas.append(cell_id)
 
-        classification = _classify_sheet(df)
-        if classification == "stacking" and stacking_info is None:
-            stacking_info = (sheet_name, df.reset_index(drop=True))
-        elif classification == "metadata" and metadata_info is None:
-            metadata_info = (sheet_name, df.reset_index(drop=True))
-        elif classification == "cells" and cells_info is None:
-            cells_info = (sheet_name, df.reset_index(drop=True))
+    total_camadas = sum(len(laminado.camadas) for laminado in laminados.values())
+    logger.info(
+        "Planilha carregada com %d laminados, %d camadas e %d células.",
+        len(laminados),
+        total_camadas,
+        len(celulas_ordenadas),
+    )
 
-    if metadata_info is None:
-        raise ValueError("A planilha não possui aba de metadados de laminados.")
-    if stacking_info is None:
-        raise ValueError("A planilha não possui aba de stacking de camadas.")
-
-    laminados = _parse_metadata(metadata_info[1])
-    _parse_stacking_into_laminados(stacking_info[1], laminados)
-    celulas_ordenadas = _parse_cells_sheet(cells_info[1]) if cells_info else _infer_cells(laminados)
-
-    if cells_info:
-        reconhecidas = set(celulas_ordenadas)
-        for laminado in laminados.values():
-            for cell_id in laminado.celulas:
-                if cell_id not in reconhecidas:
-                    logger.warning(
-                        "Célula '%s' referenciada no laminado '%s' não existe na aba de células.",
-                        cell_id,
-                        laminado.nome,
-                    )
+    return GridModel(laminados=laminados, celulas_ordenadas=celulas_ordenadas)
 
     total_camadas = sum(len(laminado.camadas) for laminado in laminados.values())
     logger.info(
@@ -336,6 +328,27 @@ class _WorkbookProtocol(Protocol):
         ...
 
 
+def _open_workbook(file_path: Path, ext: str) -> _WorkbookProtocol:
+    if ext == ".xls":
+        if xlrd is None:
+            raise ValueError(
+                "Leitura de arquivos .xls requer a dependência 'xlrd==1.2.0'."
+            )
+        return _XlrdWorkbook(file_path)
+
+    try:
+        workbook = pd.ExcelFile(file_path, engine="openpyxl")
+    except _OPEN_EXCEL_EXCEPTIONS as exc:
+        return _open_with_xlrd(file_path, exc)
+    except ValueError as exc:
+        if "not a zip file" in str(exc).lower():
+            return _open_with_xlrd(file_path, exc)
+        raise ValueError(f"Não foi possível abrir '{file_path}': {exc}") from exc
+    except Exception as exc:  # pragma: no cover - proteção
+        raise ValueError(f"Não foi possível abrir '{file_path}': {exc}") from exc
+    return workbook  # type: ignore[return-value]
+
+
 def _normalize_header(value: str) -> str:
     normalized = unicodedata.normalize("NFKD", value)
     ascii_only = "".join(ch for ch in normalized if not unicodedata.combining(ch))
@@ -343,216 +356,227 @@ def _normalize_header(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", "", ascii_only)
 
 
-def _resolve_column(df: pd.DataFrame, aliases: Iterable[str]) -> str:
-    normalized_map: dict[str, str] = {}
-    for column in df.columns:
-        if not isinstance(column, str):
-            continue
-        key = _normalize_header(column)
-        if key:
-            normalized_map.setdefault(key, column)
-
-    for alias in aliases:
-        key = _normalize_header(alias)
-        if key and key in normalized_map:
-            return normalized_map[key]
-
-    friendly = ", ".join(aliases)
-    raise ValueError(f"Coluna obrigatória ausente ({friendly}).")
-
-
-def _classify_sheet(df: pd.DataFrame) -> Optional[str]:
-    columns = {_normalize_header(str(col)) for col in df.columns if isinstance(col, str)}
-
-    def has_alias(aliases: Iterable[str]) -> bool:
-        return any(_normalize_header(alias) in columns for alias in aliases)
-
-    if has_alias(LAMINATE_ALIASES) and has_alias(MATERIAL_ALIASES) and has_alias(ORIENTATION_ALIASES):
-        return "stacking"
-    if has_alias(LAMINATE_ALIASES) and (
-        has_alias(COLOR_ALIASES) or has_alias(TYPE_ALIASES) or has_alias(CELLS_ALIASES)
-    ):
-        return "metadata"
-    if has_alias(CELL_ID_ALIASES):
-        return "cells"
+def _find_separator_row(df: pd.DataFrame) -> Optional[int]:
+    for idx, row in df.iterrows():
+        for value in row:
+            if _is_blank(value):
+                continue
+            if _is_separator_token(value):
+                return idx
+            break
     return None
 
 
-def _parse_metadata(df: pd.DataFrame) -> OrderedDict[str, Laminado]:
-    name_series = safe_col(df, *LAMINATE_ALIASES)
-    try:
-        color_series = safe_col(df, *COLOR_ALIASES)
-    except ValueError:
-        color_series = None
-    try:
-        type_series = safe_col(df, *TYPE_ALIASES)
-    except ValueError:
-        type_series = None
-    try:
-        cells_series = safe_col(df, *CELLS_ALIASES)
-    except ValueError:
-        cells_series = None
+def _is_separator_token(value: object) -> bool:
+    text = str(value).strip().lower()
+    text = text.replace(" ", "")
+    return text == "#"
+
+
+def _parse_mapping_section(
+    df: pd.DataFrame,
+) -> tuple[list[str], dict[str, Optional[str]]]:
+    df = df.reset_index(drop=True)
+    header_row = df.iloc[0]
+    header_keys = [
+        _normalize_header(str(value)) if not _is_blank(value) else ""
+        for value in header_row
+    ]
+
+    cell_col = _find_column(header_keys, CELL_MAPPING_ALIASES)
+    laminate_col = _find_column(header_keys, LAMINATE_ALIASES)
+
+    data_start = 1
+    if cell_col is None or laminate_col is None:
+        if df.shape[1] < 2:
+            raise ValueError(
+                "Planilha1: seção de mapeamento deve conter ao menos duas colunas (célula e laminado)."
+            )
+        cell_col = 0
+        laminate_col = 1
+        data_start = 0
+
+    cells_ordered: list[str] = []
+    cell_to_laminate: dict[str, Optional[str]] = {}
+
+    for row_offset, (_, row) in enumerate(df.iloc[data_start:].iterrows(), start=data_start + 1):
+        cell_raw = row.iloc[cell_col]
+        laminate_raw = row.iloc[laminate_col] if laminate_col < len(row) else None
+
+        if _is_blank(cell_raw) and _is_blank(laminate_raw):
+            continue
+
+        if _is_blank(cell_raw):
+            logger.warning(
+                "Linha %d da seção de mapeamento: célula vazia ignorada.",
+                row_offset,
+            )
+            continue
+
+        cell_id = str(cell_raw).strip().upper()
+        if not CELL_ID_PATTERN.match(cell_id):
+            logger.warning(
+                "Linha %d da seção de mapeamento: célula '%s' inválida, ignorada.",
+                row_offset,
+                cell_raw,
+            )
+            continue
+
+        laminate_name = (
+            str(laminate_raw).strip() if not _is_blank(laminate_raw) else None
+        )
+
+        if cell_id not in cells_ordered:
+            cells_ordered.append(cell_id)
+        if laminate_name:
+            cell_to_laminate[cell_id] = laminate_name
+
+    if not cells_ordered:
+        raise ValueError(
+            "Planilha1: seção de mapeamento não contém células válidas."
+        )
+
+    return cells_ordered, cell_to_laminate
+
+
+def _parse_configuration_section(
+    df: pd.DataFrame,
+) -> OrderedDict[str, Laminado]:
+    df = df.reset_index(drop=True)
+    header_row = df.iloc[0]
+    header_keys = [
+        _normalize_header(str(value)) if not _is_blank(value) else ""
+        for value in header_row
+    ]
+
+    laminate_col = _require_column(
+        header_keys, LAMINATE_ALIASES, "Laminate"
+    )
+    index_col = _require_column(header_keys, INDEX_ALIASES, "Index")
+    material_col = _require_column(header_keys, MATERIAL_ALIASES, "Material")
+    orientation_col = _require_column(
+        header_keys, ORIENTATION_ALIASES, "Orientation"
+    )
+    active_col = _require_column(header_keys, ACTIVE_ALIASES, "Active")
+    symmetry_col = _require_column(header_keys, SYMMETRY_ALIASES, "Symmetry")
+    type_col = _find_column(header_keys, TYPE_ALIASES)
+    color_col = _find_column(header_keys, COLOR_ALIASES)
+
+    if color_col is None:
+        logger.warning(
+            "Coluna 'Color' ausente em Planilha1; utilizando '#FFFFFF' como padrão."
+        )
 
     laminados: OrderedDict[str, Laminado] = OrderedDict()
 
-    for idx in range(len(df)):
-        raw_name = name_series.iat[idx]
-        name = str(raw_name).strip() if not pd.isna(raw_name) else ""
-        if not name:
-            raise ValueError(f"Linha {idx + 2}: laminado sem nome.")
+    for row_offset, (_, row) in enumerate(df.iloc[1:].iterrows(), start=2):
+        laminate_raw = row.iloc[laminate_col]
+        if _is_blank(laminate_raw):
+            continue
+        laminate_name = str(laminate_raw).strip()
 
-        raw_color = color_series.iat[idx] if color_series is not None else None
-        color = normalize_color(raw_color)
+        material_raw = row.iloc[material_col] if material_col < len(row) else None
+        if _is_blank(material_raw):
+            raise ValueError(
+                f"Linha {row_offset}: laminado '{laminate_name}' sem material definido."
+            )
+        material = str(material_raw).strip()
 
-        raw_type = type_series.iat[idx] if type_series is not None else ""
-        laminate_type = ""
-        if raw_type is not None and not (isinstance(raw_type, float) and math.isnan(raw_type)):  # type: ignore[arg-type]
-            laminate_type = str(raw_type).strip()
-
-        raw_cells = cells_series.iat[idx] if cells_series is not None else ""
-        cells = _split_cells(raw_cells)
-
-        laminados[name] = Laminado(
-            nome=name,
-            cor_hex=color,
-            tipo=laminate_type,
-            celulas=cells,
-            camadas=[],
-        )
-
-    return laminados
-
-
-def _parse_stacking_into_laminados(df: pd.DataFrame, laminados: OrderedDict[str, Laminado]) -> None:
-    laminate_series = safe_col(df, *LAMINATE_ALIASES)
-    material_series = safe_col(df, *MATERIAL_ALIASES)
-    orientation_series = safe_col(df, *ORIENTATION_ALIASES)
-
-    try:
-        active_series = safe_col(df, *ACTIVE_ALIASES)
-    except ValueError:
-        active_series = None
-    try:
-        symmetry_series = safe_col(df, *SYMMETRY_ALIASES)
-    except ValueError:
-        symmetry_series = None
-    try:
-        index_series = safe_col(df, *INDEX_ALIASES)
-    except ValueError:
-        index_series = None
-
-    layers_by_laminate: dict[str, list[Camada]] = {name: [] for name in laminados.keys()}
-
-    for idx in range(len(df)):
-        raw_laminate = laminate_series.iat[idx]
-        laminate_name = str(raw_laminate).strip() if not pd.isna(raw_laminate) else ""
-        if not laminate_name:
-            raise ValueError(f"Linha {idx + 2}: camada sem laminado associado.")
-
-        raw_material = material_series.iat[idx]
-        material = str(raw_material).strip() if not pd.isna(raw_material) else ""
-        if not material:
-            raise ValueError(f"Laminado '{laminate_name}' possui camada sem material.")
-
+        orientation_raw = row.iloc[orientation_col] if orientation_col < len(row) else None
         try:
-            orientation = normalize_angle(orientation_series.iat[idx])
+            orientation = normalize_angle(orientation_raw)
         except ValueError as exc:
             raise ValueError(
-                f"Laminado '{laminate_name}' possui camada com orientação inválida: {exc}"
+                f"Linha {row_offset}: laminado '{laminate_name}' possui orientação inválida ({exc})."
             ) from exc
 
-        active = (
-            normalize_bool(active_series.iat[idx])
-            if active_series is not None
-            else True
-        )
-        symmetry = (
-            normalize_bool(symmetry_series.iat[idx])
-            if symmetry_series is not None
-            else False
+        active_raw = row.iloc[active_col] if active_col < len(row) else None
+        symmetry_raw = row.iloc[symmetry_col] if symmetry_col < len(row) else None
+        active = normalize_bool(active_raw) if not _is_blank(active_raw) else True
+        symmetry = normalize_bool(symmetry_raw) if not _is_blank(symmetry_raw) else False
+
+        layer_index = _resolve_int(
+            row.iloc[index_col] if index_col < len(row) else None, default=None
         )
 
-        if index_series is not None:
-            raw_index = index_series.iat[idx]
-            if pd.isna(raw_index):
-                layer_index = len(layers_by_laminate.get(laminate_name, []))
-            else:
-                try:
-                    layer_index = int(raw_index)
-                except (TypeError, ValueError):
-                    layer_index = len(layers_by_laminate.get(laminate_name, []))
-        else:
-            layer_index = len(layers_by_laminate.get(laminate_name, []))
+        color_value = (
+            row.iloc[color_col] if color_col is not None and color_col < len(row) else None
+        )
+        has_color_value = color_col is not None and not _is_blank(color_value)
+        color = normalize_color(color_value if has_color_value else None)
 
-        if laminate_name not in laminados:
-            logger.warning(
-                "Laminado '%s' encontrado no stacking mas não presente na aba de metadados; usando valores padrão.",
-                laminate_name,
-            )
-            laminados[laminate_name] = Laminado(
+        type_value = (
+            row.iloc[type_col] if type_col is not None and type_col < len(row) else ""
+        )
+        laminate_type = _string_or_empty(type_value)
+
+        laminado = laminados.get(laminate_name)
+        if laminado is None:
+            laminado = Laminado(
                 nome=laminate_name,
-                cor_hex="#FFFFFF",
-                tipo="",
+                cor_hex=color,
+                tipo=laminate_type,
                 celulas=[],
                 camadas=[],
             )
-            layers_by_laminate.setdefault(laminate_name, [])
+            laminados[laminate_name] = laminado
+        else:
+            if laminate_type and not laminado.tipo:
+                laminado.tipo = laminate_type
+            elif laminate_type and laminado.tipo and laminado.tipo != laminate_type:
+                logger.warning(
+                    "Tipo divergente para laminado '%s'; mantendo '%s'.",
+                    laminate_name,
+                    laminado.tipo,
+                )
+            if has_color_value and (laminado.cor_hex == "#FFFFFF" or laminado.cor_hex == ""):
+                laminado.cor_hex = color
+            elif has_color_value and laminado.cor_hex not in ("", "#FFFFFF") and laminado.cor_hex != color:
+                logger.warning(
+                    "Cor divergente para laminado '%s'; mantendo '%s'.",
+                    laminate_name,
+                    laminado.cor_hex,
+                )
 
         camada = Camada(
-            idx=layer_index,
+            idx=layer_index if layer_index is not None else len(laminado.camadas),
             material=material,
             orientacao=orientation,
             ativo=active,
             simetria=symmetry,
         )
-        layers_by_laminate.setdefault(laminate_name, []).append(camada)
+        laminado.camadas.append(camada)
 
-    for laminate_name, layers in layers_by_laminate.items():
-        for new_idx, camada in enumerate(layers):
-            camada.idx = new_idx
-        laminados[laminate_name].camadas = layers
+    if not laminados:
+        raise ValueError(
+            "Planilha1: seção de configuração não definiu nenhum laminado."
+        )
 
-
-def _parse_cells_sheet(df: pd.DataFrame) -> list[str]:
-    cell_series = safe_col(df, *CELL_ID_ALIASES)
-    ordered_cells: list[str] = []
-    seen: set[str] = set()
-
-    for value in cell_series:
-        if pd.isna(value):
-            continue
-        cell_id = str(value).strip()
-        if not cell_id or cell_id in seen:
-            continue
-        ordered_cells.append(cell_id)
-        seen.add(cell_id)
-    return ordered_cells
-
-
-def _infer_cells(laminados: OrderedDict[str, Laminado]) -> list[str]:
-    ordered: list[str] = []
-    seen: set[str] = set()
     for laminado in laminados.values():
-        for cell_id in laminado.celulas:
-            if cell_id not in seen:
-                ordered.append(cell_id)
-                seen.add(cell_id)
-    return ordered
+        laminado.camadas.sort(key=lambda layer: layer.idx)
+        for idx, camada in enumerate(laminado.camadas):
+            camada.idx = idx
+
+    return laminados
 
 
-def _split_cells(value: object) -> list[str]:
-    if value is None:
-        return []
-    if isinstance(value, (int, float)):
-        if isinstance(value, float) and math.isnan(value):
-            return []
-        value = str(value)
+def _find_column(header_keys: list[str], aliases: Iterable[str]) -> Optional[int]:
+    normalized_aliases = {_normalize_header(alias) for alias in aliases}
+    for idx, key in enumerate(header_keys):
+        if key in normalized_aliases:
+            return idx
+    return None
 
-    text = str(value).strip()
-    if not text:
-        return []
-    parts = re.split(r"[;,]", text)
-    return [part.strip() for part in parts if part.strip()]
+
+def _require_column(
+    header_keys: list[str], aliases: Iterable[str], display_name: str
+) -> int:
+    column = _find_column(header_keys, aliases)
+    if column is None:
+        raise ValueError(
+            f"Coluna obrigatória '{display_name}' ausente em Planilha1 (seção de configuração abaixo de '#')."
+        )
+    return column
 
 
 class _GridUiBinding:
@@ -767,3 +791,21 @@ def _is_blank(value: object) -> bool:
     if isinstance(value, float):
         return math.isnan(value)
     return False
+
+
+def _resolve_int(value: object, default: Optional[int] = None) -> Optional[int]:
+    if _is_blank(value):
+        return default
+    try:
+        if isinstance(value, float) and value.is_integer():
+            return int(value)
+        return int(str(value).strip())
+    except (TypeError, ValueError):
+        logger.warning("Valor de índice inválido '%s'; usando padrão.", value)
+        return default
+
+
+def _string_or_empty(value: object) -> str:
+    if _is_blank(value):
+        return ""
+    return str(value).strip()
