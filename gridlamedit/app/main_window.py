@@ -27,7 +27,12 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from gridlamedit.io.spreadsheet import GridModel, bind_model_to_ui, load_grid_spreadsheet
+from gridlamedit.io.spreadsheet import (
+    GridModel,
+    bind_cells_to_ui,
+    bind_model_to_ui,
+    load_grid_spreadsheet,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -100,6 +105,7 @@ class MainWindow(QMainWindow):
 
         self.cells_list = QListWidget(panel)
         self.cells_list.setSelectionMode(QListWidget.SingleSelection)
+        self.lstCelulas = self.cells_list
 
         layout.addWidget(title)
         layout.addWidget(self.cells_list)
@@ -249,6 +255,7 @@ class MainWindow(QMainWindow):
             return
 
         bind_model_to_ui(model, self)
+        bind_cells_to_ui(model, self)
         self._grid_model = model
         if self.statusBar():
             self.statusBar().showMessage(
