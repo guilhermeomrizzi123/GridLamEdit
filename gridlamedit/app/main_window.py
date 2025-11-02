@@ -45,6 +45,7 @@ from gridlamedit.io.spreadsheet import (
     load_grid_spreadsheet,
     normalize_angle,
 )
+from gridlamedit.services.excel_io import export_grid_xlsx
 
 logger = logging.getLogger(__name__)
 
@@ -68,6 +69,7 @@ class MainWindow(QMainWindow):
 
         self.ui_state = UiState.VIEW
         self._setup_toolbar()
+        self._setup_menu_bar()
         self._setup_central_widget()
         self._setup_status_bar()
         self._update_save_actions_enabled()
@@ -79,9 +81,10 @@ class MainWindow(QMainWindow):
         toolbar.setContentsMargins(8, 4, 8, 4)
 
         action_specs: List[
-            tuple[str, callable, str, Optional[QKeySequence], bool]
+            tuple[str, str, callable, str, Optional[QKeySequence], bool]
         ] = [
             (
+                "open_project_action",
                 "Abrir Projeto",
                 self._on_open_project,
                 "Abrir arquivo de projeto GridLam.",
@@ -89,6 +92,7 @@ class MainWindow(QMainWindow):
                 False,
             ),
             (
+                "load_spreadsheet_action",
                 "Carregar Planilha",
                 self._load_spreadsheet,
                 "Importar planilha do Grid Design.",
@@ -96,6 +100,7 @@ class MainWindow(QMainWindow):
                 False,
             ),
             (
+                "new_laminate_action",
                 "Novo Laminado",
                 self._enter_creating_mode,
                 "Cadastrar um novo laminado.",
@@ -103,6 +108,7 @@ class MainWindow(QMainWindow):
                 True,
             ),
             (
+                "save_action",
                 "Salvar",
                 self._on_save_triggered,
                 "Salvar alteracoes no projeto atual.",
@@ -110,33 +116,47 @@ class MainWindow(QMainWindow):
                 False,
             ),
             (
+                "save_as_action",
                 "Salvar Como",
                 self._on_save_as_triggered,
                 "Salvar o projeto em um novo arquivo.",
                 QKeySequence.SaveAs,
                 False,
             ),
+            (
+                "export_excel_action",
+                "Exportar Planilha",
+                self._on_export_excel,
+                "Exportar planilha Excel com as alteracoes atuais.",
+                QKeySequence("Ctrl+E"),
+                False,
+            ),
         ]
 
-        self.save_action: Optional[QAction] = None
-        self.save_as_action: Optional[QAction] = None
-
-        for text, handler, tip, shortcut, insert_separator in action_specs:
+        for attr_name, text, handler, tip, shortcut, insert_separator in action_specs:
             action = QAction(text, self)
             action.setStatusTip(tip)
             if shortcut is not None:
                 action.setShortcut(shortcut)
             action.triggered.connect(handler)  # type: ignore[arg-type]
             toolbar.addAction(action)
-            if text == "Salvar":
-                self.save_action = action
-            elif text == "Salvar Como":
-                self.save_as_action = action
+            setattr(self, attr_name, action)
             if insert_separator:
                 toolbar.addSeparator()
 
         self.addToolBar(toolbar)
         self._update_save_actions_enabled()
+
+    def _setup_menu_bar(self) -> None:
+        menu_bar = self.menuBar()
+        file_menu = menu_bar.addMenu("Arquivo")
+        file_menu.addAction(self.open_project_action)
+        file_menu.addAction(self.load_spreadsheet_action)
+        file_menu.addAction(self.new_laminate_action)
+        file_menu.addSeparator()
+        file_menu.addAction(self.save_action)
+        file_menu.addAction(self.save_as_action)
+        file_menu.addAction(self.export_excel_action)
 
     def _setup_central_widget(self) -> None:
         self.view_editor = self._build_editor_view()
@@ -609,6 +629,7 @@ class MainWindow(QMainWindow):
                 binding._apply_laminate(laminate_name)  # type: ignore[attr-defined]
             except Exception as exc:  # pragma: no cover - defensive
                 logger.warning("Nao foi possivel aplicar novo laminado: %s", exc)
+        self._update_save_actions_enabled()
 
     def _text(self, item: Optional[QTableWidgetItem]) -> str:
         return item.text().strip() if item is not None else ""
@@ -827,6 +848,52 @@ class MainWindow(QMainWindow):
             return True
         return False
 
+    def _on_export_excel(self, checked: bool = False) -> bool:  # noqa: ARG002
+        if self._grid_model is None or not self._grid_model.laminados:
+            QMessageBox.information(
+                self,
+                "Exportar planilha",
+                "Carregue uma planilha ou projeto antes de exportar.",
+            )
+            return False
+
+        source_path = self._grid_model.source_excel_path
+        if source_path:
+            base_path = Path(source_path)
+            suggested = base_path.with_name(f"{base_path.stem}_editado.xlsx")
+        else:
+            suggested = Path.cwd() / "grid_export.xlsx"
+
+        path_str, _ = QFileDialog.getSaveFileName(
+            self,
+            "Exportar planilha do Grid Design",
+            str(suggested),
+            "Planilhas Excel (*.xlsx *.xls);;Todos os arquivos (*)",
+        )
+        if not path_str:
+            return False
+
+        target_path = Path(path_str)
+        try:
+            final_path = export_grid_xlsx(self._grid_model, target_path)
+        except ValueError as exc:
+            QMessageBox.critical(self, "Erro ao exportar", str(exc))
+            return False
+        except Exception as exc:  # pragma: no cover - defensivo
+            logger.error("Falha ao exportar planilha: %s", exc, exc_info=True)
+            QMessageBox.critical(
+                self,
+                "Erro ao exportar",
+                f"Falha ao exportar a planilha: {exc}",
+            )
+            return False
+
+        if self.statusBar():
+            self.statusBar().showMessage(
+                f"Planilha exportada: {final_path.name}", 5000
+            )
+        return True
+
     def _on_project_dirty_changed(self, is_dirty: bool) -> None:
         if self._grid_model is not None:
             self._grid_model.dirty = is_dirty
@@ -841,10 +908,13 @@ class MainWindow(QMainWindow):
 
     def _update_save_actions_enabled(self) -> None:
         has_model = self._grid_model is not None
+        data_ready = bool(self._grid_model and self._grid_model.laminados)
         if getattr(self, "save_action", None) is not None:
             self.save_action.setEnabled(has_model and self.project_manager.is_dirty)
         if getattr(self, "save_as_action", None) is not None:
             self.save_as_action.setEnabled(has_model)
+        if getattr(self, "export_excel_action", None) is not None:
+            self.export_excel_action.setEnabled(data_ready)
 
     def _update_window_title(self) -> None:
         title = self.base_title
