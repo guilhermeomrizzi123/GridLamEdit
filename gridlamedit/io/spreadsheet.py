@@ -10,7 +10,7 @@ import zipfile
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Protocol
+from typing import Callable, Dict, Iterable, List, Optional, Protocol
 
 import pandas as pd
 from PySide6.QtCore import QAbstractTableModel, QModelIndex, Qt
@@ -20,8 +20,12 @@ from PySide6.QtWidgets import (
     QComboBox,
     QHeaderView,
     QListWidget,
+    QListWidgetItem,
+    QSizePolicy,
     QTableView,
 )
+
+from gridlamedit.app.delegates import MaterialComboDelegate, OrientationComboDelegate
 
 _OPEN_EXCEL_EXCEPTIONS: tuple[type[BaseException], ...] = (zipfile.BadZipFile,)
 try:  # pragma: no cover - dependente de openpyxl
@@ -51,6 +55,7 @@ INDEX_ALIASES = ("Index", "#", "Idx", "Ordem", "SequAancia", "Sequencia")
 
 CELL_MAPPING_ALIASES = ("Cell", "Cells", "Celula", "CAlula", "C")
 CELL_ID_PATTERN = re.compile(r"^C\d+$", re.IGNORECASE)
+NO_LAMINATE_LABEL = "(sem laminado)"
 
 @dataclass
 class Camada:
@@ -309,11 +314,16 @@ def save_grid_spreadsheet(path: str, model: GridModel) -> None:
 class StackingTableModel(QAbstractTableModel):
     """Apresenta as camadas do laminado na tabela de stacking."""
 
-    headers = ["Material", "Orientacao", "Ativo", "Simetria"]
+    headers = ["Material", "Orientacao"]
 
-    def __init__(self, camadas: list[Camada] | None = None) -> None:
+    def __init__(
+        self,
+        camadas: list[Camada] | None = None,
+        change_callback: Optional[Callable[[list[Camada]], None]] = None,
+    ) -> None:
         super().__init__()
         self._camadas: list[Camada] = list(camadas or [])
+        self._change_callback = change_callback
 
     def update_layers(self, camadas: list[Camada]) -> None:
         self.beginResetModel()
@@ -356,16 +366,54 @@ class StackingTableModel(QAbstractTableModel):
                 return camada.material
             if coluna == 1:
                 return f"{camada.orientacao}\N{DEGREE SIGN}"
-            if coluna == 2:
-                return "Sim" if camada.ativo else "NAo"
-            if coluna == 3:
-                return "Sim" if camada.simetria else "NAo"
         elif role == Qt.TextAlignmentRole:
             if index.column() == 0:
                 return int(Qt.AlignVCenter | Qt.AlignLeft)
             return int(Qt.AlignVCenter | Qt.AlignCenter)
+        elif role == Qt.EditRole:
+            if index.column() == 0:
+                return camada.material
+            if index.column() == 1:
+                return f"{camada.orientacao}\N{DEGREE SIGN}"
 
         return None
+
+    def flags(self, index: QModelIndex) -> Qt.ItemFlags:  # noqa: N802
+        if not index.isValid():
+            return Qt.NoItemFlags
+        return Qt.ItemIsSelectable | Qt.ItemIsEnabled | Qt.ItemIsEditable
+
+    def setData(
+        self,
+        index: QModelIndex,
+        value: object,
+        role: int = Qt.EditRole,
+    ) -> bool:  # noqa: N802
+        if not index.isValid() or role not in (Qt.EditRole, Qt.DisplayRole):
+            return False
+        camada = self._camadas[index.row()]
+        column = index.column()
+        if column == 0:
+            new_value = str(value).strip()
+            if new_value == camada.material:
+                return False
+            camada.material = new_value
+        elif column == 1:
+            text = str(value).strip()
+            cleaned = text.replace("\N{DEGREE SIGN}", "").replace("º", "").strip()
+            try:
+                angle = normalize_angle(cleaned)
+            except ValueError:
+                return False
+            if angle == camada.orientacao:
+                return False
+            camada.orientacao = angle
+        else:
+            return False
+        self.dataChanged.emit(index, index, [Qt.DisplayRole, Qt.EditRole])
+        if self._change_callback:
+            self._change_callback(self._camadas)
+        return True
 
 
 def bind_model_to_ui(model: GridModel, ui) -> None:
@@ -389,14 +437,24 @@ def bind_cells_to_ui(model: GridModel, ui) -> None:
     list_widget.blockSignals(True)
     list_widget.clear()
     for cell_id in model.celulas_ordenadas:
-        list_widget.addItem(cell_id)
+        item = QListWidgetItem(_format_cell_label(model, cell_id))
+        item.setData(Qt.UserRole, cell_id)
+        list_widget.addItem(item)
     list_widget.blockSignals(False)
 
     if model.celulas_ordenadas:
         list_widget.setCurrentRow(0)
-        current_item = list_widget.currentItem()
-        if current_item is not None:
-            list_widget.currentTextChanged.emit(current_item.text())
+
+
+def _format_cell_label(model: GridModel, cell_id: str) -> str:
+    laminate_name = model.cell_to_laminate.get(cell_id) or ""
+    if laminate_name:
+        laminate = model.laminados.get(laminate_name)
+        laminate_name = laminate.nome if laminate is not None else laminate_name
+    else:
+        laminados = model.laminados_da_celula(cell_id)
+        laminate_name = laminados[0].nome if laminados else NO_LAMINATE_LABEL
+    return f"{cell_id} | {laminate_name}"
 
 
 # Helpers ------------------------------------------------------------------ #
@@ -717,7 +775,8 @@ class _GridUiBinding:
         self._current_laminate: Optional[str] = None
         self._current_cell_id: Optional[str] = None
         self._laminates_by_cell: dict[str, list[str]] = self._build_cell_index()
-        self.stacking_model = StackingTableModel()
+        self.stacking_model = StackingTableModel(change_callback=self._on_layers_modified)
+        self._cells_widget: Optional[QListWidget] = None
 
         self._setup_widgets()
         self._connect_signals()
@@ -729,7 +788,7 @@ class _GridUiBinding:
             if cells_widget is None:
                 cells_widget = getattr(self.ui, "cells_list", None)
             if isinstance(cells_widget, QListWidget):
-                cells_widget.currentTextChanged.disconnect(self._on_cell_selected)
+                cells_widget.currentItemChanged.disconnect(self._on_cell_item_changed)
         except (AttributeError, TypeError):
             pass
         try:
@@ -788,23 +847,46 @@ class _GridUiBinding:
         table = getattr(self.ui, "layers_table", None)
         if isinstance(table, QTableView):
             table.setModel(self.stacking_model)
-            table.setEditTriggers(QAbstractItemView.NoEditTriggers)
-            table.setSelectionBehavior(QAbstractItemView.SelectRows)
+            table.setEditTriggers(
+                QAbstractItemView.DoubleClicked
+                | QAbstractItemView.SelectedClicked
+                | QAbstractItemView.EditKeyPressed
+            )
+            table.setSelectionBehavior(QAbstractItemView.SelectItems)
             table.setSelectionMode(QAbstractItemView.SingleSelection)
+            table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
             header = table.horizontalHeader()
             header.setSectionResizeMode(QHeaderView.Stretch)
             table.verticalHeader().setVisible(False)
+            self._install_delegates(table)
 
-    def _connect_signals(self) -> None:
         cells_widget = getattr(self.ui, "lstCelulas", None)
         if not isinstance(cells_widget, QListWidget):
             cells_widget = getattr(self.ui, "cells_list", None)
         if isinstance(cells_widget, QListWidget):
-            cells_widget.currentTextChanged.connect(self._on_cell_selected)
+            self._cells_widget = cells_widget
+
+    def _connect_signals(self) -> None:
+        cells_widget = self._cells_widget
+        if isinstance(cells_widget, QListWidget):
+            cells_widget.currentItemChanged.connect(self._on_cell_item_changed)
 
         name_combo = getattr(self.ui, "laminate_name_combo", None)
         if isinstance(name_combo, QComboBox):
             name_combo.currentTextChanged.connect(self._on_laminate_selected)
+
+    def _on_cell_item_changed(
+        self,
+        current: Optional[QListWidgetItem],
+        previous: Optional[QListWidgetItem],  # noqa: ARG002
+    ) -> None:
+        if current is None:
+            return
+        cell_id = current.data(Qt.UserRole)
+        if not cell_id:
+            text = current.text().split("|")[0].strip()
+            cell_id = text
+        self._on_cell_selected(str(cell_id))
 
     def _on_cell_selected(self, cell_id: str) -> None:
         if not cell_id:
@@ -899,6 +981,7 @@ class _GridUiBinding:
         self._laminates_by_cell = self._build_cell_index()
         if hasattr(self.ui, "_mark_dirty"):
             self.ui._mark_dirty()
+        self._refresh_cell_item_label(cell_id)
 
     def _update_associated_cells_text(self, laminate_name: str) -> None:
         lam = self.model.laminados.get(laminate_name)
@@ -913,6 +996,56 @@ class _GridUiBinding:
             and self._current_laminate == laminate_name
         ):
             widget.setPlainText(", ".join(cells))
+
+    def _install_delegates(self, table: QTableView) -> None:
+        self._material_delegate = MaterialComboDelegate(
+            table, items_provider=self._material_options
+        )
+        self._orientation_delegate = OrientationComboDelegate(
+            table, items_provider=self._orientation_options
+        )
+        table.setItemDelegateForColumn(0, self._material_delegate)
+        table.setItemDelegateForColumn(1, self._orientation_delegate)
+
+    def _material_options(self) -> list[str]:
+        materials: list[str] = []
+        seen: set[str] = set()
+        for laminado in self.model.laminados.values():
+            for camada in laminado.camadas:
+                if camada.material and camada.material not in seen:
+                    seen.add(camada.material)
+                    materials.append(camada.material)
+        if not materials:
+            materials.append("")
+        return materials
+
+    def _orientation_options(self) -> list[str]:
+        preferred_order = [0, 45, -45, 90, -90]
+        options: list[str] = []
+        added: set[int] = set()
+        for angle in preferred_order:
+            if angle in ALLOWED_ANGLES and angle not in added:
+                options.append(f"{angle}\N{DEGREE SIGN}")
+                added.add(angle)
+        for angle in sorted(ALLOWED_ANGLES):
+            if angle not in added:
+                options.append(f"{angle}\N{DEGREE SIGN}")
+        return options
+
+    def _refresh_cell_item_label(self, cell_id: str) -> None:
+        if self._cells_widget is None:
+            return
+        for idx in range(self._cells_widget.count()):
+            item = self._cells_widget.item(idx)
+            if item.data(Qt.UserRole) == cell_id:
+                self._cells_widget.blockSignals(True)
+                item.setText(_format_cell_label(self.model, cell_id))
+                self._cells_widget.blockSignals(False)
+                break
+
+    def _on_layers_modified(self, _layers: list[Camada]) -> None:
+        if hasattr(self.ui, "_mark_dirty"):
+            self.ui._mark_dirty()
 
 
 def _open_with_xlrd(file_path: Path, cause: Exception) -> _WorkbookProtocol:

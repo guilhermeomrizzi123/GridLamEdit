@@ -20,9 +20,11 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QListWidget,
+    QListWidgetItem,
     QMessageBox,
     QMainWindow,
     QPushButton,
+    QSizePolicy,
     QSplitter,
     QStatusBar,
     QStackedWidget,
@@ -30,7 +32,6 @@ from PySide6.QtWidgets import (
     QTableWidget,
     QTableWidgetItem,
     QTextEdit,
-    QToolBar,
     QVBoxLayout,
     QWidget,
 )
@@ -68,20 +69,15 @@ class MainWindow(QMainWindow):
         self._grid_model: Optional[GridModel] = None
 
         self.ui_state = UiState.VIEW
-        self._setup_toolbar()
+        self._create_actions()
         self._setup_menu_bar()
         self._setup_central_widget()
         self._setup_status_bar()
         self._update_save_actions_enabled()
 
-    def _setup_toolbar(self) -> None:
-        toolbar = QToolBar("Main Toolbar", self)
-        toolbar.setMovable(False)
-        toolbar.setToolButtonStyle(Qt.ToolButtonTextOnly)
-        toolbar.setContentsMargins(8, 4, 8, 4)
-
+    def _create_actions(self) -> None:
         action_specs: List[
-            tuple[str, str, callable, str, Optional[QKeySequence], bool]
+            tuple[str, str, callable, str, Optional[QKeySequence]]
         ] = [
             (
                 "open_project_action",
@@ -89,7 +85,6 @@ class MainWindow(QMainWindow):
                 self._on_open_project,
                 "Abrir arquivo de projeto GridLam.",
                 QKeySequence.Open,
-                False,
             ),
             (
                 "load_spreadsheet_action",
@@ -97,7 +92,6 @@ class MainWindow(QMainWindow):
                 self._load_spreadsheet,
                 "Importar planilha do Grid Design.",
                 None,
-                False,
             ),
             (
                 "new_laminate_action",
@@ -105,7 +99,6 @@ class MainWindow(QMainWindow):
                 self._enter_creating_mode,
                 "Cadastrar um novo laminado.",
                 None,
-                True,
             ),
             (
                 "save_action",
@@ -113,7 +106,6 @@ class MainWindow(QMainWindow):
                 self._on_save_triggered,
                 "Salvar alteracoes no projeto atual.",
                 QKeySequence.Save,
-                False,
             ),
             (
                 "save_as_action",
@@ -121,7 +113,6 @@ class MainWindow(QMainWindow):
                 self._on_save_as_triggered,
                 "Salvar o projeto em um novo arquivo.",
                 QKeySequence.SaveAs,
-                False,
             ),
             (
                 "export_excel_action",
@@ -129,22 +120,16 @@ class MainWindow(QMainWindow):
                 self._on_export_excel,
                 "Exportar planilha Excel com as alteracoes atuais.",
                 QKeySequence("Ctrl+E"),
-                False,
             ),
         ]
 
-        for attr_name, text, handler, tip, shortcut, insert_separator in action_specs:
+        for attr_name, text, handler, tip, shortcut in action_specs:
             action = QAction(text, self)
             action.setStatusTip(tip)
             if shortcut is not None:
                 action.setShortcut(shortcut)
             action.triggered.connect(handler)  # type: ignore[arg-type]
-            toolbar.addAction(action)
             setattr(self, attr_name, action)
-            if insert_separator:
-                toolbar.addSeparator()
-
-        self.addToolBar(toolbar)
         self._update_save_actions_enabled()
 
     def _setup_menu_bar(self) -> None:
@@ -178,7 +163,7 @@ class MainWindow(QMainWindow):
         splitter.addWidget(self._build_cells_panel())
         splitter.addWidget(self._build_laminate_panel())
         splitter.setStretchFactor(0, 1)
-        splitter.setStretchFactor(1, 2)
+        splitter.setStretchFactor(1, 3)
 
         outer_layout.addWidget(splitter)
         return editor
@@ -225,7 +210,7 @@ class MainWindow(QMainWindow):
         stacking_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
 
         layout.addWidget(stacking_label)
-        layout.addWidget(self._build_layers_section())
+        layout.addWidget(self._build_layers_section(), stretch=1)
         return panel
 
     def _build_laminate_form(self) -> QHBoxLayout:
@@ -271,7 +256,7 @@ class MainWindow(QMainWindow):
         self.associated_cells = QTextEdit(container)
         self.associated_cells.setReadOnly(True)
         self.associated_cells.setPlaceholderText("C3, C5")
-        self.associated_cells.setMaximumHeight(80)
+        self.associated_cells.setFixedHeight(120)
         self.associated_cells.setStyleSheet("background-color: #ffffff;")
 
         layout.addWidget(label)
@@ -287,6 +272,7 @@ class MainWindow(QMainWindow):
         self.layers_table = self._create_layers_table(container)
         layout.addWidget(self.layers_table, stretch=1)
         layout.addLayout(self._create_layers_buttons())
+        container.setMinimumHeight(420)
         return container
 
     def _create_layers_table(self, parent: QWidget) -> QTableView:
@@ -295,6 +281,8 @@ class MainWindow(QMainWindow):
         table.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         table.setVerticalScrollMode(QAbstractItemView.ScrollPerItem)
         table.verticalHeader().setVisible(False)
+        table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        table.setMinimumHeight(360)
         return table
 
     def _create_layers_buttons(self) -> QVBoxLayout:
@@ -307,8 +295,6 @@ class MainWindow(QMainWindow):
             "Duplicar Camada",
             "Mover Acima",
             "Mover Abaixo",
-            "Alterar Material",
-            "Alterar Orientacao",
             "Verificar Simetria",
         ]
 
@@ -745,7 +731,12 @@ class MainWindow(QMainWindow):
     def _collect_ui_state(self) -> dict:
         state: dict = {}
         if getattr(self, "lstCelulas", None) and self.lstCelulas.currentItem():
-            state["selected_cell"] = self.lstCelulas.currentItem().text()
+            item = self.lstCelulas.currentItem()
+            cell_id = item.data(Qt.UserRole) if item is not None else None
+            if not cell_id and item is not None:
+                cell_id = item.text().split("|")[0].strip()
+            if cell_id:
+                state["selected_cell"] = str(cell_id)
         if getattr(self, "laminate_name_combo", None):
             state["selected_laminate"] = self.laminate_name_combo.currentText()
         return state
@@ -758,9 +749,14 @@ class MainWindow(QMainWindow):
         if not isinstance(list_widget, QListWidget):
             list_widget = getattr(self, "cells_list", None)
         if cell_id and isinstance(list_widget, QListWidget):
-            matches = list_widget.findItems(cell_id, Qt.MatchExactly)
-            if matches:
-                list_widget.setCurrentItem(matches[0])
+            for idx in range(list_widget.count()):
+                item = list_widget.item(idx)
+                item_cell = item.data(Qt.UserRole)
+                if not item_cell and item is not None:
+                    item_cell = item.text().split("|")[0].strip()
+                if str(item_cell) == str(cell_id):
+                    list_widget.setCurrentItem(item)
+                    break
 
         laminate_name = state.get("selected_laminate")
         if (
