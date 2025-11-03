@@ -13,12 +13,15 @@ from pathlib import Path
 from typing import Callable, Dict, Iterable, List, Optional, Protocol
 
 import pandas as pd
-from PySide6.QtCore import QAbstractTableModel, QModelIndex, Qt
+from PySide6.QtCore import QAbstractTableModel, QModelIndex, QPoint, QRect, Qt
+from PySide6.QtGui import QPalette
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QComboBox,
     QHeaderView,
+    QStyle,
     QStyleOptionHeader,
+    QStyleOptionButton,
     QListWidget,
     QListWidgetItem,
     QSizePolicy,
@@ -64,10 +67,30 @@ NO_LAMINATE_LABEL = "(sem laminado)"
 
 
 class _WordWrapHeader(QHeaderView):
-    def __init__(self, orientation: Qt.Orientation, parent: Optional[QWidget] = None) -> None:
+    def __init__(
+        self,
+        orientation: Qt.Orientation,
+        parent: Optional[QWidget] = None,
+        *,
+        checkbox_section: Optional[int] = None,
+    ) -> None:
         super().__init__(orientation, parent)
         self.setDefaultAlignment(Qt.AlignCenter)
         self.setSectionsClickable(True)
+        self._checkbox_section: Optional[int] = checkbox_section
+
+    def set_checkbox_section(self, section: Optional[int]) -> None:
+        previous = self._checkbox_section
+        self._checkbox_section = section
+        if previous is not None:
+            self.updateSection(previous)
+        if section is not None:
+            self.updateSection(section)
+        else:
+            self.viewport().update()
+
+    def checkbox_section(self) -> Optional[int]:
+        return self._checkbox_section
 
     def paintSection(self, painter, rect, logicalIndex):  # noqa: N802
         if not rect.isValid():
@@ -79,26 +102,91 @@ class _WordWrapHeader(QHeaderView):
         option.section = logicalIndex
         option.text = ""
         self.style().drawControl(QStyle.CE_Header, option, painter, self)
+
         model = self.model()
+        header_text = ""
         if model is not None:
             text = model.headerData(logicalIndex, self.orientation(), Qt.DisplayRole)
             if text:
-                text_rect = rect.adjusted(4, 4, -4, -4)
-                painter.setPen(option.palette.color(QPalette.ButtonText))
-                painter.drawText(text_rect, Qt.AlignCenter | Qt.TextWordWrap, str(text))
+                header_text = str(text)
+
+        painter.setPen(option.palette.color(QPalette.ButtonText))
+
+        if (
+            self.orientation() == Qt.Horizontal
+            and self._checkbox_section is not None
+            and logicalIndex == self._checkbox_section
+        ):
+            checkbox_rect = self._calculate_checkbox_rect(rect)
+
+            option_button = QStyleOptionButton()
+            option_button.state = QStyle.State_Enabled
+
+            check_state = Qt.Unchecked
+            if model is not None and hasattr(model, "all_checked") and hasattr(model, "any_checked"):
+                try:
+                    if model.all_checked():
+                        check_state = Qt.Checked
+                    elif model.any_checked():
+                        check_state = Qt.PartiallyChecked
+                except Exception:  # pragma: no cover - fallback defensivo
+                    check_state = Qt.Unchecked
+
+            if check_state == Qt.Checked:
+                option_button.state |= QStyle.State_On
+            elif check_state == Qt.PartiallyChecked:
+                option_button.state |= QStyle.State_NoChange
+            else:
+                option_button.state |= QStyle.State_Off
+            option_button.rect = checkbox_rect
+            self.style().drawControl(QStyle.CE_CheckBox, option_button, painter, self)
+
+            text_rect = QRect(
+                rect.left() + 4,
+                checkbox_rect.bottom() + 4,
+                rect.width() - 8,
+                rect.bottom() - checkbox_rect.bottom() - 8,
+            )
+            if text_rect.height() > 0 and header_text:
+                painter.drawText(
+                    text_rect,
+                    Qt.AlignHCenter | Qt.AlignVCenter | Qt.TextWordWrap,
+                    header_text,
+                )
+        else:
+            text_rect = rect.adjusted(4, 4, -4, -4)
+            if header_text:
+                painter.drawText(
+                    text_rect,
+                    Qt.AlignHCenter | Qt.AlignVCenter | Qt.TextWordWrap,
+                    header_text,
+                )
+
         painter.restore()
 
     def sizeHint(self):
         hint = super().sizeHint()
-        if hint.height() < 48:
-            hint.setHeight(48)
+        if hint.height() < 56:
+            hint.setHeight(56)
         return hint
 
     def sectionSizeFromContents(self, logicalIndex):  # noqa: N802
         size = super().sectionSizeFromContents(logicalIndex)
-        if size.height() < 48:
-            size.setHeight(48)
+        if size.height() < 56:
+            size.setHeight(56)
         return size
+
+    def _calculate_checkbox_rect(self, rect: QRect) -> QRect:
+        option_button = QStyleOptionButton()
+        option_button.state = QStyle.State_Enabled
+        indicator = self.style().subElementRect(QStyle.SE_CheckBoxIndicator, option_button, self)
+        checkbox_rect = QRect(indicator)
+        center_point = QPoint(
+            rect.center().x(),
+            rect.top() + indicator.height() // 2 + 6,
+        )
+        checkbox_rect.moveCenter(center_point)
+        return checkbox_rect
 
 
 @dataclass
@@ -367,7 +455,14 @@ class StackingTableModel(QAbstractTableModel):
 
     COL_CHECK = COL_SELECT
 
-    headers = ["#", "Select", "Structural Ply", "Material", "Direction"]
+    HEADERS = [
+        "#",
+        "Selection",
+        "Camada N\u00E3o Estrutural",
+        "Material",
+        "Orientacao",
+    ]
+    headers = HEADERS
 
     def __init__(
         self,
@@ -401,7 +496,7 @@ class StackingTableModel(QAbstractTableModel):
     def columnCount(self, parent: QModelIndex = QModelIndex()) -> int:  # noqa: N802
         if parent.isValid():
             return 0
-        return len(self.headers)
+        return len(self.HEADERS)
 
     def headerData(  # noqa: N802
         self,
@@ -409,12 +504,16 @@ class StackingTableModel(QAbstractTableModel):
         orientation: Qt.Orientation,
         role: int = Qt.DisplayRole,
     ) -> Optional[str]:
-        if orientation == Qt.Horizontal and role == Qt.DisplayRole:
-            if 0 <= section < len(self.headers):
-                return self.headers[section]
+        if orientation == Qt.Horizontal:
+            if role == Qt.DisplayRole and 0 <= section < len(self.HEADERS):
+                return self.HEADERS[section]
+            if role == Qt.TextAlignmentRole:
+                return int(Qt.AlignHCenter | Qt.AlignVCenter)
+            if role == Qt.ToolTipRole and 0 <= section < len(self.HEADERS):
+                return self.HEADERS[section]
         if orientation == Qt.Vertical and role == Qt.DisplayRole:
             return str(section + 1)
-        return None
+        return super().headerData(section, orientation, role)
 
     def data(self, index: QModelIndex, role: int = Qt.DisplayRole) -> Optional[object]:  # noqa: N802
         if not index.isValid() or not (0 <= index.row() < len(self._camadas)):
@@ -476,6 +575,7 @@ class StackingTableModel(QAbstractTableModel):
                 return False
             self._checked[row] = checked
             self.dataChanged.emit(index, index, [Qt.CheckStateRole])
+            self.headerDataChanged.emit(Qt.Horizontal, self.COL_SELECT, self.COL_SELECT)
             return True
 
         if column == self.COL_NON_STRUCT and role == Qt.CheckStateRole:
@@ -565,6 +665,7 @@ class StackingTableModel(QAbstractTableModel):
         top_left = self.index(0, self.COL_SELECT)
         bottom_right = self.index(self.rowCount() - 1, self.COL_SELECT)
         self.dataChanged.emit(top_left, bottom_right, [Qt.CheckStateRole])
+        self.headerDataChanged.emit(Qt.Horizontal, self.COL_SELECT, self.COL_SELECT)
 
     def all_checked(self) -> bool:
         return bool(self._checked) and all(self._checked)
@@ -963,11 +1064,16 @@ class _GridUiBinding:
         self.stacking_model = StackingTableModel(change_callback=self._on_layers_modified)
         self._cells_widget: Optional[QListWidget] = None
         self._table_view: Optional[QTableView] = None
+        self._header_view: Optional[_WordWrapHeader] = None
 
         self.stacking_model.dataChanged.connect(lambda *args: self._update_layers_count())
         self.stacking_model.rowsInserted.connect(self._update_layers_count)
         self.stacking_model.rowsRemoved.connect(self._update_layers_count)
         self.stacking_model.modelReset.connect(self._update_layers_count)
+        self.stacking_model.dataChanged.connect(self._refresh_selection_header)
+        self.stacking_model.rowsInserted.connect(self._refresh_selection_header)
+        self.stacking_model.rowsRemoved.connect(self._refresh_selection_header)
+        self.stacking_model.modelReset.connect(self._refresh_selection_header)
 
         self._setup_widgets()
         self._connect_signals()
@@ -992,7 +1098,23 @@ class _GridUiBinding:
                 self._table_view.clicked.disconnect(self._on_table_clicked)
         except (AttributeError, TypeError):
             pass
+        try:
+            if isinstance(self._header_view, _WordWrapHeader):
+                self._header_view.sectionClicked.disconnect(self._on_header_section_clicked)
+        except (AttributeError, TypeError):
+            pass
+        for signal in (
+            self.stacking_model.dataChanged,
+            self.stacking_model.rowsInserted,
+            self.stacking_model.rowsRemoved,
+            self.stacking_model.modelReset,
+        ):
+            try:
+                signal.disconnect(self._refresh_selection_header)
+            except (AttributeError, TypeError):
+                pass
         self._table_view = None
+        self._header_view = None
 
     # Internal helpers -------------------------------------------------- #
 
@@ -1045,7 +1167,9 @@ class _GridUiBinding:
         table = getattr(self.ui, "layers_table", None)
         if isinstance(table, QTableView):
             self._table_view = table
-            table.setHorizontalHeader(_WordWrapHeader(Qt.Horizontal, table))
+            header_view = _WordWrapHeader(Qt.Horizontal, table, checkbox_section=StackingTableModel.COL_SELECT)
+            table.setHorizontalHeader(header_view)
+            self._header_view = header_view
             table.setModel(self.stacking_model)
             table.setEditTriggers(
                 QAbstractItemView.DoubleClicked
@@ -1062,17 +1186,38 @@ class _GridUiBinding:
             header.setSectionResizeMode(StackingTableModel.COL_NON_STRUCT, QHeaderView.Fixed)
             header.setSectionResizeMode(StackingTableModel.COL_MATERIAL, QHeaderView.Stretch)
             header.setSectionResizeMode(StackingTableModel.COL_ORIENTATION, QHeaderView.Stretch)
-            table.setColumnWidth(StackingTableModel.COL_NUMBER, 50)
+            header.setMinimumSectionSize(60)
+            header.setFixedHeight(max(header.height(), header.sizeHint().height()))
+            if isinstance(header, _WordWrapHeader):
+                header.set_checkbox_section(StackingTableModel.COL_SELECT)
+                header.sectionClicked.connect(self._on_header_section_clicked)
+            table.setColumnWidth(StackingTableModel.COL_NUMBER, 60)
             table.setColumnWidth(StackingTableModel.COL_SELECT, 120)
-            table.setColumnWidth(StackingTableModel.COL_NON_STRUCT, 130)
+            table.setColumnWidth(StackingTableModel.COL_NON_STRUCT, 160)
             table.verticalHeader().setVisible(False)
             self._install_delegates(table)
+            self._refresh_selection_header()
 
         cells_widget = getattr(self.ui, "lstCelulas", None)
         if not isinstance(cells_widget, QListWidget):
             cells_widget = getattr(self.ui, "cells_list", None)
         if isinstance(cells_widget, QListWidget):
             self._cells_widget = cells_widget
+
+    def _refresh_selection_header(self, *args) -> None:
+        if not isinstance(self._header_view, _WordWrapHeader):
+            return
+        section = self._header_view.checkbox_section()
+        if section is None:
+            return
+        self._header_view.updateSection(section)
+
+    def _on_header_section_clicked(self, logical_index: int) -> None:
+        if logical_index != StackingTableModel.COL_SELECT:
+            return
+        target_state = not self.stacking_model.all_checked()
+        self.stacking_model.set_all_checked(target_state)
+        self._refresh_selection_header()
 
     def _connect_signals(self) -> None:
         cells_widget = self._cells_widget

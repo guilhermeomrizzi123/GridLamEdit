@@ -7,11 +7,12 @@ from enum import Enum, auto
 from pathlib import Path
 from typing import Iterable, List, Optional
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QSize
 from PySide6.QtGui import (
     QAction,
     QColor,
     QCloseEvent,
+    QIcon,
     QFont,
     QGuiApplication,
     QKeySequence,
@@ -37,6 +38,7 @@ from PySide6.QtWidgets import (
     QSplitter,
     QStatusBar,
     QStackedWidget,
+    QToolButton,
     QTableView,
     QTableWidget,
     QTableWidgetItem,
@@ -58,6 +60,8 @@ from gridlamedit.io.spreadsheet import (
 from gridlamedit.services.excel_io import export_grid_xlsx
 
 logger = logging.getLogger(__name__)
+
+ICONS_DIR = Path(__file__).resolve().parent / "icons"
 
 
 class UiState(Enum):
@@ -227,7 +231,9 @@ class MainWindow(QMainWindow):
 
         layout.addWidget(header)
         layout.addLayout(self._build_laminate_form())
-        layout.addWidget(self._build_associated_cells_view())
+        layout.addWidget(
+            self._build_associated_cells_view(), alignment=Qt.AlignLeft
+        )
 
         stacking_label = QLabel("Stacking", panel)
         stacking_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
@@ -276,16 +282,22 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(0, 0, 0, 0)
 
         label = QLabel("Celulas associadas com esse laminado", container)
+        label.setWordWrap(True)
+        label.setMaximumWidth(220)
+        label.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Preferred)
         self.associated_cells = QTextEdit(container)
         self.associated_cells.setReadOnly(True)
         self.associated_cells.setPlaceholderText("C3, C5")
+        self.associated_cells.setMaximumWidth(220)
         self.associated_cells.setFixedHeight(40)
+        self.associated_cells.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Preferred)
         self.associated_cells.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.associated_cells.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.associated_cells.setStyleSheet("background-color: #ffffff;")
 
         layout.addWidget(label)
         layout.addWidget(self.associated_cells)
+        container.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Preferred)
         return container
 
     def _build_layers_section(self) -> QWidget:
@@ -326,45 +338,80 @@ class MainWindow(QMainWindow):
         layout.setSpacing(8)
         layout.setContentsMargins(0, 0, 0, 0)
 
-        self.layer_buttons: list[QPushButton] = []
+        self.layer_buttons: list[QToolButton] = []
 
-        self.add_layer_button = QPushButton("Adicionar Camada", self)
-        self.add_layer_button.setFixedWidth(200)
-        self.add_layer_button.clicked.connect(self._on_add_layer_clicked)
-        self.layer_buttons.append(self.add_layer_button)
-        layout.addWidget(self.add_layer_button)
+        def make_button(
+            icon_name: str,
+            tooltip: str,
+            slot,
+            accessible_name: str,
+            fallback_icon: QStyle.StandardPixmap | None = None,
+        ) -> QToolButton:
+            button = QToolButton(self)
+            button.setText("")
+            button.setToolButtonStyle(Qt.ToolButtonIconOnly)
+            button.setIconSize(QSize(24, 24))
+            button.setFixedWidth(42)
+            button.setAutoRaise(True)
+            button.setToolTip(tooltip)
+            button.setAccessibleName(accessible_name)
+            icon_path = ICONS_DIR / icon_name
+            icon = QIcon(str(icon_path))
+            if icon.isNull() and fallback_icon is not None:
+                icon = self.style().standardIcon(fallback_icon)
+            button.setIcon(icon)
+            button.clicked.connect(slot)
+            self.layer_buttons.append(button)
+            layout.addWidget(button)
+            return button
 
-        self.duplicate_layer_button = QPushButton("Duplicar Camada", self)
-        self.duplicate_layer_button.setFixedWidth(200)
-        self.duplicate_layer_button.clicked.connect(self._show_todo_message)  # type: ignore[arg-type]
-        self.layer_buttons.append(self.duplicate_layer_button)
-        layout.addWidget(self.duplicate_layer_button)
+        self.add_layer_button = make_button(
+            "add-layer.svg",
+            "Adicionar camada",
+            self._on_add_layer_clicked,
+            "Adicionar camada",
+            QStyle.SP_FileDialogNewFolder,
+        )
 
-        self.move_up_button = QPushButton("Mover Acima", self)
-        self.move_up_button.setFixedWidth(200)
-        self.move_up_button.clicked.connect(self._on_move_up_clicked)
-        self.layer_buttons.append(self.move_up_button)
-        layout.addWidget(self.move_up_button)
+        self.duplicate_layer_button = make_button(
+            "copy-layer.svg",
+            "Duplicar camada",
+            self._show_todo_message,  # type: ignore[arg-type]
+            "Duplicar camada",
+            QStyle.SP_FileDialogDetailedView,
+        )
 
-        self.move_down_button = QPushButton("Mover Abaixo", self)
-        self.move_down_button.setFixedWidth(200)
-        self.move_down_button.clicked.connect(self._on_move_down_clicked)
-        self.layer_buttons.append(self.move_down_button)
-        layout.addWidget(self.move_down_button)
+        self.move_up_button = make_button(
+            "arrow-up.svg",
+            "Mover camada para cima",
+            self._on_move_up_clicked,
+            "Mover camada para cima",
+            QStyle.SP_ArrowUp,
+        )
 
-        self.symmetry_button = QPushButton("Verificar Simetria", self)
-        self.symmetry_button.setFixedWidth(200)
-        self.symmetry_button.clicked.connect(self._show_todo_message)  # type: ignore[arg-type]
-        self.layer_buttons.append(self.symmetry_button)
-        layout.addWidget(self.symmetry_button)
+        self.move_down_button = make_button(
+            "arrow-down.svg",
+            "Mover camada para baixo",
+            self._on_move_down_clicked,
+            "Mover camada para baixo",
+            QStyle.SP_ArrowDown,
+        )
 
-        self.delete_layers_button = QPushButton("Excluir Selecionadas", self)
-        self.delete_layers_button.setFixedWidth(200)
-        self.delete_layers_button.setIcon(self.style().standardIcon(QStyle.SP_TrashIcon))
-        self.delete_layers_button.setToolTip("Excluir camadas selecionadas")
-        self.delete_layers_button.clicked.connect(self._on_delete_layers_clicked)
-        self.layer_buttons.append(self.delete_layers_button)
-        layout.addWidget(self.delete_layers_button)
+        self.symmetry_button = make_button(
+            "symmetry.svg",
+            "Verificar simetria",
+            self._show_todo_message,  # type: ignore[arg-type]
+            "Verificar simetria",
+            QStyle.SP_BrowserReload,
+        )
+
+        self.delete_layers_button = make_button(
+            "trash.svg",
+            "Excluir camadas selecionadas",
+            self._on_delete_layers_clicked,
+            "Excluir camadas selecionadas",
+            QStyle.SP_TrashIcon,
+        )
 
         layout.addStretch()
         return layout
