@@ -10,7 +10,6 @@ from typing import Iterable, List, Optional
 from PySide6.QtCore import Qt, QSize
 from PySide6.QtGui import (
     QAction,
-    QColor,
     QCloseEvent,
     QIcon,
     QFont,
@@ -22,7 +21,6 @@ from PySide6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
     QComboBox,
-    QColorDialog,
     QFileDialog,
     QHeaderView,
     QHBoxLayout,
@@ -50,6 +48,8 @@ from PySide6.QtWidgets import (
 from gridlamedit.core.project_manager import ProjectManager
 from gridlamedit.io.spreadsheet import (
     Camada,
+    DEFAULT_COLOR_INDEX,
+    DEFAULT_PLY_TYPE,
     GridModel,
     Laminado,
     bind_cells_to_ui,
@@ -249,7 +249,9 @@ class MainWindow(QMainWindow):
 
         layout.addLayout(self._combo_with_label("Nome:", ["LAM-1", "LAM-2"], "name"))
         layout.addLayout(
-            self._combo_with_label("Cor:", ["#FFFFFF", "#FF0000", "#00FF00"], "color")
+            self._combo_with_label(
+                "Cor:", (str(i) for i in range(1, 151)), "color", editable=False
+            )
         )
         layout.addLayout(
             self._combo_with_label("Tipo:", ["Core", "Skin", "Custom"], "type")
@@ -258,7 +260,12 @@ class MainWindow(QMainWindow):
         return layout
 
     def _combo_with_label(
-        self, label_text: str, items: Iterable[str], attr_prefix: str
+        self,
+        label_text: str,
+        items: Iterable[str],
+        attr_prefix: str,
+        *,
+        editable: bool = True,
     ) -> QHBoxLayout:
         layout = QHBoxLayout()
         layout.setSpacing(6)
@@ -266,9 +273,14 @@ class MainWindow(QMainWindow):
 
         label = QLabel(label_text, self)
         combo = QComboBox(self)
-        combo.addItems(list(items))
-        combo.setEditable(True)
+        items_list = [str(item) for item in items]
+        combo.addItems(items_list)
+        combo.setEditable(editable)
+        if not editable:
+            combo.setInsertPolicy(QComboBox.NoInsert)
         combo.setMinimumWidth(180)
+        if items_list:
+            combo.setCurrentIndex(0)
 
         layout.addWidget(label)
         layout.addWidget(combo)
@@ -434,13 +446,12 @@ class MainWindow(QMainWindow):
         color_label = QLabel("ColorIdx:", view)
         color_layout = QHBoxLayout()
         color_layout.setSpacing(6)
-        self.new_laminate_color_display = QLineEdit("#FFFFFF", view)
-        self.new_laminate_color_display.setReadOnly(True)
-        self.new_laminate_color_display.setMaximumWidth(120)
-        self.new_laminate_color_button = QPushButton("Selecionar Cor", view)
-        self.new_laminate_color_button.clicked.connect(self._select_new_laminate_color)
-        color_layout.addWidget(self.new_laminate_color_display)
-        color_layout.addWidget(self.new_laminate_color_button)
+        self.new_laminate_color_combo = QComboBox(view)
+        self.new_laminate_color_combo.addItems([str(i) for i in range(1, 151)])
+        default_idx = self.new_laminate_color_combo.findText(str(DEFAULT_COLOR_INDEX))
+        if default_idx >= 0:
+            self.new_laminate_color_combo.setCurrentIndex(default_idx)
+        color_layout.addWidget(self.new_laminate_color_combo)
 
         form_row.addWidget(color_label)
         form_row.addLayout(color_layout)
@@ -533,30 +544,19 @@ class MainWindow(QMainWindow):
 
     def _reset_new_laminate_form(self) -> None:
         self.new_laminate_name_edit.clear()
-        self._update_color_preview("#FFFFFF")
+        if hasattr(self, "new_laminate_color_combo"):
+            default_idx = self.new_laminate_color_combo.findText(
+                str(DEFAULT_COLOR_INDEX)
+            )
+            self.new_laminate_color_combo.setCurrentIndex(
+                default_idx if default_idx >= 0 else 0
+            )
         self.new_laminate_type_combo.setCurrentIndex(0)
 
         table = self.new_laminate_stacking_table
         table.setRowCount(0)
         self._new_laminate_add_layer()
         table.setCurrentCell(0, 0)
-
-    def _update_color_preview(self, hex_color: str) -> None:
-        hex_color = hex_color.upper()
-        if not hex_color.startswith("#"):
-            hex_color = f"#{hex_color}"
-        self.new_laminate_color_display.setText(hex_color)
-        self.new_laminate_color_display.setStyleSheet(
-            f"background-color: {hex_color};"
-        )
-
-    def _select_new_laminate_color(self) -> None:
-        initial = QColor(self.new_laminate_color_display.text())
-        if not initial.isValid():
-            initial = QColor("#FFFFFF")
-        color = QColorDialog.getColor(initial, self, "Selecione a cor do laminado")
-        if color.isValid():
-            self._update_color_preview(color.name().upper())
 
     def _new_laminate_add_layer(self) -> None:
         table = self.new_laminate_stacking_table
@@ -655,7 +655,10 @@ class MainWindow(QMainWindow):
             )
             return
 
-        color_hex = self.new_laminate_color_display.text().strip() or "#FFFFFF"
+        try:
+            color_index = int(self.new_laminate_color_combo.currentText())
+        except (ValueError, AttributeError):
+            color_index = DEFAULT_COLOR_INDEX
         tipo = self.new_laminate_type_combo.currentText()
 
         table = self.new_laminate_stacking_table
@@ -683,7 +686,7 @@ class MainWindow(QMainWindow):
                     orientacao=orientacao,
                     ativo=ativo,
                     simetria=simetria,
-                    nao_estrutural=False,
+                    ply_type=DEFAULT_PLY_TYPE,
                 )
             )
 
@@ -697,8 +700,8 @@ class MainWindow(QMainWindow):
 
         laminado = Laminado(
             nome=name,
-            cor_hex=color_hex,
             tipo=tipo,
+            color_index=color_index,
             celulas=[],
             camadas=camadas,
         )
@@ -723,7 +726,20 @@ class MainWindow(QMainWindow):
                 binding._apply_laminate(laminate_name)  # type: ignore[attr-defined]
             except Exception as exc:  # pragma: no cover - defensive
                 logger.warning("Nao foi possivel aplicar novo laminado: %s", exc)
+        self._show_model_warnings()
         self._update_save_actions_enabled()
+
+    def _show_model_warnings(self) -> bool:
+        if self._grid_model is None or not self._grid_model.compat_warnings:
+            return False
+        status_bar = self.statusBar()
+        message = " | ".join(self._grid_model.compat_warnings)
+        if status_bar:
+            status_bar.showMessage(message, 7000)
+        else:
+            logger.warning("Avisos de compatibilidade: %s", message)
+        self._grid_model.compat_warnings.clear()
+        return True
 
     def _text(self, item: Optional[QTableWidgetItem]) -> str:
         return item.text().strip() if item is not None else ""
@@ -899,7 +915,8 @@ class MainWindow(QMainWindow):
         self._update_save_actions_enabled()
         self._update_window_title()
 
-        if self.statusBar():
+        warnings_shown = self._show_model_warnings()
+        if self.statusBar() and not warnings_shown:
             self.statusBar().showMessage(
                 f"Planilha carregada: {Path(path).name}", 5000
             )
@@ -936,7 +953,8 @@ class MainWindow(QMainWindow):
         self._update_save_actions_enabled()
         self._update_window_title()
 
-        if self.statusBar():
+        warnings_shown = self._show_model_warnings()
+        if self.statusBar() and not warnings_shown:
             self.statusBar().showMessage(
                 f"Projeto carregado: {Path(path).name}", 4000
             )

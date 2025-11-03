@@ -33,6 +33,7 @@ from gridlamedit.app.delegates import (
     CenteredCheckBoxDelegate,
     MaterialComboDelegate,
     OrientationComboDelegate,
+    PlyTypeComboDelegate,
 )
 
 _OPEN_EXCEL_EXCEPTIONS: tuple[type[BaseException], ...] = (zipfile.BadZipFile,)
@@ -64,6 +65,11 @@ INDEX_ALIASES = ("Index", "#", "Idx", "Ordem", "SequAancia", "Sequencia")
 CELL_MAPPING_ALIASES = ("Cell", "Cells", "Celula", "CAlula", "C")
 CELL_ID_PATTERN = re.compile(r"^C\d+$", re.IGNORECASE)
 NO_LAMINATE_LABEL = "(sem laminado)"
+PLY_TYPE_OPTIONS: tuple[str, str] = ("Structural Ply", "Nonstructural Ply")
+DEFAULT_PLY_TYPE = PLY_TYPE_OPTIONS[0]
+DEFAULT_COLOR_INDEX = 1
+MIN_COLOR_INDEX = 1
+MAX_COLOR_INDEX = 150
 
 
 class _WordWrapHeader(QHeaderView):
@@ -198,7 +204,7 @@ class Camada:
     orientacao: int
     ativo: bool
     simetria: bool
-    nao_estrutural: bool = False
+    ply_type: str = DEFAULT_PLY_TYPE
 
 
 @dataclass
@@ -206,8 +212,8 @@ class Laminado:
     """Agregado de metadados e camadas de um laminado."""
 
     nome: str
-    cor_hex: str
     tipo: str
+    color_index: int = DEFAULT_COLOR_INDEX
     celulas: list[str] = field(default_factory=list)
     camadas: list[Camada] = field(default_factory=list)
 
@@ -219,6 +225,7 @@ class GridModel:
     laminados: Dict[str, Laminado] = field(default_factory=OrderedDict)
     celulas_ordenadas: list[str] = field(default_factory=list)
     cell_to_laminate: Dict[str, str] = field(default_factory=dict)
+    compat_warnings: list[str] = field(default_factory=list)
     source_excel_path: Optional[str] = None
     dirty: bool = False
 
@@ -294,28 +301,66 @@ def normalize_bool(value: object) -> bool:
     return False
 
 
-def normalize_color(value: object, default: str = "#FFFFFF") -> str:
-    """Normaliza cores em #RRGGBB, aceitando nomes padrao."""
-    if value is None:
+def normalize_color_index(value: object, default: int = DEFAULT_COLOR_INDEX) -> int:
+    """Normaliza o indice de cor (1-150) aceitando numeros inteiros."""
+    if _is_blank(value):
         return default
+
+    number: Optional[int] = None
+    if isinstance(value, bool):
+        logger.warning("Valor booleano invalido '%s' para indice de cor; usando %d.", value, default)
+        return default
+
     if isinstance(value, (int, float)):
-        if isinstance(value, float) and math.isnan(value):
+        if isinstance(value, float):
+            if math.isnan(value):
+                return default
+            if not value.is_integer():
+                logger.warning(
+                    "Indice de cor nao inteiro '%s'; usando %d.",
+                    value,
+                    default,
+                )
+                return default
+            number = int(value)
+        else:
+            number = int(value)
+    else:
+        text = str(value).strip()
+        if not text:
             return default
-        value = str(value)
+        if re.fullmatch(r"#?[0-9a-fA-F]{6}", text):
+            logger.warning(
+                "Indice de cor em formato hexadecimal '%s' detectado; usando %d.",
+                value,
+                default,
+            )
+            return default
+        try:
+            as_float = float(text)
+        except ValueError:
+            logger.warning("Indice de cor invalido '%s'; usando %d.", value, default)
+            return default
+        if not as_float.is_integer():
+            logger.warning(
+                "Indice de cor nao inteiro '%s'; usando %d.",
+                value,
+                default,
+            )
+            return default
+        number = int(as_float)
 
-    text = str(value).strip()
-    if not text:
+    if number is None:
         return default
-
-    if re.fullmatch(r"#?[0-9a-fA-F]{6}", text):
-        formatted = text.upper()
-        return formatted if formatted.startswith("#") else f"#{formatted}"
-
-    color = QColor(text)
-    if color.isValid():
-        return color.name().upper()
-
-    logger.warning("Cor invalida '%s'; usando %s.", value, default)
+    if MIN_COLOR_INDEX <= number <= MAX_COLOR_INDEX:
+        return number
+    logger.warning(
+        "Indice de cor fora do intervalo (%d-%d): %s; usando %d.",
+        MIN_COLOR_INDEX,
+        MAX_COLOR_INDEX,
+        number,
+        default,
+    )
     return default
 
 
@@ -400,7 +445,8 @@ def save_grid_spreadsheet(path: str, model: GridModel) -> None:
     laminados_iter = model.laminados.values()
     for laminado in laminados_iter:
         rows.append(["Name", laminado.nome])
-        rows.append(["ColorIdx", laminado.cor_hex or "#FFFFFF"])
+        color_value = laminado.color_index if laminado.color_index else DEFAULT_COLOR_INDEX
+        rows.append(["ColorIdx", color_value])
         rows.append(["Type", laminado.tipo or ""])
         rows.append(["Stacking"])
 
@@ -411,6 +457,9 @@ def save_grid_spreadsheet(path: str, model: GridModel) -> None:
                     camada.orientacao,
                     "Sim" if camada.ativo else "NAo",
                     "Sim" if camada.simetria else "NAo",
+                    None,
+                    None,
+                    camada.ply_type if camada.ply_type in PLY_TYPE_OPTIONS else DEFAULT_PLY_TYPE,
                 ]
             )
         rows.append(["#"])
@@ -449,16 +498,17 @@ class StackingTableModel(QAbstractTableModel):
 
     COL_NUMBER = 0
     COL_SELECT = 1
-    COL_NON_STRUCT = 2
+    COL_PLY_TYPE = 2
     COL_MATERIAL = 3
     COL_ORIENTATION = 4
 
+    COL_NON_STRUCT = COL_PLY_TYPE  # Alias para compatibilidade retroativa.
     COL_CHECK = COL_SELECT
 
     HEADERS = [
         "#",
         "Selection",
-        "Camada N\u00E3o Estrutural",
+        "Ply Type",
         "Material",
         "Orientacao",
     ]
@@ -484,8 +534,15 @@ class StackingTableModel(QAbstractTableModel):
 
     @staticmethod
     def _ensure_layer_defaults(camada: Camada) -> Camada:
-        if not hasattr(camada, "nao_estrutural"):
-            camada.nao_estrutural = False
+        ply_type = getattr(camada, "ply_type", None)
+        if ply_type not in PLY_TYPE_OPTIONS:
+            legacy_flag = getattr(camada, "nao_estrutural", False)
+            camada.ply_type = PLY_TYPE_OPTIONS[1] if legacy_flag else DEFAULT_PLY_TYPE
+        if hasattr(camada, "nao_estrutural"):
+            try:
+                delattr(camada, "nao_estrutural")
+            except AttributeError:
+                pass
         return camada
 
     def rowCount(self, parent: QModelIndex = QModelIndex()) -> int:  # noqa: N802
@@ -525,11 +582,15 @@ class StackingTableModel(QAbstractTableModel):
         if role == Qt.DisplayRole:
             if column == self.COL_NUMBER:
                 return str(index.row() + 1)
+            if column == self.COL_PLY_TYPE:
+                return camada.ply_type
             if column == self.COL_MATERIAL:
                 return camada.material
             if column == self.COL_ORIENTATION:
                 return f"{camada.orientacao}\N{DEGREE SIGN}"
         elif role == Qt.EditRole:
+            if column == self.COL_PLY_TYPE:
+                return camada.ply_type
             if column == self.COL_MATERIAL:
                 return camada.material
             if column == self.COL_ORIENTATION:
@@ -537,10 +598,8 @@ class StackingTableModel(QAbstractTableModel):
         elif role == Qt.CheckStateRole:
             if column == self.COL_SELECT:
                 return Qt.Checked if self._checked[index.row()] else Qt.Unchecked
-            if column == self.COL_NON_STRUCT:
-                return Qt.Checked if camada.nao_estrutural else Qt.Unchecked
         elif role == Qt.TextAlignmentRole:
-            if column in (self.COL_NUMBER, self.COL_SELECT, self.COL_NON_STRUCT, self.COL_ORIENTATION):
+            if column in (self.COL_NUMBER, self.COL_SELECT, self.COL_PLY_TYPE, self.COL_ORIENTATION):
                 return int(Qt.AlignVCenter | Qt.AlignCenter)
             return int(Qt.AlignVCenter | Qt.AlignLeft)
 
@@ -551,9 +610,9 @@ class StackingTableModel(QAbstractTableModel):
             return Qt.NoItemFlags
         column = index.column()
         base_flags = Qt.ItemIsSelectable | Qt.ItemIsEnabled
-        if column in (self.COL_SELECT, self.COL_NON_STRUCT):
+        if column == self.COL_SELECT:
             return base_flags | Qt.ItemIsUserCheckable
-        if column in (self.COL_MATERIAL, self.COL_ORIENTATION):
+        if column in (self.COL_PLY_TYPE, self.COL_MATERIAL, self.COL_ORIENTATION):
             return base_flags | Qt.ItemIsEditable
         return base_flags
 
@@ -578,12 +637,14 @@ class StackingTableModel(QAbstractTableModel):
             self.headerDataChanged.emit(Qt.Horizontal, self.COL_SELECT, self.COL_SELECT)
             return True
 
-        if column == self.COL_NON_STRUCT and role == Qt.CheckStateRole:
-            checked = value == Qt.Checked
-            if camada.nao_estrutural == checked:
+        if column == self.COL_PLY_TYPE and role in (Qt.EditRole, Qt.DisplayRole):
+            text = str(value).strip() if value is not None else DEFAULT_PLY_TYPE
+            if text not in PLY_TYPE_OPTIONS:
+                text = DEFAULT_PLY_TYPE
+            if camada.ply_type == text:
                 return False
-            camada.nao_estrutural = checked
-            self.dataChanged.emit(index, index, [Qt.CheckStateRole])
+            camada.ply_type = text
+            self.dataChanged.emit(index, index, [Qt.DisplayRole, Qt.EditRole])
             if self._change_callback:
                 self._change_callback(self.layers())
             return True
@@ -924,7 +985,7 @@ def _parse_configuration_section(
         laminate_name = str(name_value).strip()
         idx += 1
 
-        color = "#FFFFFF"
+        color_index = DEFAULT_COLOR_INDEX
         laminate_type = ""
 
         while idx < len(df):
@@ -942,12 +1003,8 @@ def _parse_configuration_section(
             if normalized == "name":
                 break
 
-            if normalized == "coloridx":
-                color = "#FFFFFF"
-                idx += 1
-                continue
             if normalized in normalized_color_aliases:
-                color = normalize_color(row.iloc[1] if len(row) > 1 else None)
+                color_index = normalize_color_index(row.iloc[1] if len(row) > 1 else None)
                 idx += 1
                 continue
 
@@ -997,6 +1054,25 @@ def _parse_configuration_section(
             symmetry = (
                 normalize_bool(symmetry_raw) if not _is_blank(symmetry_raw) else False
             )
+            ply_raw: object
+            if len(row) > 6 and not _is_blank(row.iloc[6]):
+                ply_raw = row.iloc[6]
+            else:
+                ply_raw = row.iloc[4] if len(row) > 4 else None
+            if _is_blank(ply_raw):
+                ply_type_value = DEFAULT_PLY_TYPE
+            else:
+                candidate = str(ply_raw).strip()
+                if candidate not in PLY_TYPE_OPTIONS:
+                    logger.warning(
+                        "Laminado '%s': valor de Ply Type '%s' invalido; usando '%s'.",
+                        laminate_name,
+                        candidate,
+                        DEFAULT_PLY_TYPE,
+                    )
+                    ply_type_value = DEFAULT_PLY_TYPE
+                else:
+                    ply_type_value = candidate
 
             layers.append(
                 Camada(
@@ -1005,7 +1081,7 @@ def _parse_configuration_section(
                     orientacao=orientation,
                     ativo=active,
                     simetria=symmetry,
-                    nao_estrutural=False,
+                    ply_type=ply_type_value,
                 )
             )
             idx += 1
@@ -1018,8 +1094,8 @@ def _parse_configuration_section(
 
         laminados[laminate_name] = Laminado(
             nome=laminate_name,
-            cor_hex=color,
             tipo=laminate_type,
+            color_index=color_index,
             celulas=[],
             camadas=layers,
         )
@@ -1143,14 +1219,9 @@ class _GridUiBinding:
         color_combo = getattr(self.ui, "laminate_color_combo", None)
         if isinstance(color_combo, QComboBox):
             color_combo.blockSignals(True)
-            unique_colors = list(
-                OrderedDict(
-                    (laminado.cor_hex, None) for laminado in self.model.laminados.values()
-                ).keys()
-            )
-            for color in unique_colors:
-                if color not in [color_combo.itemText(i) for i in range(color_combo.count())]:
-                    color_combo.addItem(color)
+            color_combo.clear()
+            color_combo.addItems([str(idx) for idx in range(MIN_COLOR_INDEX, MAX_COLOR_INDEX + 1)])
+            color_combo.setEditable(False)
             color_combo.blockSignals(False)
 
         type_combo = getattr(self.ui, "laminate_type_combo", None)
@@ -1183,7 +1254,7 @@ class _GridUiBinding:
             header.setSectionResizeMode(QHeaderView.Stretch)
             header.setSectionResizeMode(StackingTableModel.COL_NUMBER, QHeaderView.Fixed)
             header.setSectionResizeMode(StackingTableModel.COL_SELECT, QHeaderView.Fixed)
-            header.setSectionResizeMode(StackingTableModel.COL_NON_STRUCT, QHeaderView.Fixed)
+            header.setSectionResizeMode(StackingTableModel.COL_PLY_TYPE, QHeaderView.Fixed)
             header.setSectionResizeMode(StackingTableModel.COL_MATERIAL, QHeaderView.Stretch)
             header.setSectionResizeMode(StackingTableModel.COL_ORIENTATION, QHeaderView.Stretch)
             header.setMinimumSectionSize(60)
@@ -1193,7 +1264,7 @@ class _GridUiBinding:
                 header.sectionClicked.connect(self._on_header_section_clicked)
             table.setColumnWidth(StackingTableModel.COL_NUMBER, 60)
             table.setColumnWidth(StackingTableModel.COL_SELECT, 120)
-            table.setColumnWidth(StackingTableModel.COL_NON_STRUCT, 160)
+            table.setColumnWidth(StackingTableModel.COL_PLY_TYPE, 160)
             table.verticalHeader().setVisible(False)
             self._install_delegates(table)
             self._refresh_selection_header()
@@ -1274,10 +1345,8 @@ class _GridUiBinding:
         column = index.column()
         if column == StackingTableModel.COL_SELECT:
             self.stacking_model.toggle_check(index.row())
-        elif column == StackingTableModel.COL_NON_STRUCT:
-            current = self.stacking_model.data(index, Qt.CheckStateRole)
-            new_state = Qt.Unchecked if current == Qt.Checked else Qt.Checked
-            self.stacking_model.setData(index, new_state, Qt.CheckStateRole)
+        elif column == StackingTableModel.COL_PLY_TYPE and isinstance(self._table_view, QTableView):
+            self._table_view.edit(index)
 
     def _apply_laminate(self, laminate_name: str) -> None:
         if self._updating:
@@ -1294,7 +1363,12 @@ class _GridUiBinding:
 
             color_combo = getattr(self.ui, "laminate_color_combo", None)
             if isinstance(color_combo, QComboBox):
-                color_combo.setEditText(laminado.cor_hex)
+                target = str(laminado.color_index or DEFAULT_COLOR_INDEX)
+                idx = color_combo.findText(target)
+                if idx >= 0:
+                    color_combo.setCurrentIndex(idx)
+                else:
+                    color_combo.setCurrentText(target)
 
             type_combo = getattr(self.ui, "laminate_type_combo", None)
             if isinstance(type_combo, QComboBox):
@@ -1367,6 +1441,7 @@ class _GridUiBinding:
 
     def _install_delegates(self, table: QTableView) -> None:
         self._checkbox_delegate = CenteredCheckBoxDelegate(table)
+        self._ply_type_delegate = PlyTypeComboDelegate(table)
         self._material_delegate = MaterialComboDelegate(
             table, items_provider=self._material_options
         )
@@ -1377,7 +1452,7 @@ class _GridUiBinding:
             StackingTableModel.COL_SELECT, self._checkbox_delegate
         )
         table.setItemDelegateForColumn(
-            StackingTableModel.COL_NON_STRUCT, self._checkbox_delegate
+            StackingTableModel.COL_PLY_TYPE, self._ply_type_delegate
         )
         table.setItemDelegateForColumn(
             StackingTableModel.COL_MATERIAL, self._material_delegate
@@ -1450,7 +1525,7 @@ class _GridUiBinding:
             orientacao=0,
             ativo=True,
             simetria=False,
-            nao_estrutural=False,
+            ply_type=DEFAULT_PLY_TYPE,
         )
         self.stacking_model.insert_layer(insert_position, new_layer)
         laminado.camadas = self.stacking_model.layers()

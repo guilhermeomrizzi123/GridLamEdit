@@ -8,7 +8,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Optional
 
-from gridlamedit.io.spreadsheet import Camada, GridModel, Laminado
+from gridlamedit.io.spreadsheet import (
+    Camada,
+    DEFAULT_COLOR_INDEX,
+    DEFAULT_PLY_TYPE,
+    GridModel,
+    Laminado,
+    PLY_TYPE_OPTIONS,
+    normalize_color_index,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -16,9 +24,10 @@ logger = logging.getLogger(__name__)
 def _serialize_model(model: GridModel) -> dict:
     laminates_data: list[dict] = []
     for laminate in model.laminados.values():
+        color_index = int(laminate.color_index or DEFAULT_COLOR_INDEX)
         laminate_dict = {
             "nome": laminate.nome,
-            "cor_hex": laminate.cor_hex,
+            "color_index": color_index,
             "tipo": laminate.tipo,
             "celulas": list(laminate.celulas),
             "camadas": [
@@ -28,7 +37,7 @@ def _serialize_model(model: GridModel) -> dict:
                     "orientacao": layer.orientacao,
                     "ativo": layer.ativo,
                     "simetria": layer.simetria,
-                    "nao_estrutural": getattr(layer, "nao_estrutural", False),
+                    "ply_type": getattr(layer, "ply_type", DEFAULT_PLY_TYPE),
                 }
                 for layer in laminate.camadas
             ],
@@ -50,28 +59,64 @@ def _deserialize_model(data: dict) -> GridModel:
     model.source_excel_path = data.get("source_excel_path")
 
     laminates = {}
+    compat_warnings: list[str] = []
     for lam_data in data.get("laminados", []):
-        layers = [
-            Camada(
-                idx=int(layer.get("idx", index)),
-                material=str(layer.get("material", "")),
-                orientacao=int(layer.get("orientacao", 0)),
-                ativo=bool(layer.get("ativo", True)),
-                simetria=bool(layer.get("simetria", False)),
-                nao_estrutural=bool(layer.get("nao_estrutural", False)),
+        lam_name = str(lam_data.get("nome", ""))
+        raw_color_idx = lam_data.get("color_index", None)
+        color_index = DEFAULT_COLOR_INDEX
+        if raw_color_idx is None:
+            legacy_hex = lam_data.get("cor_hex")
+            if legacy_hex:
+                message = (
+                    f"Laminado '{lam_name or '(sem nome)'}' traz cor hexadecimal '{legacy_hex}'; "
+                    f"convertendo para indice {DEFAULT_COLOR_INDEX}."
+                )
+                logger.warning(message)
+                compat_warnings.append(message)
+        else:
+            color_index = normalize_color_index(raw_color_idx, DEFAULT_COLOR_INDEX)
+            try:
+                parsed_value = int(float(raw_color_idx))
+            except (TypeError, ValueError):
+                parsed_value = None
+            if parsed_value is None or parsed_value != color_index:
+                message = (
+                    f"Laminado '{lam_name or '(sem nome)'}' possui indice de cor invalido "
+                    f"'{raw_color_idx}'; usando {color_index}."
+                )
+                compat_warnings.append(message)
+
+        layers: list[Camada] = []
+        for index, layer in enumerate(lam_data.get("camadas", [])):
+            ply_type = layer.get("ply_type")
+            if ply_type not in PLY_TYPE_OPTIONS:
+                ply_type = (
+                    PLY_TYPE_OPTIONS[1]
+                    if bool(layer.get("nao_estrutural", False))
+                    else DEFAULT_PLY_TYPE
+                )
+            layers.append(
+                Camada(
+                    idx=int(layer.get("idx", index)),
+                    material=str(layer.get("material", "")),
+                    orientacao=int(layer.get("orientacao", 0)),
+                    ativo=bool(layer.get("ativo", True)),
+                    simetria=bool(layer.get("simetria", False)),
+                    ply_type=str(ply_type),
+                )
             )
-            for index, layer in enumerate(lam_data.get("camadas", []))
-        ]
         laminate = Laminado(
-            nome=str(lam_data.get("nome", "")),
-            cor_hex=str(lam_data.get("cor_hex", "#FFFFFF")),
+            nome=lam_name,
             tipo=str(lam_data.get("tipo", "")),
+            color_index=color_index,
             celulas=list(lam_data.get("celulas", [])),
             camadas=layers,
         )
         laminates[laminate.nome] = laminate
 
     model.laminados = laminates
+    if compat_warnings:
+        model.compat_warnings.extend(compat_warnings)
     return model
 
 
