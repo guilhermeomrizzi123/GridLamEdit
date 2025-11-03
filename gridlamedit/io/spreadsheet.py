@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QListWidget,
     QListWidgetItem,
+    QPushButton,
     QSizePolicy,
     QTableView,
 )
@@ -314,7 +315,12 @@ def save_grid_spreadsheet(path: str, model: GridModel) -> None:
 class StackingTableModel(QAbstractTableModel):
     """Apresenta as camadas do laminado na tabela de stacking."""
 
-    headers = ["Material", "Orientacao"]
+    COL_NUMBER = 0
+    COL_CHECK = 1
+    COL_MATERIAL = 2
+    COL_ORIENTATION = 3
+
+    headers = ["#", "Selecionar", "Material", "Orientacao"]
 
     def __init__(
         self,
@@ -322,12 +328,16 @@ class StackingTableModel(QAbstractTableModel):
         change_callback: Optional[Callable[[list[Camada]], None]] = None,
     ) -> None:
         super().__init__()
-        self._camadas: list[Camada] = list(camadas or [])
+        self._camadas: list[Camada] = []
+        self._checked: list[bool] = []
         self._change_callback = change_callback
+        self.update_layers(camadas or [])
 
-    def update_layers(self, camadas: list[Camada]) -> None:
+    def update_layers(self, camadas: Iterable[Camada]) -> None:
         self.beginResetModel()
         self._camadas = list(camadas)
+        self._checked = [False] * len(self._camadas)
+        self._sync_indices()
         self.endResetModel()
 
     def rowCount(self, parent: QModelIndex = QModelIndex()) -> int:  # noqa: N802
@@ -346,59 +356,78 @@ class StackingTableModel(QAbstractTableModel):
         orientation: Qt.Orientation,
         role: int = Qt.DisplayRole,
     ) -> Optional[str]:
-        if role != Qt.DisplayRole:
-            return None
-        if orientation == Qt.Horizontal and 0 <= section < len(self.headers):
-            return self.headers[section]
-        if orientation == Qt.Vertical:
+        if orientation == Qt.Horizontal and role == Qt.DisplayRole:
+            if 0 <= section < len(self.headers):
+                return self.headers[section]
+        if orientation == Qt.Vertical and role == Qt.DisplayRole:
             return str(section + 1)
         return None
 
-    def data(self, index: QModelIndex, role: int = Qt.DisplayRole) -> Optional[str]:  # noqa: N802
+    def data(self, index: QModelIndex, role: int = Qt.DisplayRole) -> Optional[object]:  # noqa: N802
         if not index.isValid() or not (0 <= index.row() < len(self._camadas)):
             return None
 
         camada = self._camadas[index.row()]
+        column = index.column()
 
         if role == Qt.DisplayRole:
-            coluna = index.column()
-            if coluna == 0:
+            if column == self.COL_NUMBER:
+                return str(index.row() + 1)
+            if column == self.COL_MATERIAL:
                 return camada.material
-            if coluna == 1:
+            if column == self.COL_ORIENTATION:
                 return f"{camada.orientacao}\N{DEGREE SIGN}"
-        elif role == Qt.TextAlignmentRole:
-            if index.column() == 0:
-                return int(Qt.AlignVCenter | Qt.AlignLeft)
-            return int(Qt.AlignVCenter | Qt.AlignCenter)
         elif role == Qt.EditRole:
-            if index.column() == 0:
+            if column == self.COL_MATERIAL:
                 return camada.material
-            if index.column() == 1:
+            if column == self.COL_ORIENTATION:
                 return f"{camada.orientacao}\N{DEGREE SIGN}"
+        elif role == Qt.CheckStateRole and column == self.COL_CHECK:
+            return Qt.Checked if self._checked[index.row()] else Qt.Unchecked
+        elif role == Qt.TextAlignmentRole:
+            if column in (self.COL_NUMBER, self.COL_CHECK, self.COL_ORIENTATION):
+                return int(Qt.AlignVCenter | Qt.AlignCenter)
+            return int(Qt.AlignVCenter | Qt.AlignLeft)
 
         return None
 
     def flags(self, index: QModelIndex) -> Qt.ItemFlags:  # noqa: N802
         if not index.isValid():
             return Qt.NoItemFlags
-        return Qt.ItemIsSelectable | Qt.ItemIsEnabled | Qt.ItemIsEditable
+        column = index.column()
+        base_flags = Qt.ItemIsSelectable | Qt.ItemIsEnabled
+        if column == self.COL_CHECK:
+            return base_flags | Qt.ItemIsUserCheckable
+        if column in (self.COL_MATERIAL, self.COL_ORIENTATION):
+            return base_flags | Qt.ItemIsEditable
+        return base_flags
 
-    def setData(
+    def setData(  # noqa: N802
         self,
         index: QModelIndex,
         value: object,
         role: int = Qt.EditRole,
-    ) -> bool:  # noqa: N802
-        if not index.isValid() or role not in (Qt.EditRole, Qt.DisplayRole):
+    ) -> bool:
+        if not index.isValid():
             return False
-        camada = self._camadas[index.row()]
         column = index.column()
-        if column == 0:
+        row = index.row()
+        camada = self._camadas[row]
+
+        if column == self.COL_CHECK and role == Qt.CheckStateRole:
+            checked = value == Qt.Checked
+            if self._checked[row] == checked:
+                return False
+            self._checked[row] = checked
+            self.dataChanged.emit(index, index, [Qt.CheckStateRole])
+            return True
+
+        if column == self.COL_MATERIAL and role in (Qt.EditRole, Qt.DisplayRole):
             new_value = str(value).strip()
             if new_value == camada.material:
                 return False
             camada.material = new_value
-        elif column == 1:
+        elif column == self.COL_ORIENTATION and role in (Qt.EditRole, Qt.DisplayRole):
             text = str(value).strip()
             cleaned = text.replace("\N{DEGREE SIGN}", "").replace("º", "").strip()
             try:
@@ -410,9 +439,88 @@ class StackingTableModel(QAbstractTableModel):
             camada.orientacao = angle
         else:
             return False
+
         self.dataChanged.emit(index, index, [Qt.DisplayRole, Qt.EditRole])
         if self._change_callback:
-            self._change_callback(self._camadas)
+            self._change_callback(self.layers())
+        return True
+
+    # Helpers for controller ------------------------------------------------- #
+
+    def insert_layer(self, position: int, camada: Camada) -> None:
+        position = max(0, min(position, len(self._camadas)))
+        self.beginInsertRows(QModelIndex(), position, position)
+        self._camadas.insert(position, camada)
+        self._checked.insert(position, False)
+        self.endInsertRows()
+        self._sync_indices()
+        if self._change_callback:
+            self._change_callback(self.layers())
+
+    def remove_rows(self, rows: Iterable[int]) -> int:
+        removed = 0
+        for row in sorted(set(rows), reverse=True):
+            if 0 <= row < len(self._camadas):
+                self.beginRemoveRows(QModelIndex(), row, row)
+                del self._camadas[row]
+                del self._checked[row]
+                self.endRemoveRows()
+                removed += 1
+        if removed:
+            self._sync_indices()
+            if self._change_callback:
+                self._change_callback(self.layers())
+        return removed
+
+    def checked_rows(self) -> list[int]:
+        return [idx for idx, checked in enumerate(self._checked) if checked]
+
+    def clear_checks(self) -> None:
+        if not any(self._checked):
+            return
+        self.set_all_checked(False)
+
+    def layers(self) -> list[Camada]:
+        return list(self._camadas)
+
+    def _sync_indices(self) -> None:
+        for idx, camada in enumerate(self._camadas):
+            camada.idx = idx
+
+    def set_all_checked(self, value: bool) -> None:
+        if not self._checked:
+            return
+        new_state = [value] * len(self._checked)
+        if self._checked == new_state:
+            return
+        self._checked = new_state
+        top_left = self.index(0, self.COL_CHECK)
+        bottom_right = self.index(self.rowCount() - 1, self.COL_CHECK)
+        self.dataChanged.emit(top_left, bottom_right, [Qt.CheckStateRole])
+
+    def all_checked(self) -> bool:
+        return bool(self._checked) and all(self._checked)
+
+    def any_checked(self) -> bool:
+        return any(self._checked)
+
+    def move_row(self, source: int, target: int) -> bool:
+        if source == target or not (0 <= source < len(self._camadas)):
+            return False
+        if not (0 <= target < len(self._camadas)):
+            return False
+        destination = target
+        if destination > source:
+            destination += 1
+        self.beginMoveRows(QModelIndex(), source, source, QModelIndex(), destination)
+        camada = self._camadas.pop(source)
+        checked = self._checked.pop(source)
+        self._camadas.insert(target, camada)
+        self._checked.insert(target, checked)
+        self.endMoveRows()
+        self._sync_indices()
+        if self._change_callback:
+            self._change_callback(self.layers())
         return True
 
 
@@ -777,6 +885,11 @@ class _GridUiBinding:
         self._laminates_by_cell: dict[str, list[str]] = self._build_cell_index()
         self.stacking_model = StackingTableModel(change_callback=self._on_layers_modified)
         self._cells_widget: Optional[QListWidget] = None
+        self._select_all_button: Optional[QPushButton] = None
+
+        self.stacking_model.dataChanged.connect(lambda *args: self._sync_select_all_button())
+        self.stacking_model.modelReset.connect(self._sync_select_all_button)
+        self.stacking_model.layoutChanged.connect(self._sync_select_all_button)
 
         self._setup_widgets()
         self._connect_signals()
@@ -795,6 +908,22 @@ class _GridUiBinding:
             self.ui.laminate_name_combo.currentTextChanged.disconnect(self._on_laminate_selected)
         except (AttributeError, TypeError):
             pass
+        try:
+            table = getattr(self.ui, "layers_table", None)
+            if isinstance(table, QTableView):
+                header = table.horizontalHeader()
+                header.sectionResized.disconnect(self._update_select_all_button_geometry)
+                header.sectionMoved.disconnect(self._update_select_all_button_geometry)
+                header.geometriesChanged.disconnect(self._update_select_all_button_geometry)
+                scrollbar = table.horizontalScrollBar()
+                if scrollbar is not None:
+                    scrollbar.valueChanged.disconnect(self._update_select_all_button_geometry)
+        except (AttributeError, TypeError):
+            pass
+        button = getattr(self, "_select_all_button", None)
+        if button is not None:
+            button.deleteLater()
+            self._select_all_button = None
 
     # Internal helpers -------------------------------------------------- #
 
@@ -857,8 +986,15 @@ class _GridUiBinding:
             table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
             header = table.horizontalHeader()
             header.setSectionResizeMode(QHeaderView.Stretch)
+            header.setSectionResizeMode(StackingTableModel.COL_NUMBER, QHeaderView.Fixed)
+            header.setSectionResizeMode(StackingTableModel.COL_CHECK, QHeaderView.Fixed)
+            header.setSectionResizeMode(StackingTableModel.COL_MATERIAL, QHeaderView.Stretch)
+            header.setSectionResizeMode(StackingTableModel.COL_ORIENTATION, QHeaderView.Stretch)
+            table.setColumnWidth(StackingTableModel.COL_NUMBER, 50)
+            table.setColumnWidth(StackingTableModel.COL_CHECK, 120)
             table.verticalHeader().setVisible(False)
             self._install_delegates(table)
+            self._create_select_all_button(table)
 
         cells_widget = getattr(self.ui, "lstCelulas", None)
         if not isinstance(cells_widget, QListWidget):
@@ -1004,8 +1140,13 @@ class _GridUiBinding:
         self._orientation_delegate = OrientationComboDelegate(
             table, items_provider=self._orientation_options
         )
-        table.setItemDelegateForColumn(0, self._material_delegate)
-        table.setItemDelegateForColumn(1, self._orientation_delegate)
+        table.setItemDelegateForColumn(
+            StackingTableModel.COL_MATERIAL, self._material_delegate
+        )
+        table.setItemDelegateForColumn(
+            StackingTableModel.COL_ORIENTATION, self._orientation_delegate
+        )
+        self._sync_select_all_button()
 
     def _material_options(self) -> list[str]:
         materials: list[str] = []
@@ -1046,6 +1187,126 @@ class _GridUiBinding:
     def _on_layers_modified(self, _layers: list[Camada]) -> None:
         if hasattr(self.ui, "_mark_dirty"):
             self.ui._mark_dirty()
+
+    def add_layer(self, after_row: Optional[int] = None) -> bool:
+        if not self._current_laminate:
+            return False
+        laminado = self.model.laminados.get(self._current_laminate)
+        if laminado is None:
+            return False
+        insert_position = len(self.stacking_model.layers())
+        if after_row is not None and 0 <= after_row < insert_position:
+            insert_position = after_row + 1
+
+        new_layer = Camada(
+            idx=0,
+            material="",
+            orientacao=0,
+            ativo=True,
+            simetria=False,
+        )
+        self.stacking_model.insert_layer(insert_position, new_layer)
+        laminado.camadas = self.stacking_model.layers()
+        self.stacking_model.clear_checks()
+        self._sync_select_all_button()
+        if hasattr(self.ui, "_mark_dirty"):
+            self.ui._mark_dirty()
+        return True
+
+    def delete_checked_layers(self) -> int:
+        if not self._current_laminate:
+            return 0
+        laminado = self.model.laminados.get(self._current_laminate)
+        if laminado is None:
+            return 0
+        rows = self.stacking_model.checked_rows()
+        if not rows:
+            return 0
+        removed = self.stacking_model.remove_rows(rows)
+        if removed:
+            laminado.camadas = self.stacking_model.layers()
+            self.stacking_model.clear_checks()
+            self._sync_select_all_button()
+            if hasattr(self.ui, "_mark_dirty"):
+                self.ui._mark_dirty()
+        return removed
+
+    def checked_rows(self) -> list[int]:
+        return self.stacking_model.checked_rows()
+
+    def move_selected_layer(self, direction: int) -> tuple[bool, str]:
+        rows = self.checked_rows()
+        if not rows:
+            return False, "none"
+        if len(rows) > 1:
+            return False, "multi"
+        current = rows[0]
+        target = current + direction
+        if not (0 <= target < self.stacking_model.rowCount()):
+            return False, "edge"
+        if not self.stacking_model.move_row(current, target):
+            return False, "noop"
+        laminado = self.model.laminados.get(self._current_laminate)
+        if laminado is not None:
+            laminado.camadas = self.stacking_model.layers()
+        self._sync_select_all_button()
+        if hasattr(self.ui, "_mark_dirty"):
+            self.ui._mark_dirty()
+        return True, ""
+
+    def _create_select_all_button(self, table: QTableView) -> None:
+        if self._select_all_button is not None:
+            self._update_select_all_button_geometry()
+            return
+        header = table.horizontalHeader()
+        button = QPushButton("Selecionar Todas", header)
+        button.setCheckable(True)
+        button.setFocusPolicy(Qt.NoFocus)
+        button.setStyleSheet(
+            "QPushButton { border: none; padding: 0 4px; font-size: 11px; }"
+            "QPushButton:checked { font-weight: bold; }"
+        )
+        button.clicked.connect(self._on_select_all_clicked)
+        self._select_all_button = button
+        header.sectionResized.connect(self._update_select_all_button_geometry)
+        header.sectionMoved.connect(self._update_select_all_button_geometry)
+        header.geometriesChanged.connect(self._update_select_all_button_geometry)
+        scrollbar = table.horizontalScrollBar()
+        if scrollbar is not None:
+            scrollbar.valueChanged.connect(self._update_select_all_button_geometry)
+        self._update_select_all_button_geometry()
+        self._sync_select_all_button()
+
+    def _on_select_all_clicked(self) -> None:
+        if self.stacking_model.all_checked():
+            self.stacking_model.set_all_checked(False)
+        else:
+            self.stacking_model.set_all_checked(True)
+        self._sync_select_all_button()
+
+    def _update_select_all_button_geometry(self, *args) -> None:
+        button = self._select_all_button
+        table = getattr(self.ui, "layers_table", None)
+        if button is None or not isinstance(table, QTableView):
+            return
+        header = table.horizontalHeader()
+        column = StackingTableModel.COL_CHECK
+        if column >= header.count():
+            return
+        x = header.sectionPosition(column)
+        width = header.sectionSize(column)
+        height = header.height()
+        button.setGeometry(x + 2, 2, max(24, width - 4), height - 4)
+        button.raise_()
+
+    def _sync_select_all_button(self) -> None:
+        button = self._select_all_button
+        if button is None:
+            return
+        state = self.stacking_model.all_checked()
+        button.blockSignals(True)
+        button.setChecked(state)
+        button.blockSignals(False)
 
 
 def _open_with_xlrd(file_path: Path, cause: Exception) -> _WorkbookProtocol:

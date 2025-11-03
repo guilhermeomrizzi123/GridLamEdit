@@ -8,7 +8,15 @@ from pathlib import Path
 from typing import Iterable, List, Optional
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QAction, QColor, QCloseEvent, QFont, QKeySequence, QShortcut
+from PySide6.QtGui import (
+    QAction,
+    QColor,
+    QCloseEvent,
+    QFont,
+    QGuiApplication,
+    QKeySequence,
+    QShortcut,
+)
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
@@ -24,6 +32,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QMainWindow,
     QPushButton,
+    QStyle,
     QSizePolicy,
     QSplitter,
     QStatusBar,
@@ -64,7 +73,7 @@ class MainWindow(QMainWindow):
         self.base_title = "GridLamEdit"
         self.project_manager = ProjectManager(self._on_project_dirty_changed)
         self.setWindowTitle(self.base_title)
-        self.resize(1200, 800)
+        self._apply_initial_geometry()
 
         self._grid_model: Optional[GridModel] = None
 
@@ -74,6 +83,20 @@ class MainWindow(QMainWindow):
         self._setup_central_widget()
         self._setup_status_bar()
         self._update_save_actions_enabled()
+
+    def _apply_initial_geometry(self) -> None:
+        screen = QGuiApplication.primaryScreen()
+        if screen is None:
+            self.resize(1200, 800)
+            return
+        geometry = screen.availableGeometry()
+        width = int(geometry.width() * 0.9)
+        height = int(geometry.height() * 0.9)
+        self.resize(width, height)
+        self.move(
+            geometry.x() + (geometry.width() - width) // 2,
+            geometry.y() + (geometry.height() - height) // 2,
+        )
 
     def _create_actions(self) -> None:
         action_specs: List[
@@ -256,7 +279,7 @@ class MainWindow(QMainWindow):
         self.associated_cells = QTextEdit(container)
         self.associated_cells.setReadOnly(True)
         self.associated_cells.setPlaceholderText("C3, C5")
-        self.associated_cells.setFixedHeight(120)
+        self.associated_cells.setFixedHeight(60)
         self.associated_cells.setStyleSheet("background-color: #ffffff;")
 
         layout.addWidget(label)
@@ -290,21 +313,45 @@ class MainWindow(QMainWindow):
         layout.setSpacing(8)
         layout.setContentsMargins(0, 0, 0, 0)
 
-        buttons_info = [
-            "Adicionar Camada",
-            "Duplicar Camada",
-            "Mover Acima",
-            "Mover Abaixo",
-            "Verificar Simetria",
-        ]
-
         self.layer_buttons: list[QPushButton] = []
-        for text in buttons_info:
-            button = QPushButton(text, self)
-            button.setFixedWidth(200)
-            button.clicked.connect(self._show_todo_message)  # type: ignore[arg-type]
-            self.layer_buttons.append(button)
-            layout.addWidget(button)
+
+        self.add_layer_button = QPushButton("Adicionar Camada", self)
+        self.add_layer_button.setFixedWidth(200)
+        self.add_layer_button.clicked.connect(self._on_add_layer_clicked)
+        self.layer_buttons.append(self.add_layer_button)
+        layout.addWidget(self.add_layer_button)
+
+        self.duplicate_layer_button = QPushButton("Duplicar Camada", self)
+        self.duplicate_layer_button.setFixedWidth(200)
+        self.duplicate_layer_button.clicked.connect(self._show_todo_message)  # type: ignore[arg-type]
+        self.layer_buttons.append(self.duplicate_layer_button)
+        layout.addWidget(self.duplicate_layer_button)
+
+        self.move_up_button = QPushButton("Mover Acima", self)
+        self.move_up_button.setFixedWidth(200)
+        self.move_up_button.clicked.connect(self._on_move_up_clicked)
+        self.layer_buttons.append(self.move_up_button)
+        layout.addWidget(self.move_up_button)
+
+        self.move_down_button = QPushButton("Mover Abaixo", self)
+        self.move_down_button.setFixedWidth(200)
+        self.move_down_button.clicked.connect(self._on_move_down_clicked)
+        self.layer_buttons.append(self.move_down_button)
+        layout.addWidget(self.move_down_button)
+
+        self.symmetry_button = QPushButton("Verificar Simetria", self)
+        self.symmetry_button.setFixedWidth(200)
+        self.symmetry_button.clicked.connect(self._show_todo_message)  # type: ignore[arg-type]
+        self.layer_buttons.append(self.symmetry_button)
+        layout.addWidget(self.symmetry_button)
+
+        self.delete_layers_button = QPushButton("Excluir Selecionadas", self)
+        self.delete_layers_button.setFixedWidth(200)
+        self.delete_layers_button.setIcon(self.style().standardIcon(QStyle.SP_TrashIcon))
+        self.delete_layers_button.setToolTip("Excluir camadas selecionadas")
+        self.delete_layers_button.clicked.connect(self._on_delete_layers_clicked)
+        self.layer_buttons.append(self.delete_layers_button)
+        layout.addWidget(self.delete_layers_button)
 
         layout.addStretch()
         return layout
@@ -645,6 +692,111 @@ class MainWindow(QMainWindow):
         """Placeholder slot for unimplemented actions."""
         if self.statusBar():
             self.statusBar().showMessage("TODO: implementar acao.", 2000)
+
+    def _on_add_layer_clicked(self) -> None:
+        binding = getattr(self, "_grid_binding", None)
+        if binding is None:
+            return
+        checked_rows = binding.checked_rows()
+        if len(checked_rows) > 1:
+            QMessageBox.warning(
+                self,
+                "Adicionar camada",
+                "Apenas uma camada deve estar selecionada para adicionar uma nova abaixo.",
+            )
+            return
+        target_row = checked_rows[0] if checked_rows else None
+        if not binding.add_layer(target_row):
+            QMessageBox.information(
+                self,
+                "Adicionar camada",
+                "Nenhum laminado ativo para receber a nova camada.",
+            )
+            return
+        if self.statusBar():
+            self.statusBar().showMessage("Camada adicionada.", 3000)
+        self._update_save_actions_enabled()
+
+    def _on_delete_layers_clicked(self) -> None:
+        binding = getattr(self, "_grid_binding", None)
+        if binding is None:
+            return
+        selected = binding.checked_rows()
+        count = len(selected)
+        if count == 0:
+            QMessageBox.information(
+                self,
+                "Excluir camadas",
+                "Selecione pelo menos uma camada para excluir.",
+            )
+            return
+        reply = QMessageBox.question(
+            self,
+            "Confirmar exclusao",
+            f"{count} camada(s) serao excluidas. Deseja continuar?",
+            QMessageBox.Yes | QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+        removed = binding.delete_checked_layers()
+        if removed == 0:
+            return
+        if self.statusBar():
+            self.statusBar().showMessage(
+                f"{removed} camada(s) excluidas.", 3000
+            )
+        self._update_save_actions_enabled()
+
+    def _on_move_up_clicked(self) -> None:
+        binding = getattr(self, "_grid_binding", None)
+        if binding is None:
+            return
+        success, reason = binding.move_selected_layer(-1)
+        if success:
+            if self.statusBar():
+                self.statusBar().showMessage("Camada movida para cima.", 3000)
+            self._update_save_actions_enabled()
+            return
+        self._handle_move_error(reason, "acima")
+
+    def _on_move_down_clicked(self) -> None:
+        binding = getattr(self, "_grid_binding", None)
+        if binding is None:
+            return
+        success, reason = binding.move_selected_layer(1)
+        if success:
+            if self.statusBar():
+                self.statusBar().showMessage("Camada movida para baixo.", 3000)
+            self._update_save_actions_enabled()
+            return
+        self._handle_move_error(reason, "abaixo")
+
+    def _handle_move_error(self, reason: str, direction_label: str) -> None:
+        if reason == "none":
+            QMessageBox.information(
+                self,
+                "Nenhuma camada selecionada",
+                "Selecione uma camada para mover.",
+            )
+        elif reason == "multi":
+            QMessageBox.warning(
+                self,
+                "Selecao invalida",
+                "Apenas uma camada deve estar selecionada para mover.",
+            )
+        elif reason == "edge":
+            QMessageBox.information(
+                self,
+                "Movimento invalido",
+                f"A camada ja esta na posicao limite {direction_label}.",
+            )
+        else:
+            QMessageBox.information(
+                self,
+                "Movimento invalido",
+                "Nao foi possivel mover a camada selecionada.",
+            )
+
 
     def _load_spreadsheet(self, checked: bool = False) -> None:  # noqa: ARG002
         """Open an Excel file and populate the UI."""
