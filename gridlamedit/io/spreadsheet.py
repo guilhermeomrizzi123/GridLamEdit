@@ -523,6 +523,14 @@ class StackingTableModel(QAbstractTableModel):
             self._change_callback(self.layers())
         return True
 
+    def toggle_check(self, row: int) -> bool:
+        if not (0 <= row < len(self._camadas)):
+            return False
+        index = self.index(row, self.COL_CHECK)
+        current = self.data(index, Qt.CheckStateRole)
+        new_state = Qt.Unchecked if current == Qt.Checked else Qt.Checked
+        return self.setData(index, new_state, Qt.CheckStateRole)
+
 
 def bind_model_to_ui(model: GridModel, ui) -> None:
     """Efetua o binding do modelo carregado com os widgets da UI."""
@@ -909,6 +917,11 @@ class _GridUiBinding:
         except (AttributeError, TypeError):
             pass
         try:
+            if isinstance(getattr(self, "_table_view", None), QTableView):
+                self._table_view.clicked.disconnect(self._on_table_clicked)
+        except (AttributeError, TypeError):
+            pass
+        try:
             table = getattr(self.ui, "layers_table", None)
             if isinstance(table, QTableView):
                 header = table.horizontalHeader()
@@ -924,6 +937,7 @@ class _GridUiBinding:
         if button is not None:
             button.deleteLater()
             self._select_all_button = None
+        self._table_view = None
 
     # Internal helpers -------------------------------------------------- #
 
@@ -975,6 +989,7 @@ class _GridUiBinding:
 
         table = getattr(self.ui, "layers_table", None)
         if isinstance(table, QTableView):
+            self._table_view = table
             table.setModel(self.stacking_model)
             table.setEditTriggers(
                 QAbstractItemView.DoubleClicked
@@ -1010,6 +1025,9 @@ class _GridUiBinding:
         name_combo = getattr(self.ui, "laminate_name_combo", None)
         if isinstance(name_combo, QComboBox):
             name_combo.currentTextChanged.connect(self._on_laminate_selected)
+
+        if isinstance(getattr(self, "_table_view", None), QTableView):
+            self._table_view.clicked.connect(self._on_table_clicked)
 
     def _on_cell_item_changed(
         self,
@@ -1047,6 +1065,13 @@ class _GridUiBinding:
             return
         self._apply_laminate(laminate_name)
         self._update_cell_mapping(laminate_name)
+
+    def _on_table_clicked(self, index: QModelIndex) -> None:
+        if not index.isValid():
+            return
+        if index.column() == StackingTableModel.COL_CHECK:
+            if self.stacking_model.toggle_check(index.row()):
+                self._sync_select_all_button()
 
     def _apply_laminate(self, laminate_name: str) -> None:
         if self._updating:
