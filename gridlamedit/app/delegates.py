@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from typing import Callable, Iterable, Optional
 
-from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QComboBox, QStyledItemDelegate, QWidget
+from PySide6.QtCore import Qt, QRect, QEvent
+from PySide6.QtWidgets import QApplication, QComboBox, QStyledItemDelegate, QWidget, QStyle, QStyleOptionButton
 
 
 class _BaseComboDelegate(QStyledItemDelegate):
@@ -55,3 +55,30 @@ class MaterialComboDelegate(_BaseComboDelegate):
 
 class OrientationComboDelegate(_BaseComboDelegate):
     """Delegate para edicao inline da coluna de orientacao."""
+
+
+class CenteredCheckBoxDelegate(QStyledItemDelegate):
+    """Renderiza checkboxes centralizados nas celulas."""
+
+    def paint(self, painter, option, index):  # noqa: N802
+        value = index.data(Qt.CheckStateRole)
+        if value is None:
+            super().paint(painter, option, index)
+            return
+
+        opt = QStyleOptionButton()
+        opt.state |= QStyle.State_Enabled
+        if value == Qt.Checked:
+            opt.state |= QStyle.State_On
+        else:
+            opt.state |= QStyle.State_Off
+        opt.rect = self._indicator_rect(option)
+        QApplication.style().drawControl(QStyle.CE_CheckBox, opt, painter)
+
+    def _indicator_rect(self, option: QStyleOptionButton) -> QRect:
+        indicator = QApplication.style().subElementRect(
+            QStyle.SE_CheckBoxIndicator, option, None
+        )
+        x = option.rect.x() + (option.rect.width() - indicator.width()) // 2
+        y = option.rect.y() + (option.rect.height() - indicator.height()) // 2
+        return QRect(x, y, indicator.width(), indicator.height())

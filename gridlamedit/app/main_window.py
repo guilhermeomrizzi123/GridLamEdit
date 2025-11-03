@@ -279,7 +279,9 @@ class MainWindow(QMainWindow):
         self.associated_cells = QTextEdit(container)
         self.associated_cells.setReadOnly(True)
         self.associated_cells.setPlaceholderText("C3, C5")
-        self.associated_cells.setFixedHeight(60)
+        self.associated_cells.setFixedHeight(40)
+        self.associated_cells.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.associated_cells.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.associated_cells.setStyleSheet("background-color: #ffffff;")
 
         layout.addWidget(label)
@@ -292,10 +294,22 @@ class MainWindow(QMainWindow):
         layout.setSpacing(12)
         layout.setContentsMargins(0, 0, 0, 0)
 
+        table_layout = QVBoxLayout()
+        table_layout.setSpacing(6)
+        table_layout.setContentsMargins(0, 0, 0, 0)
+
         self.layers_table = self._create_layers_table(container)
-        layout.addWidget(self.layers_table, stretch=1)
+        table_layout.addWidget(self.layers_table, stretch=1)
+
+        self.layers_count_label = QLabel(
+            "Quantidade Total de Camadas: 0", container
+        )
+        self.layers_count_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        table_layout.addWidget(self.layers_count_label)
+
+        layout.addLayout(table_layout, stretch=1)
         layout.addLayout(self._create_layers_buttons())
-        container.setMinimumHeight(420)
+        container.setMinimumHeight(0)
         return container
 
     def _create_layers_table(self, parent: QWidget) -> QTableView:
@@ -305,7 +319,6 @@ class MainWindow(QMainWindow):
         table.setVerticalScrollMode(QAbstractItemView.ScrollPerItem)
         table.verticalHeader().setVisible(False)
         table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        table.setMinimumHeight(360)
         return table
 
     def _create_layers_buttons(self) -> QVBoxLayout:
@@ -623,6 +636,7 @@ class MainWindow(QMainWindow):
                     orientacao=orientacao,
                     ativo=ativo,
                     simetria=simetria,
+                    nao_estrutural=False,
                 )
             )
 

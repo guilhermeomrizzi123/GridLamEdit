@@ -28,6 +28,7 @@ def _serialize_model(model: GridModel) -> dict:
                     "orientacao": layer.orientacao,
                     "ativo": layer.ativo,
                     "simetria": layer.simetria,
+                    "nao_estrutural": getattr(layer, "nao_estrutural", False),
                 }
                 for layer in laminate.camadas
             ],
@@ -57,6 +58,7 @@ def _deserialize_model(data: dict) -> GridModel:
                 orientacao=int(layer.get("orientacao", 0)),
                 ativo=bool(layer.get("ativo", True)),
                 simetria=bool(layer.get("simetria", False)),
+                nao_estrutural=bool(layer.get("nao_estrutural", False)),
             )
             for index, layer in enumerate(lam_data.get("camadas", []))
         ]
