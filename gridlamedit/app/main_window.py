@@ -7,7 +7,7 @@ from enum import Enum, auto
 from pathlib import Path
 from typing import Iterable, List, Optional
 
-from PySide6.QtCore import Qt, QSize
+from PySide6.QtCore import Qt, QSize, QTimer
 from PySide6.QtGui import (
     QAction,
     QCloseEvent,
@@ -45,6 +45,12 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from gridlamedit.app.delegates import (
+    CenteredCheckBoxDelegate,
+    MaterialComboDelegate,
+    OrientationComboDelegate,
+    PlyTypeComboDelegate,
+)
 from gridlamedit.core.project_manager import ProjectManager
 from gridlamedit.io.spreadsheet import (
     Camada,
@@ -52,6 +58,8 @@ from gridlamedit.io.spreadsheet import (
     DEFAULT_PLY_TYPE,
     GridModel,
     Laminado,
+    StackingTableModel,
+    WordWrapHeader,
     bind_cells_to_ui,
     bind_model_to_ui,
     load_grid_spreadsheet,
@@ -87,6 +95,10 @@ class MainWindow(QMainWindow):
         self._setup_central_widget()
         self._setup_status_bar()
         self._update_save_actions_enabled()
+        self._stacking_checkbox_delegate = None
+        self._stacking_ply_delegate = None
+        self._stacking_material_delegate = None
+        self._stacking_orientation_delegate = None
 
     def _apply_initial_geometry(self) -> None:
         screen = QGuiApplication.primaryScreen()
@@ -428,6 +440,99 @@ class MainWindow(QMainWindow):
         layout.addStretch()
         return layout
 
+    def _configure_stacking_table(self, binding) -> None:
+        view = getattr(self, "layers_table", None)
+        if not isinstance(view, QTableView):
+            return
+        model = binding.stacking_model
+
+        view.setModel(None)
+
+        header = view.horizontalHeader()
+        if not isinstance(header, WordWrapHeader):
+            header = WordWrapHeader(
+                Qt.Horizontal, view, checkbox_section=StackingTableModel.COL_SELECT
+            )
+            header.setDefaultAlignment(Qt.AlignCenter)
+            view.setHorizontalHeader(header)
+        else:
+            header.set_checkbox_section(StackingTableModel.COL_SELECT)
+            header.setDefaultAlignment(Qt.AlignCenter)
+
+        view.setModel(model)
+
+        self._install_stacking_delegates(view, binding)
+        self._apply_stacking_column_setup(view)
+        binding.set_header_view(header)
+        self._refresh_stacking_header(view, model, header)
+
+    def _install_stacking_delegates(self, view: QTableView, binding) -> None:
+        self._stacking_checkbox_delegate = CenteredCheckBoxDelegate(view)
+        self._stacking_ply_delegate = PlyTypeComboDelegate(view)
+        self._stacking_material_delegate = MaterialComboDelegate(
+            view, items_provider=binding.material_options
+        )
+        self._stacking_orientation_delegate = OrientationComboDelegate(
+            view, items_provider=binding.orientation_options
+        )
+        view.setItemDelegateForColumn(
+            StackingTableModel.COL_SELECT, self._stacking_checkbox_delegate
+        )
+        view.setItemDelegateForColumn(
+            StackingTableModel.COL_PLY_TYPE, self._stacking_ply_delegate
+        )
+        view.setItemDelegateForColumn(
+            StackingTableModel.COL_MATERIAL, self._stacking_material_delegate
+        )
+        view.setItemDelegateForColumn(
+            StackingTableModel.COL_ORIENTATION, self._stacking_orientation_delegate
+        )
+
+    def _apply_stacking_column_setup(self, view: QTableView) -> None:
+        view.setSortingEnabled(False)
+        view.setEditTriggers(
+            QAbstractItemView.DoubleClicked
+            | QAbstractItemView.SelectedClicked
+            | QAbstractItemView.EditKeyPressed
+        )
+        view.setSelectionBehavior(QAbstractItemView.SelectItems)
+        view.setSelectionMode(QAbstractItemView.SingleSelection)
+
+        header = view.horizontalHeader()
+        header.setSectionResizeMode(QHeaderView.Stretch)
+        header.setSectionResizeMode(StackingTableModel.COL_NUMBER, QHeaderView.Fixed)
+        header.setSectionResizeMode(StackingTableModel.COL_SELECT, QHeaderView.Fixed)
+        header.setSectionResizeMode(StackingTableModel.COL_PLY_TYPE, QHeaderView.Fixed)
+        header.setSectionResizeMode(StackingTableModel.COL_MATERIAL, QHeaderView.Stretch)
+        header.setSectionResizeMode(
+            StackingTableModel.COL_ORIENTATION, QHeaderView.Stretch
+        )
+        header.setMinimumSectionSize(60)
+        header.setFixedHeight(max(header.height(), header.sizeHint().height()))
+
+        view.setColumnWidth(StackingTableModel.COL_NUMBER, 60)
+        view.setColumnWidth(StackingTableModel.COL_SELECT, 120)
+        view.setColumnWidth(StackingTableModel.COL_PLY_TYPE, 160)
+        view.verticalHeader().setVisible(False)
+
+    def _refresh_stacking_header(
+        self, view: QTableView, model: StackingTableModel, header: WordWrapHeader
+    ) -> None:
+        column_count = model.columnCount()
+        if column_count > 0:
+            model.headerDataChanged.emit(Qt.Horizontal, 0, column_count - 1)
+        model.layoutChanged.emit()
+        header.updateGeometry()
+        header.viewport().update()
+        view.viewport().update()
+
+        def _post_update() -> None:
+            header.updateGeometry()
+            header.viewport().update()
+            view.viewport().update()
+
+        QTimer.singleShot(0, _post_update)
+
     def _build_new_laminate_view(self) -> QWidget:
         view = QWidget(self)
         layout = QVBoxLayout(view)
@@ -715,12 +820,14 @@ class MainWindow(QMainWindow):
         if self._grid_model is None:
             return
         bind_model_to_ui(self._grid_model, self)
+        binding = getattr(self, "_grid_binding", None)
+        if binding is not None:
+            self._configure_stacking_table(binding)
         bind_cells_to_ui(self._grid_model, self)
         if hasattr(self, "laminate_name_combo"):
             idx = self.laminate_name_combo.findText(laminate_name)
             if idx >= 0:
                 self.laminate_name_combo.setCurrentIndex(idx)
-        binding = getattr(self, "_grid_binding", None)
         if binding is not None and hasattr(binding, "_apply_laminate"):
             try:
                 binding._apply_laminate(laminate_name)  # type: ignore[attr-defined]
@@ -906,6 +1013,9 @@ class MainWindow(QMainWindow):
             self._exit_creating_mode()
 
         bind_model_to_ui(self._grid_model, self)
+        binding = getattr(self, "_grid_binding", None)
+        if binding is not None:
+            self._configure_stacking_table(binding)
         bind_cells_to_ui(self._grid_model, self)
         self._apply_ui_state(self.project_manager.get_ui_state())
         self.project_manager.capture_from_model(
@@ -944,6 +1054,9 @@ class MainWindow(QMainWindow):
             self._exit_creating_mode()
 
         bind_model_to_ui(self._grid_model, self)
+        binding = getattr(self, "_grid_binding", None)
+        if binding is not None:
+            self._configure_stacking_table(binding)
         bind_cells_to_ui(self._grid_model, self)
         self._apply_ui_state(self.project_manager.get_ui_state())
         self.project_manager.capture_from_model(

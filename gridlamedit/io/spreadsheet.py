@@ -13,7 +13,14 @@ from pathlib import Path
 from typing import Callable, Dict, Iterable, List, Optional, Protocol
 
 import pandas as pd
-from PySide6.QtCore import QAbstractTableModel, QModelIndex, QPoint, QRect, Qt
+from PySide6.QtCore import (
+    QAbstractItemModel,
+    QAbstractTableModel,
+    QModelIndex,
+    QPoint,
+    QRect,
+    Qt,
+)
 from PySide6.QtGui import QPalette
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -27,13 +34,6 @@ from PySide6.QtWidgets import (
     QSizePolicy,
     QTableView,
     QWidget,
-)
-
-from gridlamedit.app.delegates import (
-    CenteredCheckBoxDelegate,
-    MaterialComboDelegate,
-    OrientationComboDelegate,
-    PlyTypeComboDelegate,
 )
 
 _OPEN_EXCEL_EXCEPTIONS: tuple[type[BaseException], ...] = (zipfile.BadZipFile,)
@@ -72,7 +72,7 @@ MIN_COLOR_INDEX = 1
 MAX_COLOR_INDEX = 150
 
 
-class _WordWrapHeader(QHeaderView):
+class WordWrapHeader(QHeaderView):
     def __init__(
         self,
         orientation: Qt.Orientation,
@@ -84,6 +84,12 @@ class _WordWrapHeader(QHeaderView):
         self.setDefaultAlignment(Qt.AlignCenter)
         self.setSectionsClickable(True)
         self._checkbox_section: Optional[int] = checkbox_section
+        self._connected_model: Optional[QAbstractItemModel] = None
+        self._signal_handlers = {
+            "headerDataChanged": self._on_header_changed,
+            "modelReset": self._on_model_reset,
+            "layoutChanged": self._on_model_reset,
+        }
 
     def set_checkbox_section(self, section: Optional[int]) -> None:
         previous = self._checkbox_section
@@ -97,6 +103,50 @@ class _WordWrapHeader(QHeaderView):
 
     def checkbox_section(self) -> Optional[int]:
         return self._checkbox_section
+
+    def setModel(self, model: Optional[QAbstractItemModel]) -> None:
+        previous = self.model()
+        if previous is not None:
+            self._disconnect_model_signals(previous)
+        super().setModel(model)
+        self._connect_model_signals(model)
+        self._on_model_reset()
+
+    def _connect_model_signals(self, model: Optional[QAbstractItemModel]) -> None:
+        if model is None:
+            self._connected_model = None
+            return
+        if self._connected_model is model:
+            return
+        self._connected_model = model
+        for signal_name, handler in self._signal_handlers.items():
+            try:
+                getattr(model, signal_name).connect(handler)
+            except AttributeError:
+                continue
+
+    def _disconnect_model_signals(self, model: Optional[QAbstractItemModel]) -> None:
+        if model is None:
+            return
+        for signal_name, handler in self._signal_handlers.items():
+            try:
+                getattr(model, signal_name).disconnect(handler)
+            except (AttributeError, TypeError, RuntimeError):
+                continue
+
+    def _on_header_changed(self, orientation: Qt.Orientation, first: int, last: int) -> None:
+        if orientation != Qt.Horizontal:
+            return
+        for section in range(first, last + 1):
+            self.updateSection(section)
+        self.updateGeometry()
+        self.viewport().update()
+
+    def _on_model_reset(self, *args) -> None:
+        if self.model() is None:
+            return
+        self.updateGeometry()
+        self.viewport().update()
 
     def paintSection(self, painter, rect, logicalIndex):  # noqa: N802
         if not rect.isValid():
@@ -565,7 +615,7 @@ class StackingTableModel(QAbstractTableModel):
             if role == Qt.DisplayRole and 0 <= section < len(self.HEADERS):
                 return self.HEADERS[section]
             if role == Qt.TextAlignmentRole:
-                return int(Qt.AlignHCenter | Qt.AlignVCenter)
+                return int(Qt.AlignCenter)
             if role == Qt.ToolTipRole and 0 <= section < len(self.HEADERS):
                 return self.HEADERS[section]
         if orientation == Qt.Vertical and role == Qt.DisplayRole:
@@ -1140,7 +1190,7 @@ class _GridUiBinding:
         self.stacking_model = StackingTableModel(change_callback=self._on_layers_modified)
         self._cells_widget: Optional[QListWidget] = None
         self._table_view: Optional[QTableView] = None
-        self._header_view: Optional[_WordWrapHeader] = None
+        self._header_view: Optional[WordWrapHeader] = None
 
         self.stacking_model.dataChanged.connect(lambda *args: self._update_layers_count())
         self.stacking_model.rowsInserted.connect(self._update_layers_count)
@@ -1174,11 +1224,6 @@ class _GridUiBinding:
                 self._table_view.clicked.disconnect(self._on_table_clicked)
         except (AttributeError, TypeError):
             pass
-        try:
-            if isinstance(self._header_view, _WordWrapHeader):
-                self._header_view.sectionClicked.disconnect(self._on_header_section_clicked)
-        except (AttributeError, TypeError):
-            pass
         for signal in (
             self.stacking_model.dataChanged,
             self.stacking_model.rowsInserted,
@@ -1190,7 +1235,7 @@ class _GridUiBinding:
             except (AttributeError, TypeError):
                 pass
         self._table_view = None
-        self._header_view = None
+        self.set_header_view(None)
 
     # Internal helpers -------------------------------------------------- #
 
@@ -1238,36 +1283,6 @@ class _GridUiBinding:
         table = getattr(self.ui, "layers_table", None)
         if isinstance(table, QTableView):
             self._table_view = table
-            header_view = _WordWrapHeader(Qt.Horizontal, table, checkbox_section=StackingTableModel.COL_SELECT)
-            table.setHorizontalHeader(header_view)
-            self._header_view = header_view
-            table.setModel(self.stacking_model)
-            table.setEditTriggers(
-                QAbstractItemView.DoubleClicked
-                | QAbstractItemView.SelectedClicked
-                | QAbstractItemView.EditKeyPressed
-            )
-            table.setSelectionBehavior(QAbstractItemView.SelectItems)
-            table.setSelectionMode(QAbstractItemView.SingleSelection)
-            table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-            header = table.horizontalHeader()
-            header.setSectionResizeMode(QHeaderView.Stretch)
-            header.setSectionResizeMode(StackingTableModel.COL_NUMBER, QHeaderView.Fixed)
-            header.setSectionResizeMode(StackingTableModel.COL_SELECT, QHeaderView.Fixed)
-            header.setSectionResizeMode(StackingTableModel.COL_PLY_TYPE, QHeaderView.Fixed)
-            header.setSectionResizeMode(StackingTableModel.COL_MATERIAL, QHeaderView.Stretch)
-            header.setSectionResizeMode(StackingTableModel.COL_ORIENTATION, QHeaderView.Stretch)
-            header.setMinimumSectionSize(60)
-            header.setFixedHeight(max(header.height(), header.sizeHint().height()))
-            if isinstance(header, _WordWrapHeader):
-                header.set_checkbox_section(StackingTableModel.COL_SELECT)
-                header.sectionClicked.connect(self._on_header_section_clicked)
-            table.setColumnWidth(StackingTableModel.COL_NUMBER, 60)
-            table.setColumnWidth(StackingTableModel.COL_SELECT, 120)
-            table.setColumnWidth(StackingTableModel.COL_PLY_TYPE, 160)
-            table.verticalHeader().setVisible(False)
-            self._install_delegates(table)
-            self._refresh_selection_header()
 
         cells_widget = getattr(self.ui, "lstCelulas", None)
         if not isinstance(cells_widget, QListWidget):
@@ -1275,8 +1290,24 @@ class _GridUiBinding:
         if isinstance(cells_widget, QListWidget):
             self._cells_widget = cells_widget
 
+    def set_header_view(self, header: Optional[QHeaderView]) -> None:
+        if isinstance(self._header_view, WordWrapHeader):
+            try:
+                self._header_view.sectionClicked.disconnect(self._on_header_section_clicked)
+            except (AttributeError, TypeError, RuntimeError):
+                pass
+        self._header_view = header if isinstance(header, WordWrapHeader) else None
+        if isinstance(self._header_view, WordWrapHeader):
+            self._header_view.set_checkbox_section(StackingTableModel.COL_SELECT)
+            try:
+                self._header_view.sectionClicked.connect(self._on_header_section_clicked)
+            except TypeError:
+                # Signal already connected; ignore.
+                pass
+        self._refresh_selection_header()
+
     def _refresh_selection_header(self, *args) -> None:
-        if not isinstance(self._header_view, _WordWrapHeader):
+        if not isinstance(self._header_view, WordWrapHeader):
             return
         section = self._header_view.checkbox_section()
         if section is None:
@@ -1439,29 +1470,7 @@ class _GridUiBinding:
         ):
             widget.setPlainText(", ".join(cells))
 
-    def _install_delegates(self, table: QTableView) -> None:
-        self._checkbox_delegate = CenteredCheckBoxDelegate(table)
-        self._ply_type_delegate = PlyTypeComboDelegate(table)
-        self._material_delegate = MaterialComboDelegate(
-            table, items_provider=self._material_options
-        )
-        self._orientation_delegate = OrientationComboDelegate(
-            table, items_provider=self._orientation_options
-        )
-        table.setItemDelegateForColumn(
-            StackingTableModel.COL_SELECT, self._checkbox_delegate
-        )
-        table.setItemDelegateForColumn(
-            StackingTableModel.COL_PLY_TYPE, self._ply_type_delegate
-        )
-        table.setItemDelegateForColumn(
-            StackingTableModel.COL_MATERIAL, self._material_delegate
-        )
-        table.setItemDelegateForColumn(
-            StackingTableModel.COL_ORIENTATION, self._orientation_delegate
-        )
-
-    def _material_options(self) -> list[str]:
+    def material_options(self) -> list[str]:
         materials: list[str] = []
         seen: set[str] = set()
         for laminado in self.model.laminados.values():
@@ -1473,7 +1482,7 @@ class _GridUiBinding:
             materials.append("")
         return materials
 
-    def _orientation_options(self) -> list[str]:
+    def orientation_options(self) -> list[str]:
         preferred_order = [0, 45, -45, 90, -90]
         options: list[str] = []
         added: set[int] = set()
