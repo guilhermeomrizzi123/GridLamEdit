@@ -21,7 +21,7 @@ from PySide6.QtCore import (
     QRect,
     Qt,
 )
-from PySide6.QtGui import QPalette
+from PySide6.QtGui import QPalette, QColor
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QComboBox,
@@ -573,12 +573,16 @@ class StackingTableModel(QAbstractTableModel):
         self._camadas: list[Camada] = []
         self._checked: list[bool] = []
         self._change_callback = change_callback
+        self._row_bg_temp: set[int] = set()
+        self._row_bg_perm: set[int] = set()
         self.update_layers(camadas or [])
 
     def update_layers(self, camadas: Iterable[Camada]) -> None:
         self.beginResetModel()
         self._camadas = [self._ensure_layer_defaults(c) for c in camadas]
         self._checked = [False] * len(self._camadas)
+        self._row_bg_temp.clear()
+        self._row_bg_perm.clear()
         self._sync_indices()
         self.endResetModel()
 
@@ -652,8 +656,130 @@ class StackingTableModel(QAbstractTableModel):
             if column in (self.COL_NUMBER, self.COL_SELECT, self.COL_PLY_TYPE, self.COL_ORIENTATION):
                 return int(Qt.AlignVCenter | Qt.AlignCenter)
             return int(Qt.AlignVCenter | Qt.AlignLeft)
+        elif role == Qt.BackgroundRole:
+            row = index.row()
+            if row in self._row_bg_temp:
+                return QColor(220, 53, 69)
+            if row in self._row_bg_perm:
+                return QColor(40, 167, 69)
 
         return None
+
+    def _emit_rows_changed(self, rows: Iterable[int]) -> None:
+        row_list = [r for r in sorted(set(rows)) if 0 <= r < self.rowCount()]
+        if not row_list:
+            return
+        if self.columnCount() == 0:
+            return
+        top = row_list[0]
+        bottom = row_list[-1]
+        left = self.index(top, 0)
+        right = self.index(bottom, self.columnCount() - 1)
+        self.dataChanged.emit(left, right, [Qt.BackgroundRole])
+
+    def set_temp_rows(self, rows: Iterable[int]) -> None:
+        new_rows = {r for r in rows if 0 <= r < self.rowCount()}
+        changed = new_rows | self._row_bg_temp
+        if new_rows == self._row_bg_temp:
+            return
+        self._row_bg_temp = new_rows
+        self._emit_rows_changed(changed)
+
+    def clear_temp_rows(self) -> None:
+        if not self._row_bg_temp:
+            return
+        cleared_rows = self._row_bg_temp.copy()
+        self._row_bg_temp.clear()
+        self._emit_rows_changed(cleared_rows)
+
+    def add_perm_rows(self, rows: Iterable[int]) -> None:
+        new_rows = {r for r in rows if 0 <= r < self.rowCount()}
+        if not new_rows:
+            return
+        before = set(self._row_bg_perm)
+        self._row_bg_perm |= new_rows
+        if self._row_bg_perm == before:
+            return
+        self._emit_rows_changed(self._row_bg_perm | before)
+
+    def _shift_highlights_on_insert(self, position: int) -> None:
+        if not self._row_bg_temp and not self._row_bg_perm:
+            return
+        changed: set[int] = set()
+
+        def shift(rows: set[int]) -> set[int]:
+            updated: set[int] = set()
+            for row in rows:
+                if row >= position:
+                    changed.add(row)
+                    new_row = row + 1
+                    changed.add(new_row)
+                    updated.add(new_row)
+                else:
+                    updated.add(row)
+            return updated
+
+        self._row_bg_temp = shift(self._row_bg_temp)
+        self._row_bg_perm = shift(self._row_bg_perm)
+        if changed:
+            self._emit_rows_changed(changed)
+
+    def _adjust_highlights_on_remove(self, removed_rows: Iterable[int]) -> None:
+        removed_sorted = sorted({r for r in removed_rows if r >= 0})
+        if not removed_sorted:
+            return
+        removed_set = set(removed_sorted)
+        changed: set[int] = set()
+
+        def adjust(rows: set[int]) -> set[int]:
+            updated: set[int] = set()
+            for row in rows:
+                if row in removed_set:
+                    changed.add(row)
+                    continue
+                shift = sum(1 for r in removed_sorted if r < row)
+                new_row = row - shift
+                if new_row != row:
+                    changed.add(row)
+                    changed.add(new_row)
+                updated.add(new_row)
+            return updated
+
+        self._row_bg_temp = adjust(self._row_bg_temp)
+        self._row_bg_perm = adjust(self._row_bg_perm)
+        if changed:
+            self._emit_rows_changed(changed)
+
+    def _update_highlights_on_move(self, source: int, target: int) -> None:
+        if not self._row_bg_temp and not self._row_bg_perm:
+            return
+        changed: set[int] = set()
+
+        def adjust(rows: set[int]) -> set[int]:
+            updated: set[int] = set()
+            for row in rows:
+                if row == source:
+                    changed.add(row)
+                    changed.add(target)
+                    updated.add(target)
+                elif source < target and source < row <= target:
+                    changed.add(row)
+                    new_row = row - 1
+                    changed.add(new_row)
+                    updated.add(new_row)
+                elif source > target and target <= row < source:
+                    changed.add(row)
+                    new_row = row + 1
+                    changed.add(new_row)
+                    updated.add(new_row)
+                else:
+                    updated.add(row)
+            return updated
+
+        self._row_bg_temp = adjust(self._row_bg_temp)
+        self._row_bg_perm = adjust(self._row_bg_perm)
+        if changed:
+            self._emit_rows_changed(changed)
 
     def flags(self, index: QModelIndex) -> Qt.ItemFlags:  # noqa: N802
         if not index.isValid():
@@ -730,12 +856,14 @@ class StackingTableModel(QAbstractTableModel):
         self._camadas.insert(position, self._ensure_layer_defaults(camada))
         self._checked.insert(position, False)
         self.endInsertRows()
+        self._shift_highlights_on_insert(position)
         self._sync_indices()
         if self._change_callback:
             self._change_callback(self.layers())
 
     def remove_rows(self, rows: Iterable[int]) -> int:
         removed = 0
+        removed_rows: list[int] = []
         for row in sorted(set(rows), reverse=True):
             if 0 <= row < len(self._camadas):
                 self.beginRemoveRows(QModelIndex(), row, row)
@@ -743,7 +871,10 @@ class StackingTableModel(QAbstractTableModel):
                 del self._checked[row]
                 self.endRemoveRows()
                 removed += 1
+                removed_rows.append(row)
         if removed:
+            removed_rows.sort()
+            self._adjust_highlights_on_remove(removed_rows)
             self._sync_indices()
             if self._change_callback:
                 self._change_callback(self.layers())
@@ -798,6 +929,7 @@ class StackingTableModel(QAbstractTableModel):
         self._camadas.insert(target, camada)
         self._checked.insert(target, checked)
         self.endMoveRows()
+        self._update_highlights_on_move(source, target)
         self._sync_indices()
         if self._change_callback:
             self._change_callback(self.layers())

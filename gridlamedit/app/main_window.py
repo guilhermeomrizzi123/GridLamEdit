@@ -1090,6 +1090,8 @@ class MainWindow(QMainWindow):
         structural_rows = [r for r in range(top, bottom + 1) if is_structural(r)]
         count_struct = len(structural_rows)
         if count_struct <= 1:
+            model.add_perm_rows(structural_rows)
+            self._scroll_to_rows(structural_rows)
             self._info("Laminado simetrico (0 ou 1 camada estrutural).")
             return
 
@@ -1105,15 +1107,44 @@ class MainWindow(QMainWindow):
 
             if not (self._eq(mat_top, mat_bot) and self._eq(ori_top, ori_bot)):
                 layer_num = self._data_str(model, r_top, col_num) or str(r_top + 1)
-                self._warn_asymmetry(layer_num, mat_top, ori_top, mat_bot, ori_bot)
+                pair_rows = [r_top, r_bot]
+                model.set_temp_rows(pair_rows)
+                self._scroll_to_rows(pair_rows)
+                try:
+                    self._warn_asymmetry(layer_num, mat_top, ori_top, mat_bot, ori_bot)
+                finally:
+                    model.clear_temp_rows()
                 return
 
             i += 1
             j -= 1
 
+        if count_struct % 2 == 1:
+            center_rows = [structural_rows[count_struct // 2]]
+        else:
+            center_rows = [
+                structural_rows[count_struct // 2 - 1],
+                structural_rows[count_struct // 2],
+            ]
+        model.add_perm_rows(center_rows)
+        self._scroll_to_rows(center_rows)
         self._info(
             f"Laminado simetrico considerando apenas Structural Ply ({count_struct} camadas estruturais)."
         )
+
+    def _scroll_to_rows(self, rows: Iterable[int]) -> None:
+        rows_list = sorted({r for r in rows if isinstance(r, int) and r >= 0})
+        if not rows_list:
+            return
+        view, model = self._get_stacking_view_and_model()
+        if view is None or model is None:
+            return
+        first = rows_list[0]
+        index = model.index(first, 0)
+        if not index.isValid():
+            return
+        view.scrollTo(index, QAbstractItemView.PositionAtCenter)
+        view.selectRow(first)
 
     def _column_map_by_header(
         self, model, wanted_names: list[str]
