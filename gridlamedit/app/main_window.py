@@ -380,7 +380,11 @@ class MainWindow(QMainWindow):
             button.setToolTip(tooltip)
             button.setAccessibleName(accessible_name)
             icon_path = ICONS_DIR / icon_name
-            icon = QIcon(str(icon_path))
+            icon = QIcon()
+            if icon_path.is_file():
+                icon = QIcon(str(icon_path))
+            else:
+                logger.debug("Icon file not found at %s", icon_path)
             if icon.isNull() and fallback_icon is not None:
                 icon = self.style().standardIcon(fallback_icon)
             button.setIcon(icon)
