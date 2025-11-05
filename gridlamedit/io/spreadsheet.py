@@ -573,16 +573,16 @@ class StackingTableModel(QAbstractTableModel):
         self._camadas: list[Camada] = []
         self._checked: list[bool] = []
         self._change_callback = change_callback
-        self._row_bg_temp: set[int] = set()
-        self._row_bg_perm: set[int] = set()
+        self._rows_red: set[int] = set()
+        self._rows_green: set[int] = set()
         self.update_layers(camadas or [])
 
     def update_layers(self, camadas: Iterable[Camada]) -> None:
         self.beginResetModel()
         self._camadas = [self._ensure_layer_defaults(c) for c in camadas]
         self._checked = [False] * len(self._camadas)
-        self._row_bg_temp.clear()
-        self._row_bg_perm.clear()
+        self._rows_red.clear()
+        self._rows_green.clear()
         self._sync_indices()
         self.endResetModel()
 
@@ -658,9 +658,9 @@ class StackingTableModel(QAbstractTableModel):
             return int(Qt.AlignVCenter | Qt.AlignLeft)
         elif role == Qt.BackgroundRole:
             row = index.row()
-            if row in self._row_bg_temp:
+            if row in self._rows_red:
                 return QColor(220, 53, 69)
-            if row in self._row_bg_perm:
+            if row in self._rows_green:
                 return QColor(40, 167, 69)
 
         return None
@@ -677,33 +677,46 @@ class StackingTableModel(QAbstractTableModel):
         right = self.index(bottom, self.columnCount() - 1)
         self.dataChanged.emit(left, right, [Qt.BackgroundRole])
 
-    def set_temp_rows(self, rows: Iterable[int]) -> None:
-        new_rows = {r for r in rows if 0 <= r < self.rowCount()}
-        changed = new_rows | self._row_bg_temp
-        if new_rows == self._row_bg_temp:
+    def clear_all_highlights(self) -> None:
+        if not (self._rows_red or self._rows_green):
             return
-        self._row_bg_temp = new_rows
-        self._emit_rows_changed(changed)
+        rows = list(self._rows_red | self._rows_green)
+        self._rows_red.clear()
+        self._rows_green.clear()
+        self._emit_rows_changed(rows)
 
-    def clear_temp_rows(self) -> None:
-        if not self._row_bg_temp:
+    def set_red_rows(self, rows: Iterable[int]) -> None:
+        valid_rows = {r for r in rows if 0 <= r < self.rowCount()}
+        if self._rows_red == valid_rows:
             return
-        cleared_rows = self._row_bg_temp.copy()
-        self._row_bg_temp.clear()
-        self._emit_rows_changed(cleared_rows)
+        self._rows_red = valid_rows
+        self._emit_rows_changed(valid_rows)
 
-    def add_perm_rows(self, rows: Iterable[int]) -> None:
+    def add_red_rows(self, rows: Iterable[int]) -> None:
         new_rows = {r for r in rows if 0 <= r < self.rowCount()}
         if not new_rows:
             return
-        before = set(self._row_bg_perm)
-        self._row_bg_perm |= new_rows
-        if self._row_bg_perm == before:
+        before = set(self._rows_red)
+        self._rows_red |= new_rows
+        self._emit_rows_changed(self._rows_red | before)
+
+    def set_green_rows(self, rows: Iterable[int]) -> None:
+        valid_rows = {r for r in rows if 0 <= r < self.rowCount()}
+        if self._rows_green == valid_rows:
             return
-        self._emit_rows_changed(self._row_bg_perm | before)
+        self._rows_green = valid_rows
+        self._emit_rows_changed(valid_rows)
+
+    def add_green_rows(self, rows: Iterable[int]) -> None:
+        new_rows = {r for r in rows if 0 <= r < self.rowCount()}
+        if not new_rows:
+            return
+        before = set(self._rows_green)
+        self._rows_green |= new_rows
+        self._emit_rows_changed(self._rows_green | before)
 
     def _shift_highlights_on_insert(self, position: int) -> None:
-        if not self._row_bg_temp and not self._row_bg_perm:
+        if not self._rows_red and not self._rows_green:
             return
         changed: set[int] = set()
 
@@ -719,8 +732,8 @@ class StackingTableModel(QAbstractTableModel):
                     updated.add(row)
             return updated
 
-        self._row_bg_temp = shift(self._row_bg_temp)
-        self._row_bg_perm = shift(self._row_bg_perm)
+        self._rows_red = shift(self._rows_red)
+        self._rows_green = shift(self._rows_green)
         if changed:
             self._emit_rows_changed(changed)
 
@@ -745,13 +758,13 @@ class StackingTableModel(QAbstractTableModel):
                 updated.add(new_row)
             return updated
 
-        self._row_bg_temp = adjust(self._row_bg_temp)
-        self._row_bg_perm = adjust(self._row_bg_perm)
+        self._rows_red = adjust(self._rows_red)
+        self._rows_green = adjust(self._rows_green)
         if changed:
             self._emit_rows_changed(changed)
 
     def _update_highlights_on_move(self, source: int, target: int) -> None:
-        if not self._row_bg_temp and not self._row_bg_perm:
+        if not self._rows_red and not self._rows_green:
             return
         changed: set[int] = set()
 
@@ -776,8 +789,8 @@ class StackingTableModel(QAbstractTableModel):
                     updated.add(row)
             return updated
 
-        self._row_bg_temp = adjust(self._row_bg_temp)
-        self._row_bg_perm = adjust(self._row_bg_perm)
+        self._rows_red = adjust(self._rows_red)
+        self._rows_green = adjust(self._rows_green)
         if changed:
             self._emit_rows_changed(changed)
 

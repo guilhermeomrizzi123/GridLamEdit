@@ -1043,6 +1043,8 @@ class MainWindow(QMainWindow):
         if model is None:
             self._info("Tabela de camadas indisponivel para verificar a simetria.")
             return
+        if hasattr(model, "clear_all_highlights"):
+            model.clear_all_highlights()
 
         try:
             colmap = self._column_map_by_header(
@@ -1080,17 +1082,14 @@ class MainWindow(QMainWindow):
             value = self._data_str(model, row, col_ply)
             return value.lower() == "structural ply"
 
-        top = next((r for r in range(row_count) if is_structural(r)), None)
-        bottom = next((r for r in range(row_count - 1, -1, -1) if is_structural(r)), None)
-
-        if top is None or bottom is None:
+        structural_rows = [r for r in range(row_count) if is_structural(r)]
+        count_struct = len(structural_rows)
+        if count_struct == 0:
             self._info("Laminado simetrico (0 ou 1 camada estrutural).")
             return
-
-        structural_rows = [r for r in range(top, bottom + 1) if is_structural(r)]
-        count_struct = len(structural_rows)
-        if count_struct <= 1:
-            model.add_perm_rows(structural_rows)
+        if count_struct == 1:
+            if hasattr(model, "add_green_rows"):
+                model.add_green_rows(structural_rows)
             self._scroll_to_rows(structural_rows)
             self._info("Laminado simetrico (0 ou 1 camada estrutural).")
             return
@@ -1108,12 +1107,10 @@ class MainWindow(QMainWindow):
             if not (self._eq(mat_top, mat_bot) and self._eq(ori_top, ori_bot)):
                 layer_num = self._data_str(model, r_top, col_num) or str(r_top + 1)
                 pair_rows = [r_top, r_bot]
-                model.set_temp_rows(pair_rows)
+                if hasattr(model, "add_red_rows"):
+                    model.add_red_rows(pair_rows)
                 self._scroll_to_rows(pair_rows)
-                try:
-                    self._warn_asymmetry(layer_num, mat_top, ori_top, mat_bot, ori_bot)
-                finally:
-                    model.clear_temp_rows()
+                self._warn_asymmetry(layer_num, mat_top, ori_top, mat_bot, ori_bot)
                 return
 
             i += 1
@@ -1126,7 +1123,8 @@ class MainWindow(QMainWindow):
                 structural_rows[count_struct // 2 - 1],
                 structural_rows[count_struct // 2],
             ]
-        model.add_perm_rows(center_rows)
+        if hasattr(model, "add_green_rows"):
+            model.add_green_rows(center_rows)
         self._scroll_to_rows(center_rows)
         self._info(
             f"Laminado simetrico considerando apenas Structural Ply ({count_struct} camadas estruturais)."
