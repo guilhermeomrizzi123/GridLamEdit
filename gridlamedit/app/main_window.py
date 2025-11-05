@@ -7,7 +7,7 @@ from enum import Enum, auto
 from pathlib import Path
 from typing import Iterable, List, Optional
 
-from PySide6.QtCore import Qt, QSize, QTimer
+from PySide6.QtCore import Qt, QSize, QTimer, QEvent, QObject
 from PySide6.QtGui import (
     QAction,
     QCloseEvent,
@@ -88,6 +88,22 @@ class MainWindow(QMainWindow):
         self._apply_initial_geometry()
 
         self._grid_model: Optional[GridModel] = None
+        self._stacking_checkbox_delegate = None
+        self._stacking_ply_delegate = None
+        self._stacking_material_delegate = None
+        self._stacking_orientation_delegate = None
+        self._selection_column_index = StackingTableModel.COL_SELECT
+        self._stacking_header_band: Optional[QWidget] = None
+        self._band_labels: list[QLabel] = []
+        self._header_band_mapping: list[int] = [
+            StackingTableModel.COL_NUMBER,
+            StackingTableModel.COL_SELECT,
+            StackingTableModel.COL_PLY_TYPE,
+            StackingTableModel.COL_MATERIAL,
+            StackingTableModel.COL_ORIENTATION,
+        ]
+        self._band_frame_margin = 0
+        self._header_band_scroll_connected = False
 
         self.ui_state = UiState.VIEW
         self._create_actions()
@@ -95,12 +111,6 @@ class MainWindow(QMainWindow):
         self._setup_central_widget()
         self._setup_status_bar()
         self._update_save_actions_enabled()
-        self._stacking_checkbox_delegate = None
-        self._stacking_ply_delegate = None
-        self._stacking_material_delegate = None
-        self._stacking_orientation_delegate = None
-        self.layers_header_labels: list[QLabel] = []
-        self.layers_header_widget: Optional[QWidget] = None
 
     def _apply_initial_geometry(self) -> None:
         screen = QGuiApplication.primaryScreen()
@@ -351,9 +361,17 @@ class MainWindow(QMainWindow):
         layout.addLayout(self._create_layers_buttons())
         container.setMinimumHeight(0)
         header = self.layers_table.horizontalHeader()
-        header.sectionResized.connect(self._update_layers_header_labels)
-        header.geometriesChanged.connect(self._update_layers_header_labels)
-        QTimer.singleShot(0, self._update_layers_header_labels)
+        header.sectionResized.connect(self._sync_header_band)
+        header.sectionMoved.connect(self._sync_header_band)
+        header.geometriesChanged.connect(self._sync_header_band)
+        if not self._header_band_scroll_connected:
+            self.layers_table.horizontalScrollBar().valueChanged.connect(
+                self._sync_header_band
+            )
+            self._header_band_scroll_connected = True
+        self.layers_table.viewport().installEventFilter(self)
+        header.installEventFilter(self)
+        QTimer.singleShot(0, self._sync_header_band)
         return container
 
     def _create_layers_table(self, parent: QWidget) -> QTableView:
@@ -366,25 +384,35 @@ class MainWindow(QMainWindow):
         return table
 
     def _create_layers_header_widget(self, parent: QWidget) -> QWidget:
-        header_widget = QWidget(parent)
-        layout = QHBoxLayout(header_widget)
-        frame_width = 0
-        if isinstance(getattr(self, "layers_table", None), QTableView):
-            frame_width = self.layers_table.frameWidth()
-        layout.setContentsMargins(frame_width, 0, frame_width, 0)
-        layout.setSpacing(0)
-        self.layers_header_labels = []
-        for title in StackingTableModel.HEADERS:
-            label = QLabel(title, header_widget)
+        band = QWidget(parent)
+        band.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        band.setMinimumHeight(28)
+        band.setMaximumHeight(28)
+        band.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        band.setContentsMargins(0, 0, 0, 0)
+        band.setLayout(None)
+
+        table = getattr(self, "layers_table", None)
+        if isinstance(table, QTableView):
+            self._band_frame_margin = table.frameWidth()
+        else:
+            self._band_frame_margin = 0
+
+        titles = ["#", "Selection", "Ply Type", "Material", "Orientação"]
+        self._band_labels = []
+        for title in titles:
+            label = QLabel(title, band)
             label.setAlignment(Qt.AlignCenter)
             label.setStyleSheet("font-weight: 600;")
-            label.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
-            label.setMinimumHeight(28)
-            layout.addWidget(label)
-            self.layers_header_labels.append(label)
-        header_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.layers_header_widget = header_widget
-        return header_widget
+            label.setFixedHeight(28)
+            label.setMinimumWidth(40)
+            label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+            label.setGeometry(0, 0, 0, band.height())
+            label.hide()
+            self._band_labels.append(label)
+        band.installEventFilter(self)
+        self._stacking_header_band = band
+        return band
 
     def _create_layers_buttons(self) -> QVBoxLayout:
         layout = QVBoxLayout()
@@ -419,11 +447,14 @@ class MainWindow(QMainWindow):
             icon = QIcon()
             if icon_name:
                 button.setIconSize(QSize(24, 24))
-                icon_path = ICONS_DIR / icon_name
-                if icon_path.is_file():
-                    icon = QIcon(str(icon_path))
+                if icon_name.startswith(":/"):
+                    icon = QIcon(icon_name)
                 else:
-                    logger.debug("Icon file not found at %s", icon_path)
+                    icon_path = ICONS_DIR / icon_name
+                    if icon_path.is_file():
+                        icon = QIcon(str(icon_path))
+                    else:
+                        logger.debug("Icon file not found at %s", icon_path)
             if icon.isNull() and fallback_icon is not None:
                 icon = self.style().standardIcon(fallback_icon)
             if not icon.isNull():
@@ -482,16 +513,19 @@ class MainWindow(QMainWindow):
         )
 
         self.select_all_layers_button = make_button(
-            None,
-            "Selecionar todas as camadas",
+            ":/icons/select_all.svg",
+            "Selecionar todos",
             self._on_select_all_layers_clicked,
-            "Selecionar todas as camadas",
-            text="Selecionar todos",
-            tool_button_style=Qt.ToolButtonTextOnly,
-            fixed_width=None,
+            "Selecionar todos",
+            QStyle.SP_DialogYesButton,
         )
-        self.select_all_layers_button.setSizePolicy(
-            QSizePolicy.Expanding, QSizePolicy.Fixed
+
+        self.clear_selection_button = make_button(
+            ":/icons/clear_selection.svg",
+            "Limpar seleção",
+            self._on_clear_selection_clicked,
+            "Limpar seleção",
+            QStyle.SP_DialogResetButton,
         )
 
         layout.addStretch()
@@ -515,6 +549,9 @@ class MainWindow(QMainWindow):
             header.setDefaultAlignment(Qt.AlignCenter)
 
         view.setModel(model)
+
+        if isinstance(model, StackingTableModel):
+            self._connect_header_band_model_signals(model)
 
         self._install_stacking_delegates(view, binding)
         self._apply_stacking_column_setup(view)
@@ -569,29 +606,44 @@ class MainWindow(QMainWindow):
         view.setColumnWidth(StackingTableModel.COL_SELECT, 120)
         view.setColumnWidth(StackingTableModel.COL_PLY_TYPE, 160)
         view.verticalHeader().setVisible(False)
-        self._update_layers_header_labels()
+        self._sync_header_band()
 
-    def _update_layers_header_labels(self, *args) -> None:  # noqa: ARG002
-        if not isinstance(getattr(self, "layers_table", None), QTableView):
+    def _sync_header_band(self, *args) -> None:  # noqa: ARG002
+        table = getattr(self, "layers_table", None)
+        band = self._stacking_header_band
+        if not isinstance(table, QTableView) or band is None:
             return
-        labels = getattr(self, "layers_header_labels", [])
-        if not labels:
+        if not self._band_labels:
             return
-        header = self.layers_table.horizontalHeader()
-        section_count = header.count()
-        if section_count == 0:
-            for label in labels:
-                label.setFixedWidth(0)
-                label.setVisible(False)
+        header = table.horizontalHeader()
+        column_count = header.count()
+        if column_count == 0:
+            for label in self._band_labels:
+                label.hide()
+            band.update()
             return
-        for index, label in enumerate(labels):
-            if index < section_count:
-                width = header.sectionSize(index)
-                label.setFixedWidth(width)
-                label.setVisible(True)
-            else:
-                label.setFixedWidth(0)
-                label.setVisible(False)
+
+        self._band_frame_margin = table.frameWidth()
+        x_offset = -table.horizontalScrollBar().value() + self._band_frame_margin
+        band_height = max(1, band.height())
+
+        for label, column in zip(self._band_labels, self._header_band_mapping):
+            if column >= column_count or header.isSectionHidden(column):
+                label.hide()
+                continue
+            section_pos = header.sectionViewportPosition(column)
+            section_width = header.sectionSize(column)
+            if section_width <= 0:
+                label.hide()
+                continue
+            label.setGeometry(
+                int(section_pos + x_offset),
+                0,
+                int(section_width),
+                band_height,
+            )
+            label.show()
+        band.update()
 
     def _refresh_stacking_header(
         self, view: QTableView, model: StackingTableModel, header: WordWrapHeader
@@ -604,15 +656,42 @@ class MainWindow(QMainWindow):
         header.viewport().update()
         view.viewport().update()
 
-        self._update_layers_header_labels()
+        self._sync_header_band()
 
         def _post_update() -> None:
             header.updateGeometry()
             header.viewport().update()
             view.viewport().update()
-            self._update_layers_header_labels()
+            self._sync_header_band()
 
         QTimer.singleShot(0, _post_update)
+
+    def _connect_header_band_model_signals(
+        self, model: StackingTableModel
+    ) -> None:
+        try:
+            model.modelReset.disconnect(self._sync_header_band)
+        except (TypeError, RuntimeError):
+            pass
+        model.modelReset.connect(self._sync_header_band)
+        try:
+            model.layoutChanged.disconnect(self._sync_header_band)
+        except (TypeError, RuntimeError):
+            pass
+        model.layoutChanged.connect(self._sync_header_band)
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:
+        if event.type() == QEvent.Resize:
+            table = getattr(self, "layers_table", None)
+            header = table.horizontalHeader() if isinstance(table, QTableView) else None
+            viewport = table.viewport() if isinstance(table, QTableView) else None
+            if watched in {
+                self._stacking_header_band,
+                header,
+                viewport,
+            }:
+                QTimer.singleShot(0, self._sync_header_band)
+        return super().eventFilter(watched, event)
 
     def _build_new_laminate_view(self) -> QWidget:
         view = QWidget(self)
@@ -1012,19 +1091,52 @@ class MainWindow(QMainWindow):
             )
         self._update_save_actions_enabled()
 
-    def _on_select_all_layers_clicked(self) -> None:
+    def _get_stacking_view_and_model(
+        self,
+    ) -> tuple[Optional[QTableView], Optional[StackingTableModel]]:
+        view = getattr(self, "layers_table", None)
+        if not isinstance(view, QTableView):
+            view = None
+        model: Optional[StackingTableModel] = None
         binding = getattr(self, "_grid_binding", None)
-        if binding is None:
-            return
-        model = getattr(binding, "stacking_model", None)
-        if not isinstance(model, StackingTableModel):
-            return
-        if model.rowCount() == 0:
+        if binding is not None:
+            candidate = getattr(binding, "stacking_model", None)
+            if isinstance(candidate, StackingTableModel):
+                model = candidate
+        if model is None and view is not None:
+            table_model = view.model()
+            if isinstance(table_model, StackingTableModel):
+                model = table_model
+        return view, model
+
+    def _select_all_rows(self) -> None:
+        view, model = self._get_stacking_view_and_model()
+        if model is None or model.rowCount() == 0:
             return
         model.set_all_checked(True)
-        view = getattr(self, "layers_table", None)
-        if isinstance(view, QTableView):
+        if view is not None:
             view.viewport().update()
+
+    def _clear_all_selections(self) -> None:
+        view, model = self._get_stacking_view_and_model()
+        if model is None:
+            return
+        if not model.any_checked():
+            QMessageBox.information(
+                self,
+                "Aviso",
+                "Nenhum item está selecionado.",
+            )
+            return
+        model.set_all_checked(False)
+        if view is not None:
+            view.viewport().update()
+
+    def _on_select_all_layers_clicked(self) -> None:
+        self._select_all_rows()
+
+    def _on_clear_selection_clicked(self) -> None:
+        self._clear_all_selections()
 
     def _on_move_up_clicked(self) -> None:
         binding = getattr(self, "_grid_binding", None)
