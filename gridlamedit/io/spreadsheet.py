@@ -1291,19 +1291,9 @@ class _GridUiBinding:
             self._cells_widget = cells_widget
 
     def set_header_view(self, header: Optional[QHeaderView]) -> None:
-        if isinstance(self._header_view, WordWrapHeader):
-            try:
-                self._header_view.sectionClicked.disconnect(self._on_header_section_clicked)
-            except (AttributeError, TypeError, RuntimeError):
-                pass
         self._header_view = header if isinstance(header, WordWrapHeader) else None
         if isinstance(self._header_view, WordWrapHeader):
-            self._header_view.set_checkbox_section(StackingTableModel.COL_SELECT)
-            try:
-                self._header_view.sectionClicked.connect(self._on_header_section_clicked)
-            except TypeError:
-                # Signal already connected; ignore.
-                pass
+            self._header_view.set_checkbox_section(None)
         self._refresh_selection_header()
 
     def _refresh_selection_header(self, *args) -> None:
@@ -1313,13 +1303,6 @@ class _GridUiBinding:
         if section is None:
             return
         self._header_view.updateSection(section)
-
-    def _on_header_section_clicked(self, logical_index: int) -> None:
-        if logical_index != StackingTableModel.COL_SELECT:
-            return
-        target_state = not self.stacking_model.all_checked()
-        self.stacking_model.set_all_checked(target_state)
-        self._refresh_selection_header()
 
     def _connect_signals(self) -> None:
         cells_widget = self._cells_widget
