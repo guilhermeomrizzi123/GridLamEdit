@@ -499,7 +499,7 @@ class MainWindow(QMainWindow):
         self.symmetry_button = make_button(
             "symmetry.svg",
             "Verificar simetria",
-            self._show_todo_message,  # type: ignore[arg-type]
+            self.check_symmetry,
             "Verificar simetria",
             QStyle.SP_BrowserReload,
         )
@@ -1036,6 +1036,170 @@ class MainWindow(QMainWindow):
         """Placeholder slot for unimplemented actions."""
         if self.statusBar():
             self.statusBar().showMessage("TODO: implementar acao.", 2000)
+
+    def check_symmetry(self) -> None:
+        """Verifica se o laminado atual e simetrico considerando apenas Structural Ply."""
+        _, model = self._get_stacking_view_and_model()
+        if model is None:
+            self._info("Tabela de camadas indisponivel para verificar a simetria.")
+            return
+
+        try:
+            colmap = self._column_map_by_header(
+                model, ["#", "Ply Type", "Material", "Orientacao", "Orientation"]
+            )
+        except ValueError as exc:
+            logger.warning("Falha ao mapear colunas da tabela: %s", exc)
+            self._info(
+                "Nao foi possivel verificar a simetria porque as colunas esperadas nao estao disponiveis."
+            )
+            return
+
+        missing = [name for name in ("#", "Ply Type", "Material") if name not in colmap]
+        if "Orientacao" not in colmap and "Orientation" not in colmap:
+            missing.append("Orientacao/Orientation")
+        if missing:
+            self._info(
+                "Nao foi possivel verificar a simetria. Colunas ausentes: "
+                + ", ".join(missing)
+                + "."
+            )
+            return
+
+        col_num = colmap["#"]
+        col_ply = colmap["Ply Type"]
+        col_mat = colmap["Material"]
+        if "Orientacao" in colmap:
+            col_ori = colmap["Orientacao"]
+        else:
+            col_ori = colmap["Orientation"]
+
+        row_count = model.rowCount()
+
+        def is_structural(row: int) -> bool:
+            value = self._data_str(model, row, col_ply)
+            return value.lower() == "structural ply"
+
+        top = next((r for r in range(row_count) if is_structural(r)), None)
+        bottom = next((r for r in range(row_count - 1, -1, -1) if is_structural(r)), None)
+
+        if top is None or bottom is None:
+            self._info("Laminado simetrico (0 ou 1 camada estrutural).")
+            return
+
+        structural_rows = [r for r in range(top, bottom + 1) if is_structural(r)]
+        count_struct = len(structural_rows)
+        if count_struct <= 1:
+            self._info("Laminado simetrico (0 ou 1 camada estrutural).")
+            return
+
+        i, j = 0, count_struct - 1
+        while i < j:
+            r_top = structural_rows[i]
+            r_bot = structural_rows[j]
+
+            mat_top = self._data_str(model, r_top, col_mat)
+            mat_bot = self._data_str(model, r_bot, col_mat)
+            ori_top = self._normalize_orientation(self._data_str(model, r_top, col_ori))
+            ori_bot = self._normalize_orientation(self._data_str(model, r_bot, col_ori))
+
+            if not (self._eq(mat_top, mat_bot) and self._eq(ori_top, ori_bot)):
+                layer_num = self._data_str(model, r_top, col_num) or str(r_top + 1)
+                self._warn_asymmetry(layer_num, mat_top, ori_top, mat_bot, ori_bot)
+                return
+
+            i += 1
+            j -= 1
+
+        self._info(
+            f"Laminado simetrico considerando apenas Structural Ply ({count_struct} camadas estruturais)."
+        )
+
+    def _column_map_by_header(
+        self, model, wanted_names: list[str]
+    ) -> dict[str, int]:
+        if not hasattr(model, "columnCount") or not callable(model.columnCount):
+            raise ValueError("Modelo invalido para leitura de colunas.")
+        column_count = model.columnCount()
+        headers: dict[str, int] = {}
+        for column in range(column_count):
+            header = model.headerData(column, Qt.Horizontal, Qt.DisplayRole)
+            if header is None:
+                continue
+            text = str(header).strip()
+            if not text:
+                continue
+            headers[text] = column
+            headers[text.lower()] = column
+
+        mapping: dict[str, int] = {}
+        for name in wanted_names:
+            candidates = [name, name.lower()]
+            if name.lower() == "orientacao":
+                candidates.extend(["Orientation", "orientation"])
+            if name.lower() == "orientation":
+                candidates.extend(["Orientacao", "orientacao"])
+            for candidate in candidates:
+                if candidate in headers:
+                    mapping[name] = headers[candidate]
+                    break
+        return mapping
+
+    def _data_str(self, model, row: int, column: int) -> str:
+        index = model.index(row, column)
+        if not index.isValid():
+            return ""
+        value = model.data(index, Qt.DisplayRole)
+        if value is None:
+            return ""
+        return str(value).strip()
+
+    def _normalize_orientation(self, raw: str) -> str:
+        text = (raw or "").strip()
+        if not text:
+            return ""
+        cleaned = (
+            text.replace("\N{DEGREE SIGN}", "")
+            .replace("\u00ba", "")
+            .replace("deg", "")
+            .replace("DEG", "")
+            .strip()
+        )
+        try:
+            angle = normalize_angle(cleaned)
+        except Exception:
+            filtered = "".join(ch for ch in cleaned if ch.isdigit() or ch in "+-")
+            if not filtered:
+                return text
+            if filtered[0] not in "+-":
+                filtered = f"+{filtered}"
+            return filtered
+        if angle > 0:
+            return f"+{angle}"
+        if angle < 0:
+            return f"{angle}"
+        return "0"
+
+    def _eq(self, left: str, right: str) -> bool:
+        return (left or "").strip().lower() == (right or "").strip().lower()
+
+    def _info(self, message: str) -> None:
+        QMessageBox.information(self, "Verificar simetria", message)
+
+    def _warn_asymmetry(
+        self,
+        layer_num: str,
+        mat_top: str,
+        ori_top: str,
+        mat_bot: str,
+        ori_bot: str,
+    ) -> None:
+        message = (
+            f"Quebra de simetria a partir da camada # {layer_num}.\n"
+            f"Topo:   Material={mat_top or '-'}, Orientacao={ori_top or '-'}\n"
+            f"Base:   Material={mat_bot or '-'}, Orientacao={ori_bot or '-'}"
+        )
+        QMessageBox.warning(self, "Verificar simetria", message)
 
     def _on_add_layer_clicked(self) -> None:
         binding = getattr(self, "_grid_binding", None)
