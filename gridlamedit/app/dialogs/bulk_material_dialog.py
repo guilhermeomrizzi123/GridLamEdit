@@ -21,13 +21,15 @@ class BulkMaterialDialog(QDialog):
     def __init__(
         self,
         parent: QWidget | None = None,
-        materials: Sequence[str] | Iterable[str] | None = None,
+        *,
+        available_materials: Sequence[str] | Iterable[str] | None = None,
     ) -> None:
         super().__init__(parent)
         self.selected_material: str = ""
-        self._setup_ui(materials)
+        self._setup_ui()
+        self._populate_materials(available_materials)
 
-    def _setup_ui(self, materials: Sequence[str] | Iterable[str] | None) -> None:
+    def _setup_ui(self) -> None:
         self.setWindowTitle("Trocar material (camadas selecionadas)")
 
         layout = QVBoxLayout(self)
@@ -49,12 +51,6 @@ class BulkMaterialDialog(QDialog):
         )
         layout.addWidget(self.cmb_material)
 
-        if materials:
-            for item in materials:
-                text = (item or "").strip()
-                if text:
-                    self.cmb_material.addItem(text)
-
         button_box = QDialogButtonBox(
             QDialogButtonBox.Ok | QDialogButtonBox.Cancel, Qt.Horizontal, self
         )
@@ -68,7 +64,17 @@ class BulkMaterialDialog(QDialog):
 
         self.resize(360, 160)
 
+    def _populate_materials(
+        self, materials: Sequence[str] | Iterable[str] | None
+    ) -> None:
+        self.cmb_material.clear()
+        if not materials:
+            return
+        for item in materials:
+            text = (str(item) if item is not None else "").strip()
+            if text:
+                self.cmb_material.addItem(text)
+
     def _on_accept_clicked(self) -> None:
         self.selected_material = self.cmb_material.currentText().strip()
         self.accept()
-

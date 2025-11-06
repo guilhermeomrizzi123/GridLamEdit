@@ -70,6 +70,10 @@ from gridlamedit.io.spreadsheet import (
     normalize_angle,
 )
 from gridlamedit.services.excel_io import export_grid_xlsx
+from gridlamedit.services.project_query import (
+    project_distinct_materials,
+    project_distinct_orientations,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -502,27 +506,49 @@ class MainWindow(QMainWindow):
             "Duplicar camada",
             QStyle.SP_FileDialogDetailedView,
         )
-        self.btn_bulk_change_material = make_button(
-            ":/icons/bulk_material.svg",
-            "Trocar material das camadas selecionadas",
-            self.on_bulk_change_material,
-            "Trocar material das camadas selecionadas",
-            tool_button_style=Qt.ToolButtonIconOnly,
-        )
+        self.btn_bulk_change_material = QToolButton(self)
         self.btn_bulk_change_material.setObjectName("btn_bulk_change_material")
+        self.btn_bulk_change_material.setToolButtonStyle(Qt.ToolButtonIconOnly)
+        self.btn_bulk_change_material.setAutoRaise(True)
+        self.btn_bulk_change_material.setFixedWidth(42)
+        self.btn_bulk_change_material.setIcon(QIcon(":/icons/bulk_material.svg"))
         self.btn_bulk_change_material.setIconSize(QSize(24, 24))
-
-        self.btn_bulk_change_orientation = make_button(
-            ":/icons/bulk_orientation.svg",
-            "Trocar orientação das camadas selecionadas",
-            self.on_bulk_change_orientation,
-            "Trocar orientação das camadas selecionadas",
-            tool_button_style=Qt.ToolButtonIconOnly,
+        self.btn_bulk_change_material.setToolTip(
+            "Trocar material das camadas selecionadas"
         )
+        self.btn_bulk_change_material.setAccessibleName(
+            "Trocar material das camadas selecionadas"
+        )
+        self.btn_bulk_change_material.clicked.connect(
+            self.on_bulk_change_material
+        )
+        self.layer_buttons.append(self.btn_bulk_change_material)
+        layout.addWidget(self.btn_bulk_change_material)
+
+        self.btn_bulk_change_orientation = QToolButton(self)
         self.btn_bulk_change_orientation.setObjectName(
             "btn_bulk_change_orientation"
         )
+        self.btn_bulk_change_orientation.setToolButtonStyle(
+            Qt.ToolButtonIconOnly
+        )
+        self.btn_bulk_change_orientation.setAutoRaise(True)
+        self.btn_bulk_change_orientation.setFixedWidth(42)
+        self.btn_bulk_change_orientation.setIcon(
+            QIcon(":/icons/bulk_orientation.svg")
+        )
         self.btn_bulk_change_orientation.setIconSize(QSize(24, 24))
+        self.btn_bulk_change_orientation.setToolTip(
+            "Trocar orientação das camadas selecionadas"
+        )
+        self.btn_bulk_change_orientation.setAccessibleName(
+            "Trocar orientação das camadas selecionadas"
+        )
+        self.btn_bulk_change_orientation.clicked.connect(
+            self.on_bulk_change_orientation
+        )
+        self.layer_buttons.append(self.btn_bulk_change_orientation)
+        layout.addWidget(self.btn_bulk_change_orientation)
 
         self.move_up_button = make_button(
             "arrow-up.svg",
@@ -1345,21 +1371,15 @@ class MainWindow(QMainWindow):
         view, model = self._get_stacking_view_and_model()
         if model is None:
             return
-        materials: list[str] = []
-        if hasattr(model, "material_options"):
-            try:
-                options = model.material_options()
-            except Exception:
-                options = []
-            else:
-                options = [item for item in options if isinstance(item, str)]
-            if options:
-                seen = dict.fromkeys(options)
-                materials = list(seen.keys())
-        dialog = BulkMaterialDialog(self, materials)
+        project = self._grid_model
+        materials = project_distinct_materials(project)
+        dialog = BulkMaterialDialog(
+            parent=self,
+            available_materials=materials,
+        )
         if dialog.exec() != QDialog.Accepted:
             return
-        material = dialog.selected_material.strip()
+        material = dialog.cmb_material.currentText().strip()
         for row in rows:
             index = model.index(row, COL_MATERIAL)
             if not index.isValid():
@@ -1381,18 +1401,22 @@ class MainWindow(QMainWindow):
         view, model = self._get_stacking_view_and_model()
         if model is None:
             return
-        dialog = BulkOrientationDialog(self)
+        project = self._grid_model
+        project_orientations = project_distinct_orientations(project)
+        dialog = BulkOrientationDialog(
+            parent=self,
+            available_orientations=project_orientations,
+        )
         if dialog.exec() != QDialog.Accepted:
             return
         new_orientation = dialog.new_orientation
         if new_orientation is None:
             return
-        orientation_text = str(new_orientation)
         for row in rows:
             index = model.index(row, COL_ORIENTATION)
             if not index.isValid():
                 continue
-            model.setData(index, orientation_text, Qt.EditRole)
+            model.setData(index, new_orientation, Qt.EditRole)
         if isinstance(view, QTableView):
             view.viewport().update()
         self._update_save_actions_enabled()
