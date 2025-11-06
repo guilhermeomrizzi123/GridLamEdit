@@ -1,7 +1,7 @@
 <RCC>
   <qresource prefix="/icons">
-    <file>icons/new_laminate.svg</file>
-    <file>icons/bulk_material.svg</file>
-    <file>icons/bulk_orientation.svg</file>
+    <file>icons/Trocar_Materiais.jpg</file>
+    <file>icons/Trocar_Orientacao.jpg</file>
+    <file>icons/Criar_novo_laminado_ControlV.jpg</file>
   </qresource>
 </RCC>

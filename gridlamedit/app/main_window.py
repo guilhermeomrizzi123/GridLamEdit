@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from collections import Counter
 from enum import Enum, auto
 from pathlib import Path
 from typing import Iterable, List, Optional
@@ -13,6 +14,7 @@ from PySide6.QtGui import (
     QCloseEvent,
     QIcon,
     QFont,
+    QFontDatabase,
     QGuiApplication,
     QKeySequence,
     QShortcut,
@@ -25,6 +27,7 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QHeaderView,
     QHBoxLayout,
+    QFrame,
     QLabel,
     QLineEdit,
     QListWidget,
@@ -78,12 +81,124 @@ from gridlamedit.services.project_query import (
 logger = logging.getLogger(__name__)
 
 ICONS_DIR = Path(__file__).resolve().parent / "icons"
+RESOURCES_ICONS_DIR = (
+    Path(__file__).resolve().parent.parent / "resources" / "icons"
+)
 
 COL_NUM = StackingTableModel.COL_NUMBER
 COL_SELECTION = StackingTableModel.COL_SELECT
 COL_PLY_TYPE = StackingTableModel.COL_PLY_TYPE
 COL_MATERIAL = StackingTableModel.COL_MATERIAL
 COL_ORIENTATION = StackingTableModel.COL_ORIENTATION
+
+
+def _normalize_orientation_for_summary(value: object) -> Optional[int]:
+    if value is None:
+        return None
+    try:
+        return normalize_angle(value)
+    except Exception:
+        try:
+            return int(round(float(value)))
+        except Exception:
+            return None
+
+
+def compute_stacking_summary(
+    model: Optional[StackingTableModel],
+) -> dict[str, object]:
+    summary = {
+        "total_layers": 0,
+        "structural_count": 0,
+        "non_structural_count": 0,
+        "materials": Counter(),
+        "orientations": Counter(),
+    }
+    if model is None:
+        return summary
+
+    row_count = model.rowCount()
+    summary["total_layers"] = row_count
+
+    for row in range(row_count):
+        ply_index = model.index(row, COL_PLY_TYPE)
+        ply_type = ply_index.data(Qt.DisplayRole) if ply_index.isValid() else ""
+        ply_text = (ply_type or "").strip()
+        if ply_text == "Structural Ply":
+            summary["structural_count"] += 1
+        else:
+            summary["non_structural_count"] += 1
+
+        material_index = model.index(row, COL_MATERIAL)
+        material_value = (
+            material_index.data(Qt.DisplayRole) if material_index.isValid() else ""
+        )
+        material_text = (material_value or "").strip()
+        if material_text:
+            summary["materials"][material_text] += 1
+
+        orientation_index = model.index(row, COL_ORIENTATION)
+        orientation_value = (
+            orientation_index.data(Qt.DisplayRole)
+            if orientation_index.isValid()
+            else None
+        )
+        normalized_orientation = _normalize_orientation_for_summary(orientation_value)
+        if normalized_orientation is not None:
+            summary["orientations"][normalized_orientation] += 1
+
+    return summary
+
+
+def format_stacking_summary(summary: dict[str, object]) -> str:
+    total = int(summary.get("total_layers", 0) or 0)
+    struc = int(summary.get("structural_count", 0) or 0)
+    non = int(summary.get("non_structural_count", 0) or 0)
+
+    materials_counter = summary.get("materials", Counter())
+    orientations_counter = summary.get("orientations", Counter())
+
+    if not isinstance(materials_counter, Counter):
+        materials_counter = Counter(materials_counter)
+    if not isinstance(orientations_counter, Counter):
+        orientations_counter = Counter(orientations_counter)
+
+    mats = sorted(
+        materials_counter.items(),
+        key=lambda item: (-item[1], str(item[0])),
+    )
+    oris = sorted(
+        orientations_counter.items(),
+        key=lambda item: (item[0] if item[0] is not None else 9999),
+    )
+
+    def fmt_counter(rows: list[tuple[object, int]]) -> str:
+        parts: list[str] = []
+        for key, value in rows:
+            if key in (None, "", " "):
+                continue
+            parts.append(f"{key}:{value}")
+        return " ".join(parts)
+
+    return (
+        "Resumo do Stacking\n"
+        f"Total camadas....: {total}\n"
+        f"Estruturais......: {struc}\n"
+        f"N\u00e3o estruturais..: {non}\n"
+        f"Materiais........: {fmt_counter(mats) if mats else '-'}\n"
+        f"Orienta\u00e7\u00f5es......: {fmt_counter(oris) if oris else '-'}"
+    )
+
+
+def _load_icon_from_resources(
+    resource_path: str, fallback_filename: str
+) -> QIcon:
+    icon = QIcon(resource_path)
+    if icon.isNull():
+        fallback_path = RESOURCES_ICONS_DIR / fallback_filename
+        if fallback_path.is_file():
+            icon = QIcon(str(fallback_path))
+    return icon
 
 
 class UiState(Enum):
@@ -118,6 +233,7 @@ class MainWindow(QMainWindow):
         ]
         self._band_frame_margin = 0
         self._header_band_scroll_connected = False
+        self._stacking_summary_model: Optional[StackingTableModel] = None
 
         self.ui_state = UiState.VIEW
         self._create_actions()
@@ -335,6 +451,11 @@ class MainWindow(QMainWindow):
         label.setWordWrap(True)
         label.setMaximumWidth(220)
         label.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Preferred)
+
+        content_layout = QHBoxLayout()
+        content_layout.setSpacing(6)
+        content_layout.setContentsMargins(0, 0, 0, 0)
+
         self.associated_cells = QTextEdit(container)
         self.associated_cells.setReadOnly(True)
         self.associated_cells.setPlaceholderText("C3, C5")
@@ -345,8 +466,44 @@ class MainWindow(QMainWindow):
         self.associated_cells.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.associated_cells.setStyleSheet("background-color: #ffffff;")
 
+        content_layout.addWidget(self.associated_cells)
+
+        summary_frame = QFrame(container)
+        summary_frame.setFrameShape(QFrame.NoFrame)
+        summary_frame.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Preferred)
+        summary_frame.setMinimumWidth(240)
+        summary_frame.setMaximumWidth(320)
+        summary_layout = QVBoxLayout(summary_frame)
+        summary_layout.setSpacing(4)
+        summary_layout.setContentsMargins(0, 0, 0, 0)
+
+        self.stackingSummary = QLabel(summary_frame)
+        self.stackingSummary.setObjectName("stackingSummary")
+        self.stackingSummary.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.stackingSummary.setAlignment(Qt.AlignTop | Qt.AlignLeft)
+        self.stackingSummary.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Preferred)
+        self.stackingSummary.setMinimumWidth(240)
+        self.stackingSummary.setMaximumWidth(300)
+        fixed_font = QFontDatabase.systemFont(QFontDatabase.FixedFont)
+        self.stackingSummary.setFont(fixed_font)
+        font = self.stackingSummary.font()
+        font.setPointSize(max(font.pointSize() - 1, 9))
+        self.stackingSummary.setFont(font)
+        self.stackingSummary.setStyleSheet(
+            "QLabel#stackingSummary { white-space: pre; }"
+        )
+        self.stackingSummary.setWordWrap(False)
+        initial_summary = format_stacking_summary(
+            compute_stacking_summary(self._stacking_summary_model)
+        )
+        self.stackingSummary.setText(initial_summary)
+
+        summary_layout.addWidget(self.stackingSummary)
+        summary_layout.addStretch()
+        content_layout.addWidget(summary_frame)
+
         layout.addWidget(label)
-        layout.addWidget(self.associated_cells)
+        layout.addLayout(content_layout)
         container.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Preferred)
         return container
 
@@ -479,7 +636,7 @@ class MainWindow(QMainWindow):
             return button
 
         self.btn_icon_new_laminate_from_paste = make_button(
-            ":/icons/new_laminate.svg",
+            "",
             "Criar novo laminado por colagem (Ctrl+V)",
             self.on_new_laminate_from_paste,
             "Criar novo laminado por colagem (Ctrl+V)",
@@ -487,6 +644,15 @@ class MainWindow(QMainWindow):
         )
         self.btn_icon_new_laminate_from_paste.setObjectName(
             "btn_icon_new_laminate_from_paste"
+        )
+        self.btn_icon_new_laminate_from_paste.setIcon(
+            _load_icon_from_resources(
+                ":/icons/Criar_novo_laminado_ControlV.jpg",
+                "Criar_novo_laminado_ControlV.jpg",
+            )
+        )
+        self.btn_icon_new_laminate_from_paste.setToolTip(
+            "Criar novo laminado por colagem (Ctrl+V)"
         )
         self.btn_icon_new_laminate_from_paste.setIconSize(QSize(24, 24))
         self.btn_new_laminate_from_paste = self.btn_icon_new_laminate_from_paste
@@ -511,7 +677,11 @@ class MainWindow(QMainWindow):
         self.btn_bulk_change_material.setToolButtonStyle(Qt.ToolButtonIconOnly)
         self.btn_bulk_change_material.setAutoRaise(True)
         self.btn_bulk_change_material.setFixedWidth(42)
-        self.btn_bulk_change_material.setIcon(QIcon(":/icons/bulk_material.svg"))
+        self.btn_bulk_change_material.setIcon(
+            _load_icon_from_resources(
+                ":/icons/Trocar_Materiais.jpg", "Trocar_Materiais.jpg"
+            )
+        )
         self.btn_bulk_change_material.setIconSize(QSize(24, 24))
         self.btn_bulk_change_material.setToolTip(
             "Trocar material das camadas selecionadas"
@@ -535,7 +705,9 @@ class MainWindow(QMainWindow):
         self.btn_bulk_change_orientation.setAutoRaise(True)
         self.btn_bulk_change_orientation.setFixedWidth(42)
         self.btn_bulk_change_orientation.setIcon(
-            QIcon(":/icons/bulk_orientation.svg")
+            _load_icon_from_resources(
+                ":/icons/Trocar_Orientacao.jpg", "Trocar_Orientacao.jpg"
+            )
         )
         self.btn_bulk_change_orientation.setIconSize(QSize(24, 24))
         self.btn_bulk_change_orientation.setToolTip(
@@ -622,6 +794,9 @@ class MainWindow(QMainWindow):
 
         if isinstance(model, StackingTableModel):
             self._connect_header_band_model_signals(model)
+            self._set_stacking_summary_model(model)
+        else:
+            self._set_stacking_summary_model(None)
 
         self._install_stacking_delegates(view, binding)
         self._apply_stacking_column_setup(view)
@@ -749,6 +924,45 @@ class MainWindow(QMainWindow):
         except (TypeError, RuntimeError):
             pass
         model.layoutChanged.connect(self._sync_header_band)
+
+    def _set_stacking_summary_model(
+        self, model: Optional[StackingTableModel]
+    ) -> None:
+        current = getattr(self, "_stacking_summary_model", None)
+        if current is model:
+            self._stacking_summary_model = model
+            self.update_stacking_summary_ui()
+            return
+
+        if isinstance(current, StackingTableModel):
+            for signal in (
+                current.dataChanged,
+                current.rowsInserted,
+                current.rowsRemoved,
+                current.modelReset,
+            ):
+                try:
+                    signal.disconnect(self.update_stacking_summary_ui)
+                except (TypeError, RuntimeError):
+                    pass
+
+        self._stacking_summary_model = model
+
+        if isinstance(model, StackingTableModel):
+            model.dataChanged.connect(self.update_stacking_summary_ui)
+            model.rowsInserted.connect(self.update_stacking_summary_ui)
+            model.rowsRemoved.connect(self.update_stacking_summary_ui)
+            model.modelReset.connect(self.update_stacking_summary_ui)
+
+        self.update_stacking_summary_ui()
+
+    def update_stacking_summary_ui(self, *args) -> None:  # noqa: ARG002
+        summary_label = getattr(self, "stackingSummary", None)
+        if not isinstance(summary_label, QLabel):
+            return
+        model = getattr(self, "_stacking_summary_model", None)
+        summary = compute_stacking_summary(model)
+        summary_label.setText(format_stacking_summary(summary))
 
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:
         if event.type() == QEvent.Resize:
@@ -1064,6 +1278,7 @@ class MainWindow(QMainWindow):
             except Exception as exc:  # pragma: no cover - defensive
                 logger.warning("Nao foi possivel aplicar novo laminado: %s", exc)
         self._show_model_warnings()
+        self.update_stacking_summary_ui()
         self._update_save_actions_enabled()
 
     def _show_model_warnings(self) -> bool:
@@ -1358,6 +1573,7 @@ class MainWindow(QMainWindow):
                 "Camadas adicionadas a partir da colagem.", 3000
             )
         self._update_save_actions_enabled()
+        self.update_stacking_summary_ui()
 
     def on_bulk_change_material(self) -> None:
         rows = self._selected_row_indexes()
@@ -1388,6 +1604,7 @@ class MainWindow(QMainWindow):
         if isinstance(view, QTableView):
             view.viewport().update()
         self._update_save_actions_enabled()
+        self.update_stacking_summary_ui()
 
     def on_bulk_change_orientation(self) -> None:
         rows = self._selected_row_indexes()
