@@ -52,9 +52,9 @@ from gridlamedit.app.delegates import (
     OrientationComboDelegate,
     PlyTypeComboDelegate,
 )
-from gridlamedit.app.dialogs.new_laminate_paste_dialog import (
-    NewLaminatePasteDialog,
-)
+from gridlamedit.app.dialogs.bulk_material_dialog import BulkMaterialDialog
+from gridlamedit.app.dialogs.bulk_orientation_dialog import BulkOrientationDialog
+from gridlamedit.app.dialogs.new_laminate_paste_dialog import NewLaminatePasteDialog
 from gridlamedit.core.project_manager import ProjectManager
 from gridlamedit.io.spreadsheet import (
     Camada,
@@ -74,6 +74,12 @@ from gridlamedit.services.excel_io import export_grid_xlsx
 logger = logging.getLogger(__name__)
 
 ICONS_DIR = Path(__file__).resolve().parent / "icons"
+
+COL_NUM = StackingTableModel.COL_NUMBER
+COL_SELECTION = StackingTableModel.COL_SELECT
+COL_PLY_TYPE = StackingTableModel.COL_PLY_TYPE
+COL_MATERIAL = StackingTableModel.COL_MATERIAL
+COL_ORIENTATION = StackingTableModel.COL_ORIENTATION
 
 
 class UiState(Enum):
@@ -468,21 +474,18 @@ class MainWindow(QMainWindow):
             layout.addWidget(button)
             return button
 
-        self.btn_new_laminate_from_paste = make_button(
-            None,
-            "Novo laminado (colar orientações)",
+        self.btn_icon_new_laminate_from_paste = make_button(
+            ":/icons/new_laminate.svg",
+            "Criar novo laminado por colagem (Ctrl+V)",
             self.on_new_laminate_from_paste,
-            "Novo laminado (colar orientações)",
-            text="Novo laminado (colar orientações)",
-            tool_button_style=Qt.ToolButtonTextOnly,
-            fixed_width=None,
+            "Criar novo laminado por colagem (Ctrl+V)",
+            tool_button_style=Qt.ToolButtonIconOnly,
         )
-        self.btn_new_laminate_from_paste.setObjectName(
-            "btn_new_laminate_from_paste"
+        self.btn_icon_new_laminate_from_paste.setObjectName(
+            "btn_icon_new_laminate_from_paste"
         )
-        self.btn_new_laminate_from_paste.setSizePolicy(
-            QSizePolicy.Expanding, QSizePolicy.Fixed
-        )
+        self.btn_icon_new_laminate_from_paste.setIconSize(QSize(24, 24))
+        self.btn_new_laminate_from_paste = self.btn_icon_new_laminate_from_paste
 
         self.add_layer_button = make_button(
             "add-layer.svg",
@@ -499,6 +502,27 @@ class MainWindow(QMainWindow):
             "Duplicar camada",
             QStyle.SP_FileDialogDetailedView,
         )
+        self.btn_bulk_change_material = make_button(
+            ":/icons/bulk_material.svg",
+            "Trocar material das camadas selecionadas",
+            self.on_bulk_change_material,
+            "Trocar material das camadas selecionadas",
+            tool_button_style=Qt.ToolButtonIconOnly,
+        )
+        self.btn_bulk_change_material.setObjectName("btn_bulk_change_material")
+        self.btn_bulk_change_material.setIconSize(QSize(24, 24))
+
+        self.btn_bulk_change_orientation = make_button(
+            ":/icons/bulk_orientation.svg",
+            "Trocar orientação das camadas selecionadas",
+            self.on_bulk_change_orientation,
+            "Trocar orientação das camadas selecionadas",
+            tool_button_style=Qt.ToolButtonIconOnly,
+        )
+        self.btn_bulk_change_orientation.setObjectName(
+            "btn_bulk_change_orientation"
+        )
+        self.btn_bulk_change_orientation.setIconSize(QSize(24, 24))
 
         self.move_up_button = make_button(
             "arrow-up.svg",
@@ -1309,6 +1333,70 @@ class MainWindow(QMainWindow):
             )
         self._update_save_actions_enabled()
 
+    def on_bulk_change_material(self) -> None:
+        rows = self._selected_row_indexes()
+        if not rows:
+            QMessageBox.information(
+                self,
+                "Seleção necessária",
+                "Selecione pelo menos uma camada para trocar o material.",
+            )
+            return
+        view, model = self._get_stacking_view_and_model()
+        if model is None:
+            return
+        materials: list[str] = []
+        if hasattr(model, "material_options"):
+            try:
+                options = model.material_options()
+            except Exception:
+                options = []
+            else:
+                options = [item for item in options if isinstance(item, str)]
+            if options:
+                seen = dict.fromkeys(options)
+                materials = list(seen.keys())
+        dialog = BulkMaterialDialog(self, materials)
+        if dialog.exec() != QDialog.Accepted:
+            return
+        material = dialog.selected_material.strip()
+        for row in rows:
+            index = model.index(row, COL_MATERIAL)
+            if not index.isValid():
+                continue
+            model.setData(index, material, Qt.EditRole)
+        if isinstance(view, QTableView):
+            view.viewport().update()
+        self._update_save_actions_enabled()
+
+    def on_bulk_change_orientation(self) -> None:
+        rows = self._selected_row_indexes()
+        if not rows:
+            QMessageBox.information(
+                self,
+                "Seleção necessária",
+                "Selecione pelo menos uma camada para trocar a orientação.",
+            )
+            return
+        view, model = self._get_stacking_view_and_model()
+        if model is None:
+            return
+        dialog = BulkOrientationDialog(self)
+        if dialog.exec() != QDialog.Accepted:
+            return
+        new_orientation = dialog.new_orientation
+        if new_orientation is None:
+            return
+        orientation_text = str(new_orientation)
+        for row in rows:
+            index = model.index(row, COL_ORIENTATION)
+            if not index.isValid():
+                continue
+            model.setData(index, orientation_text, Qt.EditRole)
+        if isinstance(view, QTableView):
+            view.viewport().update()
+        self._update_save_actions_enabled()
+
     def _on_add_layer_clicked(self) -> None:
         binding = getattr(self, "_grid_binding", None)
         if binding is None:
@@ -1380,6 +1468,26 @@ class MainWindow(QMainWindow):
             if isinstance(table_model, StackingTableModel):
                 model = table_model
         return view, model
+
+    def _selected_row_indexes(self) -> list[int]:
+        view, model = self._get_stacking_view_and_model()
+        rows: list[int] = []
+        if model is not None and hasattr(model, "checked_rows"):
+            try:
+                rows = [row for row in model.checked_rows() if isinstance(row, int)]
+            except Exception:
+                rows = []
+        rows = [row for row in rows if row >= 0]
+        if rows:
+            return sorted(dict.fromkeys(rows))
+        if view is None:
+            return []
+        selection_model = view.selectionModel() if view is not None else None
+        if selection_model is None:
+            return []
+        selected = selection_model.selectedRows()
+        fallback_rows = sorted({index.row() for index in selected if index.isValid()})
+        return fallback_rows
 
     def _select_all_rows(self) -> None:
         view, model = self._get_stacking_view_and_model()

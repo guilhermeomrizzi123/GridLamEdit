@@ -1,0 +1,7 @@
+<RCC>
+  <qresource prefix="/icons">
+    <file>icons/new_laminate.svg</file>
+    <file>icons/bulk_material.svg</file>
+    <file>icons/bulk_orientation.svg</file>
+  </qresource>
+</RCC>
