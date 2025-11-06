@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
     QComboBox,
+    QDialog,
     QFileDialog,
     QHeaderView,
     QHBoxLayout,
@@ -50,6 +51,9 @@ from gridlamedit.app.delegates import (
     MaterialComboDelegate,
     OrientationComboDelegate,
     PlyTypeComboDelegate,
+)
+from gridlamedit.app.dialogs.new_laminate_paste_dialog import (
+    NewLaminatePasteDialog,
 )
 from gridlamedit.core.project_manager import ProjectManager
 from gridlamedit.io.spreadsheet import (
@@ -463,6 +467,22 @@ class MainWindow(QMainWindow):
             self.layer_buttons.append(button)
             layout.addWidget(button)
             return button
+
+        self.btn_new_laminate_from_paste = make_button(
+            None,
+            "Novo laminado (colar orientações)",
+            self.on_new_laminate_from_paste,
+            "Novo laminado (colar orientações)",
+            text="Novo laminado (colar orientações)",
+            tool_button_style=Qt.ToolButtonTextOnly,
+            fixed_width=None,
+        )
+        self.btn_new_laminate_from_paste.setObjectName(
+            "btn_new_laminate_from_paste"
+        )
+        self.btn_new_laminate_from_paste.setSizePolicy(
+            QSizePolicy.Expanding, QSizePolicy.Fixed
+        )
 
         self.add_layer_button = make_button(
             "add-layer.svg",
@@ -1229,6 +1249,65 @@ class MainWindow(QMainWindow):
             f"Base:   Material={mat_bot or '-'}, Orientacao={ori_bot or '-'}"
         )
         QMessageBox.warning(self, "Verificar simetria", message)
+
+    def on_new_laminate_from_paste(self) -> None:
+        binding = getattr(self, "_grid_binding", None)
+        if binding is None:
+            return
+        _, model = self._get_stacking_view_and_model()
+        if model is None:
+            return
+        if model.rowCount() > 0:
+            QMessageBox.warning(
+                self,
+                "Laminado existente",
+                "Para criar um novo laminado por colagem, primeiro delete todas as camadas do laminado atual.",
+            )
+            return
+
+        dialog = NewLaminatePasteDialog(self)
+        if dialog.exec() != QDialog.Accepted:
+            return
+
+        orientations = getattr(dialog, "result_orientations", []) or []
+        if not orientations:
+            return
+
+        stacking_model = getattr(binding, "stacking_model", None)
+        if stacking_model is None:
+            return
+
+        insert_position = stacking_model.rowCount()
+        for angle in orientations:
+            try:
+                normalized = normalize_angle(angle)
+            except ValueError:
+                continue
+            camada = Camada(
+                idx=0,
+                material="",
+                orientacao=normalized,
+                ativo=True,
+                simetria=False,
+                ply_type=DEFAULT_PLY_TYPE,
+            )
+            stacking_model.insert_layer(insert_position, camada)
+            insert_position += 1
+
+        current_laminate = getattr(binding, "_current_laminate", None)
+        if current_laminate:
+            laminado = binding.model.laminados.get(current_laminate)
+            if laminado is not None:
+                laminado.camadas = stacking_model.layers()
+
+        stacking_model.clear_checks()
+        if hasattr(binding, "_update_layers_count"):
+            binding._update_layers_count()
+        if self.statusBar():
+            self.statusBar().showMessage(
+                "Camadas adicionadas a partir da colagem.", 3000
+            )
+        self._update_save_actions_enabled()
 
     def _on_add_layer_clicked(self) -> None:
         binding = getattr(self, "_grid_binding", None)
