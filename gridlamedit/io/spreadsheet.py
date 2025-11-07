@@ -11,7 +11,7 @@ from collections import OrderedDict
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Dict, Iterable, List, Optional, Protocol
+from typing import Callable, Dict, Iterable, List, Optional, Protocol, Sequence
 
 import pandas as pd
 from PySide6.QtCore import (
@@ -1602,11 +1602,9 @@ class _GridUiBinding:
             if isinstance(type_combo, QComboBox):
                 type_combo.setEditText(laminado.tipo)
 
-            associated_cells = getattr(self.ui, "associated_cells", None)
-            if hasattr(associated_cells, "setPlainText"):
-                associated_cells.setPlainText(
-                    ", ".join(self._cells_for_laminate(laminado.nome))
-                )
+            self._update_associated_cells_widget(
+                self._cells_for_laminate(laminado.nome)
+            )
 
             self.stacking_model.update_layers(laminado.camadas)
             self._current_laminate = laminado.nome
@@ -1659,12 +1657,21 @@ class _GridUiBinding:
             return
         cells = self._cells_for_laminate(laminate_name)
         lam.celulas = cells
+        if self._current_laminate == laminate_name:
+            self._update_associated_cells_widget(cells)
+
+    def _update_associated_cells_widget(self, cells: Sequence[str]) -> None:
+        updater = getattr(self.ui, "update_associated_cells_display", None)
+        if callable(updater):
+            try:
+                updater(list(cells))
+                return
+            except Exception:  # pragma: no cover - defensive
+                logger.debug(
+                    "Falha ao atualizar botao de celulas associadas.", exc_info=True
+                )
         widget = getattr(self.ui, "associated_cells", None)
-        if (
-            widget is not None
-            and hasattr(widget, "setPlainText")
-            and self._current_laminate == laminate_name
-        ):
+        if hasattr(widget, "setPlainText"):
             widget.setPlainText(", ".join(cells))
 
     def material_options(self) -> list[str]:

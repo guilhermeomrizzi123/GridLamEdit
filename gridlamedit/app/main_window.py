@@ -61,8 +61,11 @@ from gridlamedit.app.delegates import (
     OrientationComboDelegate,
     PlyTypeComboDelegate,
 )
+from gridlamedit.app.dialogs.associated_cells_dialog import AssociatedCellsDialog
 from gridlamedit.app.dialogs.bulk_material_dialog import BulkMaterialDialog
 from gridlamedit.app.dialogs.bulk_orientation_dialog import BulkOrientationDialog
+from gridlamedit.app.dialogs.duplicate_laminate_dialog import DuplicateLaminateDialog
+from gridlamedit.app.dialogs.name_laminate_dialog import NameLaminateDialog
 from gridlamedit.app.dialogs.new_laminate_paste_dialog import NewLaminatePasteDialog
 from gridlamedit.app.dialogs.stacking_summary_dialog import StackingSummaryDialog
 from gridlamedit.core.project_manager import ProjectManager
@@ -143,6 +146,10 @@ class MainWindow(QMainWindow):
         self._stacking_ply_delegate = None
         self._stacking_material_delegate = None
         self._stacking_orientation_delegate = None
+        self._associated_cells_dialog: Optional[
+            AssociatedCellsDialog
+        ] = None
+        self._current_associated_cells: list[str] = []
         self._selection_column_index = StackingTableModel.COL_SELECT
         self._stacking_header_band: Optional[QWidget] = None
         self._band_labels: list[QLabel] = []
@@ -170,6 +177,7 @@ class MainWindow(QMainWindow):
         self._update_undo_buttons_state()
         self._update_save_actions_enabled()
         self._restore_stacking_summary_dialog_state()
+        self._center_on_screen()
 
     def _apply_initial_geometry(self) -> None:
         screen = QGuiApplication.primaryScreen()
@@ -184,6 +192,19 @@ class MainWindow(QMainWindow):
             geometry.x() + (geometry.width() - width) // 2,
             geometry.y() + (geometry.height() - height) // 2,
         )
+
+    def _center_on_screen(self) -> None:
+        handle = self.windowHandle()
+        screen = handle.screen() if handle is not None else None
+        if screen is None:
+            screen = QGuiApplication.primaryScreen()
+        if screen is None:
+            return
+        geo = self.frameGeometry()
+        if not geo.isValid():
+            geo = self.geometry()
+        geo.moveCenter(screen.availableGeometry().center())
+        self.move(geo.topLeft())
 
     def _create_actions(self) -> None:
         action_specs: List[
@@ -377,30 +398,18 @@ class MainWindow(QMainWindow):
         layout.setSpacing(6)
         layout.setContentsMargins(0, 0, 0, 0)
 
-        associated_label = QLabel(
+        self.btn_associated_cells = QPushButton(
             "Celulas associadas com esse laminado", container
         )
-        associated_label.setWordWrap(True)
-        associated_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        self.btn_associated_cells.setObjectName("btn_associated_cells")
+        self.btn_associated_cells.setToolTip(
+            "Abrir lista de celulas associadas ao laminado atual"
+        )
+        self.btn_associated_cells.clicked.connect(
+            self._open_associated_cells_dialog
+        )
 
-        self.associated_cells = QTextEdit(container)
-        self.associated_cells.setReadOnly(True)
-        self.associated_cells.setPlaceholderText("C3, C5")
-        self.associated_cells.setFixedHeight(48)
-        self.associated_cells.setSizePolicy(
-            QSizePolicy.Expanding, QSizePolicy.Fixed
-        )
-        self.associated_cells.setVerticalScrollBarPolicy(
-            Qt.ScrollBarAsNeeded
-        )
-        self.associated_cells.setHorizontalScrollBarPolicy(
-            Qt.ScrollBarAsNeeded
-        )
-        self.associated_cells.setStyleSheet("background-color: #ffffff;")
-        self.associated_cells.document().setDocumentMargin(4)
-
-        layout.addWidget(associated_label)
-        layout.addWidget(self.associated_cells)
+        layout.addWidget(self.btn_associated_cells, alignment=Qt.AlignLeft)
         container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         return container
 
@@ -565,6 +574,17 @@ class MainWindow(QMainWindow):
         )
         self.btn_icon_new_laminate_from_paste.setIconSize(QSize(24, 24))
         self.btn_new_laminate_from_paste = self.btn_icon_new_laminate_from_paste
+
+        self.btn_duplicate_laminate = make_button(
+            None,
+            "Duplicar laminado existente",
+            self._open_duplicate_laminate_dialog,
+            "Duplicar laminado existente",
+            tool_button_style=Qt.ToolButtonTextOnly,
+            text="Duplicar",
+            fixed_width=None,
+        )
+        self.btn_duplicate_laminate.setObjectName("btn_duplicate_laminate")
 
         self.add_layer_button = make_button(
             "add-layer.svg",
@@ -1400,6 +1420,140 @@ class MainWindow(QMainWindow):
         self._show_model_warnings()
         self.update_stacking_summary_ui()
         self._update_save_actions_enabled()
+
+    def _open_duplicate_laminate_dialog(self) -> None:
+        if self._grid_model is None or not self._grid_model.laminados:
+            QMessageBox.information(
+                self,
+                "Duplicar laminado",
+                "Nenhum laminado disponivel para duplicar.",
+            )
+            return
+        dialog = DuplicateLaminateDialog(self)
+        laminates = list(self._grid_model.laminados.values())
+        names = [laminado.nome for laminado in laminates]
+        dialog.set_laminates(names)
+        if dialog.exec() != QDialog.Accepted:
+            return
+        source_name = dialog.selected_name()
+        if not source_name:
+            return
+        source = self._grid_model.laminados.get(source_name)
+        if source is None:
+            QMessageBox.warning(
+                self, "Duplicar laminado", "Laminado nao encontrado."
+            )
+            return
+        name_dialog = NameLaminateDialog(self)
+        name_dialog.set_existing_names(names)
+        if name_dialog.exec() != QDialog.Accepted:
+            return
+        new_name = name_dialog.result_name()
+        if not new_name:
+            return
+        clone = self._clone_laminate(source)
+        clone.nome = new_name
+        self._grid_model.laminados[new_name] = clone
+        self._refresh_main_laminate_dropdown(select_name=new_name)
+        QMessageBox.information(
+            self,
+            "Duplicar laminado",
+            f"Laminado '{source_name}' duplicado como '{new_name}'.",
+        )
+        self._mark_dirty()
+
+    def _clone_laminate(self, laminado: Laminado) -> Laminado:
+        clone = copy.deepcopy(laminado)
+        clone.celulas = []
+        return clone
+
+    def _refresh_main_laminate_dropdown(
+        self, select_name: Optional[str] = None
+    ) -> None:
+        combo = getattr(self, "laminate_name_combo", None)
+        if not isinstance(combo, QComboBox):
+            return
+        if self._grid_model is None:
+            combo.clear()
+            return
+        current_selection = select_name or combo.currentText().strip()
+        names = [laminado.nome for laminado in self._grid_model.laminados.values()]
+        combo.blockSignals(True)
+        combo.clear()
+        combo.addItems(names)
+        combo.blockSignals(False)
+        target = select_name or current_selection
+        if target:
+            idx = combo.findText(target)
+            if idx >= 0:
+                combo.setCurrentIndex(idx)
+            else:
+                combo.setCurrentText(target)
+        elif combo.count() > 0:
+            combo.setCurrentIndex(0)
+        if combo.count() > 0:
+            self._on_change_laminate_selection()
+
+    def _on_change_laminate_selection(self) -> None:
+        combo = getattr(self, "laminate_name_combo", None)
+        binding = getattr(self, "_grid_binding", None)
+        if not isinstance(combo, QComboBox) or binding is None:
+            return
+        current = combo.currentText().strip()
+        if not current:
+            return
+        handler = getattr(binding, "_on_laminate_selected", None)
+        if callable(handler):
+            handler(current)
+            return
+        apply_method = getattr(binding, "_apply_laminate", None)
+        if callable(apply_method):
+            apply_method(current)
+
+    def _open_associated_cells_dialog(self) -> None:
+        laminate = self._current_laminate_instance()
+        if laminate is None:
+            QMessageBox.information(
+                self,
+                "Celulas associadas",
+                "Selecione um laminado para visualizar as celulas associadas.",
+            )
+            return
+        if self._associated_cells_dialog is None:
+            self._associated_cells_dialog = AssociatedCellsDialog(self)
+        dialog = self._associated_cells_dialog
+        cells = (
+            self._current_associated_cells
+            or self._associated_cells_for_laminate(laminate)
+        )
+        dialog.refresh_from_laminate(laminate.nome, cells)
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+
+    def _associated_cells_for_laminate(
+        self, laminate: Optional[Laminado]
+    ) -> list[str]:
+        if laminate is None or self._grid_model is None:
+            return []
+        mapped = [
+            cell_id
+            for cell_id in self._grid_model.celulas_ordenadas
+            if self._grid_model.cell_to_laminate.get(cell_id) == laminate.nome
+        ]
+        if mapped:
+            return mapped
+        return list(laminate.celulas)
+
+    def update_associated_cells_display(self, cells: Iterable[str]) -> None:
+        self._current_associated_cells = [str(cell).strip() for cell in cells if str(cell).strip()]
+        button = getattr(self, "btn_associated_cells", None)
+        if isinstance(button, QPushButton):
+            count = len(self._current_associated_cells)
+            tooltip = "Abrir lista de celulas associadas ao laminado atual"
+            if count:
+                tooltip = f"{tooltip} ({count})"
+            button.setToolTip(tooltip)
 
     def _show_model_warnings(self) -> bool:
         if self._grid_model is None or not self._grid_model.compat_warnings:
