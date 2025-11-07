@@ -10,7 +10,7 @@ from enum import Enum, auto
 from pathlib import Path
 from typing import Iterable, List, Optional
 
-from PySide6.QtCore import Qt, QSize, QTimer, QEvent, QObject
+from PySide6.QtCore import Qt, QSize, QTimer, QEvent, QObject, QByteArray, QSettings
 from PySide6.QtGui import (
     QAction,
     QCloseEvent,
@@ -24,6 +24,7 @@ from PySide6.QtGui import (
     QUndoStack,
 )
 from PySide6.QtWidgets import (
+    QAbstractButton,
     QAbstractItemView,
     QCheckBox,
     QComboBox,
@@ -39,7 +40,6 @@ from PySide6.QtWidgets import (
     QListWidgetItem,
     QMessageBox,
     QMainWindow,
-    QPlainTextEdit,
     QPushButton,
     QStyle,
     QSizePolicy,
@@ -64,6 +64,7 @@ from gridlamedit.app.delegates import (
 from gridlamedit.app.dialogs.bulk_material_dialog import BulkMaterialDialog
 from gridlamedit.app.dialogs.bulk_orientation_dialog import BulkOrientationDialog
 from gridlamedit.app.dialogs.new_laminate_paste_dialog import NewLaminatePasteDialog
+from gridlamedit.app.dialogs.stacking_summary_dialog import StackingSummaryDialog
 from gridlamedit.core.project_manager import ProjectManager
 from gridlamedit.io.spreadsheet import (
     Camada,
@@ -157,6 +158,8 @@ class MainWindow(QMainWindow):
         self._stacking_summary_model: Optional[StackingTableModel] = None
         self.undo_stack = QUndoStack(self)
         self._undo_shortcuts: list[QShortcut] = []
+        self._settings = QSettings("GridLamEdit", "GridLamEdit")
+        self.stacking_summary_dialog = StackingSummaryDialog(self)
 
         self.ui_state = UiState.VIEW
         self._create_actions()
@@ -166,6 +169,7 @@ class MainWindow(QMainWindow):
         self._setup_undo_shortcuts()
         self._update_undo_buttons_state()
         self._update_save_actions_enabled()
+        self._restore_stacking_summary_dialog_state()
 
     def _apply_initial_geometry(self) -> None:
         screen = QGuiApplication.primaryScreen()
@@ -300,7 +304,7 @@ class MainWindow(QMainWindow):
         panel = QWidget(self)
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(16, 16, 16, 16)
-        layout.setSpacing(16)
+        layout.setSpacing(12)
 
         header = QLabel("Laminado Associado a Celula", panel)
         header_font: QFont = header.font()
@@ -310,15 +314,16 @@ class MainWindow(QMainWindow):
 
         layout.addWidget(header)
         layout.addLayout(self._build_laminate_form())
-        layout.addWidget(
-            self._build_associated_cells_view(), alignment=Qt.AlignLeft
-        )
+        associated_view = self._build_associated_cells_view()
+        layout.addWidget(associated_view, alignment=Qt.AlignLeft)
 
         stacking_label = QLabel("Stacking", panel)
         stacking_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
 
         layout.addWidget(stacking_label)
-        layout.addWidget(self._build_layers_section(), stretch=1)
+        layers_section = self._build_layers_section()
+        layout.addWidget(layers_section, stretch=2)
+        layout.setStretchFactor(layers_section, 2)
         return panel
 
     def _build_laminate_form(self) -> QHBoxLayout:
@@ -368,21 +373,15 @@ class MainWindow(QMainWindow):
 
     def _build_associated_cells_view(self) -> QWidget:
         container = QWidget(self)
-        layout = QGridLayout(container)
+        layout = QVBoxLayout(container)
         layout.setSpacing(6)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setColumnStretch(0, 1)
-        layout.setColumnStretch(1, 2)
-        layout.setRowStretch(1, 1)
 
         associated_label = QLabel(
             "Celulas associadas com esse laminado", container
         )
         associated_label.setWordWrap(True)
         associated_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-
-        self.lbl_stacking_summary = QLabel("Resumo do Stacking", container)
-        self.lbl_stacking_summary.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
 
         self.associated_cells = QTextEdit(container)
         self.associated_cells.setReadOnly(True)
@@ -400,33 +399,9 @@ class MainWindow(QMainWindow):
         self.associated_cells.setStyleSheet("background-color: #ffffff;")
         self.associated_cells.document().setDocumentMargin(4)
 
-        self.txt_stacking_summary = QPlainTextEdit(container)
-        self.txt_stacking_summary.setObjectName("stackingSummary")
-        self.txt_stacking_summary.setReadOnly(True)
-        self.txt_stacking_summary.setLineWrapMode(QPlainTextEdit.NoWrap)
-        self.txt_stacking_summary.setWordWrapMode(QTextOption.NoWrap)
-        self.txt_stacking_summary.setHorizontalScrollBarPolicy(
-            Qt.ScrollBarAsNeeded
-        )
-        self.txt_stacking_summary.setVerticalScrollBarPolicy(
-            Qt.ScrollBarAsNeeded
-        )
-        self.txt_stacking_summary.setSizePolicy(
-            QSizePolicy.Expanding, QSizePolicy.Expanding
-        )
-        self.txt_stacking_summary.setMinimumWidth(280)
-        monospace_font = QFont("Consolas", 10)
-        self.txt_stacking_summary.document().setDefaultFont(monospace_font)
-        self.txt_stacking_summary.document().setDocumentMargin(6)
-        self.txt_stacking_summary.setPlainText(
-            self._render_stacking_summary(self._current_laminate_instance())
-        )
-
-        layout.addWidget(associated_label, 0, 0)
-        layout.addWidget(self.lbl_stacking_summary, 0, 1)
-        layout.addWidget(self.associated_cells, 1, 0)
-        layout.addWidget(self.txt_stacking_summary, 1, 1)
-        container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        layout.addWidget(associated_label)
+        layout.addWidget(self.associated_cells)
+        container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         return container
 
     def _build_layers_section(self) -> QWidget:
@@ -443,16 +418,22 @@ class MainWindow(QMainWindow):
         header_widget = self._create_layers_header_widget(container)
         table_layout.addWidget(header_widget)
         table_layout.addWidget(self.layers_table, stretch=1)
+        table_layout.addSpacing(8)
+        table_layout.setStretch(0, 0)
+        table_layout.setStretch(1, 1)
 
         self.layers_count_label = QLabel(
             "Quantidade Total de Camadas: 0", container
         )
         self.layers_count_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.layers_count_label.setContentsMargins(0, 0, 0, 4)
         table_layout.addWidget(self.layers_count_label)
+        table_layout.setStretch(2, 0)
 
         layout.addLayout(table_layout, stretch=1)
         layout.addLayout(self._create_layers_buttons())
         container.setMinimumHeight(0)
+        container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         header = self.layers_table.horizontalHeader()
         header.sectionResized.connect(self._sync_header_band)
         header.sectionMoved.connect(self._sync_header_band)
@@ -474,6 +455,7 @@ class MainWindow(QMainWindow):
         table.setVerticalScrollMode(QAbstractItemView.ScrollPerItem)
         table.verticalHeader().setVisible(False)
         table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        table.setMinimumHeight(440)
         return table
 
     def _create_layers_header_widget(self, parent: QWidget) -> QWidget:
@@ -542,6 +524,11 @@ class MainWindow(QMainWindow):
                 button.setIconSize(QSize(24, 24))
                 if icon_name.startswith(":/"):
                     icon = QIcon(icon_name)
+                    if icon.isNull():
+                        fallback_name = icon_name.rsplit("/", 1)[-1]
+                        icon = _load_icon_from_resources(
+                            icon_name, fallback_name
+                        )
                 else:
                     icon_path = ICONS_DIR / icon_name
                     if icon_path.is_file():
@@ -692,17 +679,34 @@ class MainWindow(QMainWindow):
             QStyle.SP_DialogResetButton,
         )
 
-        self.btn_undo = QPushButton("Desfazer", self)
+        self.btn_undo = make_button(
+            ":/icons/undo.svg",
+            "Desfazer (Ctrl+Z)",
+            self.undo_stack.undo,
+            "Desfazer (Ctrl+Z)",
+        )
+        self.btn_undo.setObjectName("btn_undo")
         self.btn_undo.setEnabled(False)
-        self.btn_undo.clicked.connect(self.undo_stack.undo)
-        self.btn_undo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        layout.addWidget(self.btn_undo)
 
-        self.btn_redo = QPushButton("Refazer", self)
+        self.btn_redo = make_button(
+            ":/icons/redo.svg",
+            "Refazer (Ctrl+Y)",
+            self.undo_stack.redo,
+            "Refazer (Ctrl+Y)",
+        )
+        self.btn_redo.setObjectName("btn_redo")
         self.btn_redo.setEnabled(False)
-        self.btn_redo.clicked.connect(self.undo_stack.redo)
-        self.btn_redo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        layout.addWidget(self.btn_redo)
+
+        self.btn_show_stacking_summary = make_button(
+            ":/icons/stacking_summary.svg",
+            "Abrir Resumo do Stacking",
+            self._show_stacking_summary,
+            "Abrir Resumo do Stacking",
+        )
+        self.btn_show_stacking_summary.setObjectName(
+            "btn_show_stacking_summary"
+        )
+
         layout.addStretch()
         return layout
 
@@ -933,9 +937,9 @@ class MainWindow(QMainWindow):
         btn_redo = getattr(self, "btn_redo", None)
         can_undo = self.undo_stack.canUndo() if hasattr(self, "undo_stack") else False
         can_redo = self.undo_stack.canRedo() if hasattr(self, "undo_stack") else False
-        if isinstance(btn_undo, QPushButton):
+        if isinstance(btn_undo, QAbstractButton):
             btn_undo.setEnabled(can_undo)
-        if isinstance(btn_redo, QPushButton):
+        if isinstance(btn_redo, QAbstractButton):
             btn_redo.setEnabled(can_redo)
 
     def _clear_undo_history(self) -> None:
@@ -1018,11 +1022,64 @@ class MainWindow(QMainWindow):
         return "\n".join(lines)
 
     def update_stacking_summary_ui(self, *args) -> None:  # noqa: ARG002
-        summary_widget = getattr(self, "txt_stacking_summary", None)
-        if not isinstance(summary_widget, QPlainTextEdit):
+        dialog = getattr(self, "stacking_summary_dialog", None)
+        if dialog is None or not dialog.isVisible():
             return
         laminate = self._current_laminate_instance()
-        summary_widget.setPlainText(self._render_stacking_summary(laminate))
+        dialog.update_summary(self._render_stacking_summary(laminate))
+
+    def _show_stacking_summary(self) -> None:
+        dialog = getattr(self, "stacking_summary_dialog", None)
+        if dialog is None:
+            return
+        laminate = self._current_laminate_instance()
+        dialog.update_summary(self._render_stacking_summary(laminate))
+        if dialog.isVisible():
+            dialog.raise_()
+            dialog.activateWindow()
+        else:
+            dialog.show()
+
+    def _restore_stacking_summary_dialog_state(self) -> None:
+        dialog = getattr(self, "stacking_summary_dialog", None)
+        settings = getattr(self, "_settings", None)
+        if dialog is None or settings is None:
+            return
+        geometry_value = settings.value("UI/StackingSummary/geometry")
+        if isinstance(geometry_value, QByteArray):
+            dialog.restoreGeometry(geometry_value)
+        elif isinstance(geometry_value, (bytes, bytearray)):
+            dialog.restoreGeometry(QByteArray(geometry_value))
+        visible_value = settings.value("UI/StackingSummary/visible", False)
+        if self._settings_value_to_bool(visible_value):
+            self._show_stacking_summary()
+
+    def _save_stacking_summary_dialog_state(self) -> None:
+        dialog = getattr(self, "stacking_summary_dialog", None)
+        settings = getattr(self, "_settings", None)
+        if dialog is None or settings is None:
+            return
+        settings.setValue("UI/StackingSummary/geometry", dialog.saveGeometry())
+        settings.setValue("UI/StackingSummary/visible", dialog.isVisible())
+
+    @staticmethod
+    def _settings_value_to_bool(
+        value: object, default: bool = False
+    ) -> bool:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(int(value))
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            return normalized in {"1", "true", "yes", "on"}
+        if isinstance(value, QByteArray):
+            try:
+                decoded = bytes(value).decode("utf-8")
+            except Exception:
+                return default
+            return decoded.strip().lower() in {"1", "true", "yes", "on"}
+        return default
 
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:
         if event.type() == QEvent.Resize:
@@ -2211,6 +2268,7 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event: QCloseEvent) -> None:
         if self._confirm_discard_changes():
+            self._save_stacking_summary_dialog_state()
             event.accept()
         else:
             event.ignore()

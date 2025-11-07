@@ -3,5 +3,8 @@
     <file>icons/Trocar_Materiais.jpg</file>
     <file>icons/Trocar_Orientacao.jpg</file>
     <file>icons/Criar_novo_laminado_ControlV.jpg</file>
+    <file>icons/undo.svg</file>
+    <file>icons/redo.svg</file>
+    <file>icons/stacking_summary.svg</file>
   </qresource>
 </RCC>
