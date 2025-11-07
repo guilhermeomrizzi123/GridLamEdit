@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import logging
+import copy
 from collections import Counter
+from dataclasses import dataclass
 from enum import Enum, auto
 from pathlib import Path
 from typing import Iterable, List, Optional
@@ -14,10 +16,12 @@ from PySide6.QtGui import (
     QCloseEvent,
     QIcon,
     QFont,
-    QFontDatabase,
     QGuiApplication,
     QKeySequence,
     QShortcut,
+    QTextOption,
+    QUndoCommand,
+    QUndoStack,
 )
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -25,6 +29,7 @@ from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
     QFileDialog,
+    QGridLayout,
     QHeaderView,
     QHBoxLayout,
     QFrame,
@@ -34,6 +39,7 @@ from PySide6.QtWidgets import (
     QListWidgetItem,
     QMessageBox,
     QMainWindow,
+    QPlainTextEdit,
     QPushButton,
     QStyle,
     QSizePolicy,
@@ -63,6 +69,7 @@ from gridlamedit.io.spreadsheet import (
     Camada,
     DEFAULT_COLOR_INDEX,
     DEFAULT_PLY_TYPE,
+    PLY_TYPE_OPTIONS,
     GridModel,
     Laminado,
     StackingTableModel,
@@ -102,92 +109,6 @@ def _normalize_orientation_for_summary(value: object) -> Optional[int]:
             return int(round(float(value)))
         except Exception:
             return None
-
-
-def compute_stacking_summary(
-    model: Optional[StackingTableModel],
-) -> dict[str, object]:
-    summary = {
-        "total_layers": 0,
-        "structural_count": 0,
-        "non_structural_count": 0,
-        "materials": Counter(),
-        "orientations": Counter(),
-    }
-    if model is None:
-        return summary
-
-    row_count = model.rowCount()
-    summary["total_layers"] = row_count
-
-    for row in range(row_count):
-        ply_index = model.index(row, COL_PLY_TYPE)
-        ply_type = ply_index.data(Qt.DisplayRole) if ply_index.isValid() else ""
-        ply_text = (ply_type or "").strip()
-        if ply_text == "Structural Ply":
-            summary["structural_count"] += 1
-        else:
-            summary["non_structural_count"] += 1
-
-        material_index = model.index(row, COL_MATERIAL)
-        material_value = (
-            material_index.data(Qt.DisplayRole) if material_index.isValid() else ""
-        )
-        material_text = (material_value or "").strip()
-        if material_text:
-            summary["materials"][material_text] += 1
-
-        orientation_index = model.index(row, COL_ORIENTATION)
-        orientation_value = (
-            orientation_index.data(Qt.DisplayRole)
-            if orientation_index.isValid()
-            else None
-        )
-        normalized_orientation = _normalize_orientation_for_summary(orientation_value)
-        if normalized_orientation is not None:
-            summary["orientations"][normalized_orientation] += 1
-
-    return summary
-
-
-def format_stacking_summary(summary: dict[str, object]) -> str:
-    total = int(summary.get("total_layers", 0) or 0)
-    struc = int(summary.get("structural_count", 0) or 0)
-    non = int(summary.get("non_structural_count", 0) or 0)
-
-    materials_counter = summary.get("materials", Counter())
-    orientations_counter = summary.get("orientations", Counter())
-
-    if not isinstance(materials_counter, Counter):
-        materials_counter = Counter(materials_counter)
-    if not isinstance(orientations_counter, Counter):
-        orientations_counter = Counter(orientations_counter)
-
-    mats = sorted(
-        materials_counter.items(),
-        key=lambda item: (-item[1], str(item[0])),
-    )
-    oris = sorted(
-        orientations_counter.items(),
-        key=lambda item: (item[0] if item[0] is not None else 9999),
-    )
-
-    def fmt_counter(rows: list[tuple[object, int]]) -> str:
-        parts: list[str] = []
-        for key, value in rows:
-            if key in (None, "", " "):
-                continue
-            parts.append(f"{key}:{value}")
-        return " ".join(parts)
-
-    return (
-        "Resumo do Stacking\n"
-        f"Total camadas....: {total}\n"
-        f"Estruturais......: {struc}\n"
-        f"N\u00e3o estruturais..: {non}\n"
-        f"Materiais........: {fmt_counter(mats) if mats else '-'}\n"
-        f"Orienta\u00e7\u00f5es......: {fmt_counter(oris) if oris else '-'}"
-    )
 
 
 def _load_icon_from_resources(
@@ -234,12 +155,16 @@ class MainWindow(QMainWindow):
         self._band_frame_margin = 0
         self._header_band_scroll_connected = False
         self._stacking_summary_model: Optional[StackingTableModel] = None
+        self.undo_stack = QUndoStack(self)
+        self._undo_shortcuts: list[QShortcut] = []
 
         self.ui_state = UiState.VIEW
         self._create_actions()
         self._setup_menu_bar()
         self._setup_central_widget()
         self._setup_status_bar()
+        self._setup_undo_shortcuts()
+        self._update_undo_buttons_state()
         self._update_save_actions_enabled()
 
     def _apply_initial_geometry(self) -> None:
@@ -443,68 +368,65 @@ class MainWindow(QMainWindow):
 
     def _build_associated_cells_view(self) -> QWidget:
         container = QWidget(self)
-        layout = QVBoxLayout(container)
+        layout = QGridLayout(container)
         layout.setSpacing(6)
         layout.setContentsMargins(0, 0, 0, 0)
+        layout.setColumnStretch(0, 1)
+        layout.setColumnStretch(1, 2)
+        layout.setRowStretch(1, 1)
 
-        label = QLabel("Celulas associadas com esse laminado", container)
-        label.setWordWrap(True)
-        label.setMaximumWidth(220)
-        label.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Preferred)
+        associated_label = QLabel(
+            "Celulas associadas com esse laminado", container
+        )
+        associated_label.setWordWrap(True)
+        associated_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
 
-        content_layout = QHBoxLayout()
-        content_layout.setSpacing(6)
-        content_layout.setContentsMargins(0, 0, 0, 0)
+        self.lbl_stacking_summary = QLabel("Resumo do Stacking", container)
+        self.lbl_stacking_summary.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
 
         self.associated_cells = QTextEdit(container)
         self.associated_cells.setReadOnly(True)
         self.associated_cells.setPlaceholderText("C3, C5")
-        self.associated_cells.setMaximumWidth(220)
-        self.associated_cells.setFixedHeight(40)
-        self.associated_cells.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Preferred)
-        self.associated_cells.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        self.associated_cells.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.associated_cells.setFixedHeight(48)
+        self.associated_cells.setSizePolicy(
+            QSizePolicy.Expanding, QSizePolicy.Fixed
+        )
+        self.associated_cells.setVerticalScrollBarPolicy(
+            Qt.ScrollBarAsNeeded
+        )
+        self.associated_cells.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarAsNeeded
+        )
         self.associated_cells.setStyleSheet("background-color: #ffffff;")
+        self.associated_cells.document().setDocumentMargin(4)
 
-        content_layout.addWidget(self.associated_cells)
-
-        summary_frame = QFrame(container)
-        summary_frame.setFrameShape(QFrame.NoFrame)
-        summary_frame.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Preferred)
-        summary_frame.setMinimumWidth(240)
-        summary_frame.setMaximumWidth(320)
-        summary_layout = QVBoxLayout(summary_frame)
-        summary_layout.setSpacing(4)
-        summary_layout.setContentsMargins(0, 0, 0, 0)
-
-        self.stackingSummary = QLabel(summary_frame)
-        self.stackingSummary.setObjectName("stackingSummary")
-        self.stackingSummary.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        self.stackingSummary.setAlignment(Qt.AlignTop | Qt.AlignLeft)
-        self.stackingSummary.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Preferred)
-        self.stackingSummary.setMinimumWidth(240)
-        self.stackingSummary.setMaximumWidth(300)
-        fixed_font = QFontDatabase.systemFont(QFontDatabase.FixedFont)
-        self.stackingSummary.setFont(fixed_font)
-        font = self.stackingSummary.font()
-        font.setPointSize(max(font.pointSize() - 1, 9))
-        self.stackingSummary.setFont(font)
-        self.stackingSummary.setStyleSheet(
-            "QLabel#stackingSummary { white-space: pre; }"
+        self.txt_stacking_summary = QPlainTextEdit(container)
+        self.txt_stacking_summary.setObjectName("stackingSummary")
+        self.txt_stacking_summary.setReadOnly(True)
+        self.txt_stacking_summary.setLineWrapMode(QPlainTextEdit.NoWrap)
+        self.txt_stacking_summary.setWordWrapMode(QTextOption.NoWrap)
+        self.txt_stacking_summary.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarAsNeeded
         )
-        self.stackingSummary.setWordWrap(False)
-        initial_summary = format_stacking_summary(
-            compute_stacking_summary(self._stacking_summary_model)
+        self.txt_stacking_summary.setVerticalScrollBarPolicy(
+            Qt.ScrollBarAsNeeded
         )
-        self.stackingSummary.setText(initial_summary)
+        self.txt_stacking_summary.setSizePolicy(
+            QSizePolicy.Expanding, QSizePolicy.Expanding
+        )
+        self.txt_stacking_summary.setMinimumWidth(280)
+        monospace_font = QFont("Consolas", 10)
+        self.txt_stacking_summary.document().setDefaultFont(monospace_font)
+        self.txt_stacking_summary.document().setDocumentMargin(6)
+        self.txt_stacking_summary.setPlainText(
+            self._render_stacking_summary(self._current_laminate_instance())
+        )
 
-        summary_layout.addWidget(self.stackingSummary)
-        summary_layout.addStretch()
-        content_layout.addWidget(summary_frame)
-
-        layout.addWidget(label)
-        layout.addLayout(content_layout)
-        container.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Preferred)
+        layout.addWidget(associated_label, 0, 0)
+        layout.addWidget(self.lbl_stacking_summary, 0, 1)
+        layout.addWidget(self.associated_cells, 1, 0)
+        layout.addWidget(self.txt_stacking_summary, 1, 1)
+        container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         return container
 
     def _build_layers_section(self) -> QWidget:
@@ -770,6 +692,17 @@ class MainWindow(QMainWindow):
             QStyle.SP_DialogResetButton,
         )
 
+        self.btn_undo = QPushButton("Desfazer", self)
+        self.btn_undo.setEnabled(False)
+        self.btn_undo.clicked.connect(self.undo_stack.undo)
+        self.btn_undo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        layout.addWidget(self.btn_undo)
+
+        self.btn_redo = QPushButton("Refazer", self)
+        self.btn_redo.setEnabled(False)
+        self.btn_redo.clicked.connect(self.undo_stack.redo)
+        self.btn_redo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        layout.addWidget(self.btn_redo)
         layout.addStretch()
         return layout
 
@@ -939,12 +872,15 @@ class MainWindow(QMainWindow):
                 current.dataChanged,
                 current.rowsInserted,
                 current.rowsRemoved,
-                current.modelReset,
             ):
                 try:
                     signal.disconnect(self.update_stacking_summary_ui)
                 except (TypeError, RuntimeError):
                     pass
+            try:
+                current.modelReset.disconnect(self._handle_stacking_model_reset)
+            except (TypeError, RuntimeError):
+                pass
 
         self._stacking_summary_model = model
 
@@ -952,17 +888,141 @@ class MainWindow(QMainWindow):
             model.dataChanged.connect(self.update_stacking_summary_ui)
             model.rowsInserted.connect(self.update_stacking_summary_ui)
             model.rowsRemoved.connect(self.update_stacking_summary_ui)
-            model.modelReset.connect(self.update_stacking_summary_ui)
+            model.modelReset.connect(self._handle_stacking_model_reset)
 
         self.update_stacking_summary_ui()
 
-    def update_stacking_summary_ui(self, *args) -> None:  # noqa: ARG002
-        summary_label = getattr(self, "stackingSummary", None)
-        if not isinstance(summary_label, QLabel):
+    def _stacking_binding_context(
+        self,
+    ) -> tuple[Optional[object], Optional[StackingTableModel], Optional[Laminado]]:
+        binding = getattr(self, "_grid_binding", None)
+        model: Optional[StackingTableModel] = None
+        laminate: Optional[Laminado] = None
+        if binding is not None:
+            candidate_model = getattr(binding, "stacking_model", None)
+            if isinstance(candidate_model, StackingTableModel):
+                model = candidate_model
+            current_name = getattr(binding, "_current_laminate", None)
+            grid_model = getattr(binding, "model", None)
+            if current_name and grid_model is not None:
+                laminate = grid_model.laminados.get(current_name)
+        return binding, model, laminate
+
+    def _handle_stacking_model_reset(self) -> None:
+        self._clear_undo_history()
+        self.update_stacking_summary_ui()
+
+    def _setup_undo_shortcuts(self) -> None:
+        if not hasattr(self, "undo_stack"):
             return
-        model = getattr(self, "_stacking_summary_model", None)
-        summary = compute_stacking_summary(model)
-        summary_label.setText(format_stacking_summary(summary))
+        for shortcut in self._undo_shortcuts:
+            shortcut.setParent(None)
+        self._undo_shortcuts.clear()
+        undo_shortcut = QShortcut(QKeySequence("Ctrl+Z"), self)
+        undo_shortcut.activated.connect(self.undo_stack.undo)
+        self._undo_shortcuts.append(undo_shortcut)
+        for sequence in ("Ctrl+Y", "Ctrl+Shift+Z"):
+            redo_shortcut = QShortcut(QKeySequence(sequence), self)
+            redo_shortcut.activated.connect(self.undo_stack.redo)
+            self._undo_shortcuts.append(redo_shortcut)
+        self.undo_stack.canUndoChanged.connect(self._update_undo_buttons_state)
+        self.undo_stack.canRedoChanged.connect(self._update_undo_buttons_state)
+
+    def _update_undo_buttons_state(self) -> None:
+        btn_undo = getattr(self, "btn_undo", None)
+        btn_redo = getattr(self, "btn_redo", None)
+        can_undo = self.undo_stack.canUndo() if hasattr(self, "undo_stack") else False
+        can_redo = self.undo_stack.canRedo() if hasattr(self, "undo_stack") else False
+        if isinstance(btn_undo, QPushButton):
+            btn_undo.setEnabled(can_undo)
+        if isinstance(btn_redo, QPushButton):
+            btn_redo.setEnabled(can_redo)
+
+    def _clear_undo_history(self) -> None:
+        if hasattr(self, "undo_stack"):
+            self.undo_stack.blockSignals(True)
+            self.undo_stack.clear()
+            self.undo_stack.blockSignals(False)
+            self._update_undo_buttons_state()
+
+    def _current_laminate_instance(self) -> Optional[Laminado]:
+        _, _, laminate = self._stacking_binding_context()
+        if laminate is not None:
+            return laminate
+        if self._grid_model is None:
+            return None
+        if not self._grid_model.laminados:
+            return None
+        if (
+            hasattr(self, "laminate_name_combo")
+            and self.laminate_name_combo.currentText()
+        ):
+            current_name = self.laminate_name_combo.currentText()
+            return self._grid_model.laminados.get(current_name)
+        return next(iter(self._grid_model.laminados.values()), None)
+
+    def _render_stacking_summary(
+        self, laminate: Optional[Laminado]
+    ) -> str:
+        layers = list(laminate.camadas) if laminate is not None else []
+        total_layers = len(layers)
+        structural_label = PLY_TYPE_OPTIONS[0]
+        structural_layers = sum(
+            1 for camada in layers if (camada.ply_type or DEFAULT_PLY_TYPE) == structural_label
+        )
+        non_structural_layers = total_layers - structural_layers
+
+        materials_counter: Counter[str] = Counter()
+        orientations_counter: Counter[int] = Counter()
+
+        for camada in layers:
+            material_text = (camada.material or "").strip()
+            if material_text:
+                materials_counter[material_text] += 1
+            normalized_orientation = _normalize_orientation_for_summary(
+                camada.orientacao
+            )
+            if normalized_orientation is not None:
+                orientations_counter[normalized_orientation] += 1
+
+        def _pluralize(count: int) -> str:
+            return "Ply" if count == 1 else "Plies"
+
+        orientation_parts = "".join(
+            f"[{count} {_pluralize(count)} a {angle} graus]"
+            for angle, count in sorted(orientations_counter.items(), key=lambda item: item[0])
+        )
+        materials_parts = "".join(
+            f"[{count} {_pluralize(count)}({material})]"
+            for material, count in sorted(
+                materials_counter.items(), key=lambda item: (-item[1], item[0])
+            )
+        )
+
+        if not orientation_parts:
+            orientation_parts = "-"
+        if not materials_parts:
+            materials_parts = "-"
+
+        lines = [
+            f"Total de camadas:  {total_layers}",
+            f"Camadas n\u00e3o estruturais:  {non_structural_layers}",
+            f"Camadas estruturais:  {structural_layers}",
+            "",
+            "Orienta\u00e7\u00f5es:",
+            orientation_parts,
+            "",
+            "Materiais:",
+            materials_parts,
+        ]
+        return "\n".join(lines)
+
+    def update_stacking_summary_ui(self, *args) -> None:  # noqa: ARG002
+        summary_widget = getattr(self, "txt_stacking_summary", None)
+        if not isinstance(summary_widget, QPlainTextEdit):
+            return
+        laminate = self._current_laminate_instance()
+        summary_widget.setPlainText(self._render_stacking_summary(laminate))
 
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:
         if event.type() == QEvent.Resize:
@@ -1263,6 +1323,9 @@ class MainWindow(QMainWindow):
     def _refresh_after_new_laminate(self, laminate_name: str) -> None:
         if self._grid_model is None:
             return
+        self._clear_undo_history()
+        self._clear_undo_history()
+        self._clear_undo_history()
         bind_model_to_ui(self._grid_model, self)
         binding = getattr(self, "_grid_binding", None)
         if binding is not None:
@@ -1516,11 +1579,8 @@ class MainWindow(QMainWindow):
         QMessageBox.warning(self, "Verificar simetria", message)
 
     def on_new_laminate_from_paste(self) -> None:
-        binding = getattr(self, "_grid_binding", None)
-        if binding is None:
-            return
-        _, model = self._get_stacking_view_and_model()
-        if model is None:
+        binding, model, laminate = self._stacking_binding_context()
+        if binding is None or model is None or laminate is None:
             return
         if model.rowCount() > 0:
             QMessageBox.warning(
@@ -1538,42 +1598,39 @@ class MainWindow(QMainWindow):
         if not orientations:
             return
 
-        stacking_model = getattr(binding, "stacking_model", None)
-        if stacking_model is None:
-            return
-
-        insert_position = stacking_model.rowCount()
+        new_layers: list[Camada] = []
         for angle in orientations:
             try:
                 normalized = normalize_angle(angle)
             except ValueError:
                 continue
-            camada = Camada(
-                idx=0,
-                material="",
-                orientacao=normalized,
-                ativo=True,
-                simetria=False,
-                ply_type=DEFAULT_PLY_TYPE,
+            new_layers.append(
+                Camada(
+                    idx=0,
+                    material="",
+                    orientacao=normalized,
+                    ativo=True,
+                    simetria=False,
+                    ply_type=DEFAULT_PLY_TYPE,
+                )
             )
-            stacking_model.insert_layer(insert_position, camada)
-            insert_position += 1
+        if not new_layers:
+            QMessageBox.information(
+                self,
+                "Colar stacking",
+                "Nenhuma camada valida foi colada.",
+            )
+            return
 
-        current_laminate = getattr(binding, "_current_laminate", None)
-        if current_laminate:
-            laminado = binding.model.laminados.get(current_laminate)
-            if laminado is not None:
-                laminado.camadas = stacking_model.layers()
-
-        stacking_model.clear_checks()
+        command = AppendLayersCommand(model, laminate, new_layers)
+        self.undo_stack.push(command)
+        model.clear_checks()
         if hasattr(binding, "_update_layers_count"):
             binding._update_layers_count()
         if self.statusBar():
             self.statusBar().showMessage(
                 "Camadas adicionadas a partir da colagem.", 3000
             )
-        self._update_save_actions_enabled()
-        self.update_stacking_summary_ui()
 
     def on_bulk_change_material(self) -> None:
         rows = self._selected_row_indexes()
@@ -1584,8 +1641,9 @@ class MainWindow(QMainWindow):
                 "Selecione pelo menos uma camada para trocar o material.",
             )
             return
-        view, model = self._get_stacking_view_and_model()
-        if model is None:
+        _, model = self._get_stacking_view_and_model()
+        _, _, laminate = self._stacking_binding_context()
+        if model is None or laminate is None:
             return
         project = self._grid_model
         materials = project_distinct_materials(project)
@@ -1596,13 +1654,33 @@ class MainWindow(QMainWindow):
         if dialog.exec() != QDialog.Accepted:
             return
         material = dialog.cmb_material.currentText().strip()
+        layers_snapshot = model.layers()
+        changes: list[LayerFieldChange] = []
         for row in rows:
-            index = model.index(row, COL_MATERIAL)
-            if not index.isValid():
+            if not (0 <= row < len(layers_snapshot)):
                 continue
-            model.setData(index, material, Qt.EditRole)
-        if isinstance(view, QTableView):
-            view.viewport().update()
+            old_value = layers_snapshot[row].material
+            if old_value == material:
+                continue
+            changes.append(
+                LayerFieldChange(
+                    row=row,
+                    column=COL_MATERIAL,
+                    old_value=old_value,
+                    new_value=material,
+                )
+            )
+        if not changes:
+            QMessageBox.information(
+                self,
+                "Trocar material",
+                "Os materiais selecionados ja possuem o valor informado.",
+            )
+            return
+        command = BulkLayerEditCommand(
+            model, laminate, changes, "Trocar material (lote)"
+        )
+        self.undo_stack.push(command)
         self._update_save_actions_enabled()
         self.update_stacking_summary_ui()
 
@@ -1615,8 +1693,9 @@ class MainWindow(QMainWindow):
                 "Selecione pelo menos uma camada para trocar a orientação.",
             )
             return
-        view, model = self._get_stacking_view_and_model()
-        if model is None:
+        _, model = self._get_stacking_view_and_model()
+        _, _, laminate = self._stacking_binding_context()
+        if model is None or laminate is None:
             return
         project = self._grid_model
         project_orientations = project_distinct_orientations(project)
@@ -1629,18 +1708,38 @@ class MainWindow(QMainWindow):
         new_orientation = dialog.new_orientation
         if new_orientation is None:
             return
+        layers_snapshot = model.layers()
+        changes: list[LayerFieldChange] = []
         for row in rows:
-            index = model.index(row, COL_ORIENTATION)
-            if not index.isValid():
+            if not (0 <= row < len(layers_snapshot)):
                 continue
-            model.setData(index, new_orientation, Qt.EditRole)
-        if isinstance(view, QTableView):
-            view.viewport().update()
+            old_value = layers_snapshot[row].orientacao
+            if old_value == new_orientation:
+                continue
+            changes.append(
+                LayerFieldChange(
+                    row=row,
+                    column=COL_ORIENTATION,
+                    old_value=old_value,
+                    new_value=new_orientation,
+                )
+            )
+        if not changes:
+            QMessageBox.information(
+                self,
+                "Trocar orienta��ǜo",
+                "As camadas selecionadas ja possuem a orienta��ǜo escolhida.",
+            )
+            return
+        command = BulkLayerEditCommand(
+            model, laminate, changes, "Trocar orienta��ǜo (lote)"
+        )
+        self.undo_stack.push(command)
         self._update_save_actions_enabled()
 
     def _on_add_layer_clicked(self) -> None:
-        binding = getattr(self, "_grid_binding", None)
-        if binding is None:
+        binding, model, laminate = self._stacking_binding_context()
+        if binding is None or model is None or laminate is None:
             return
         checked_rows = binding.checked_rows()
         if len(checked_rows) > 1:
@@ -1651,20 +1750,15 @@ class MainWindow(QMainWindow):
             )
             return
         target_row = checked_rows[0] if checked_rows else None
-        if not binding.add_layer(target_row):
-            QMessageBox.information(
-                self,
-                "Adicionar camada",
-                "Nenhum laminado ativo para receber a nova camada.",
-            )
-            return
+        command = AddLayerCommand(model, laminate, target_row)
+        self.undo_stack.push(command)
         if self.statusBar():
             self.statusBar().showMessage("Camada adicionada.", 3000)
         self._update_save_actions_enabled()
 
     def _on_delete_layers_clicked(self) -> None:
-        binding = getattr(self, "_grid_binding", None)
-        if binding is None:
+        binding, model, laminate = self._stacking_binding_context()
+        if binding is None or model is None or laminate is None:
             return
         selected = binding.checked_rows()
         count = len(selected)
@@ -1683,12 +1777,13 @@ class MainWindow(QMainWindow):
         )
         if reply != QMessageBox.Yes:
             return
-        removed = binding.delete_checked_layers()
-        if removed == 0:
+        command = DeleteLayersCommand(model, laminate, selected)
+        if not command.has_changes:
             return
+        self.undo_stack.push(command)
         if self.statusBar():
             self.statusBar().showMessage(
-                f"{removed} camada(s) excluidas.", 3000
+                f"{len(command.removed_rows)} camada(s) excluidas.", 3000
             )
         self._update_save_actions_enabled()
 
@@ -1760,28 +1855,34 @@ class MainWindow(QMainWindow):
         self._clear_all_selections()
 
     def _on_move_up_clicked(self) -> None:
-        binding = getattr(self, "_grid_binding", None)
-        if binding is None:
-            return
-        success, reason = binding.move_selected_layer(-1)
-        if success:
-            if self.statusBar():
-                self.statusBar().showMessage("Camada movida para cima.", 3000)
-            self._update_save_actions_enabled()
-            return
-        self._handle_move_error(reason, "acima")
+        self._move_selected_layer(-1, "acima", "Camada movida para cima.")
 
     def _on_move_down_clicked(self) -> None:
-        binding = getattr(self, "_grid_binding", None)
-        if binding is None:
+        self._move_selected_layer(1, "abaixo", "Camada movida para baixo.")
+
+    def _move_selected_layer(
+        self, direction: int, error_label: str, status_text: str
+    ) -> None:
+        binding, model, laminate = self._stacking_binding_context()
+        if binding is None or model is None or laminate is None:
             return
-        success, reason = binding.move_selected_layer(1)
-        if success:
-            if self.statusBar():
-                self.statusBar().showMessage("Camada movida para baixo.", 3000)
-            self._update_save_actions_enabled()
+        rows = binding.checked_rows()
+        if not rows:
+            self._handle_move_error("none", error_label)
             return
-        self._handle_move_error(reason, "abaixo")
+        if len(rows) > 1:
+            self._handle_move_error("multi", error_label)
+            return
+        source = rows[0]
+        target = source + direction
+        if not (0 <= target < model.rowCount()):
+            self._handle_move_error("edge", error_label)
+            return
+        command = MoveLayerCommand(model, laminate, source, target)
+        self.undo_stack.push(command)
+        if self.statusBar():
+            self.statusBar().showMessage(status_text, 3000)
+        self._update_save_actions_enabled()
 
     def _handle_move_error(self, reason: str, direction_label: str) -> None:
         if reason == "none":
@@ -1840,6 +1941,7 @@ class MainWindow(QMainWindow):
         if self.ui_state == UiState.CREATING:
             self._exit_creating_mode()
 
+        self._clear_undo_history()
         bind_model_to_ui(self._grid_model, self)
         binding = getattr(self, "_grid_binding", None)
         if binding is not None:
@@ -2112,3 +2214,169 @@ class MainWindow(QMainWindow):
             event.accept()
         else:
             event.ignore()
+
+
+@dataclass
+class LayerFieldChange:
+    row: int
+    column: int
+    old_value: object
+    new_value: object
+
+
+class _BaseStackingCommand(QUndoCommand):
+    def __init__(
+        self, model: StackingTableModel, laminate: Optional[Laminado], text: str
+    ) -> None:
+        super().__init__(text)
+        self._model = model
+        self._laminate = laminate
+
+    def _sync_laminate(self) -> None:
+        if self._laminate is not None:
+            self._laminate.camadas = self._model.layers()
+
+
+class AddLayerCommand(_BaseStackingCommand):
+    def __init__(
+        self,
+        model: StackingTableModel,
+        laminate: Laminado,
+        insert_after: Optional[int],
+    ) -> None:
+        super().__init__(model, laminate, "Adicionar camada")
+        self._insert_after = insert_after
+        self._insert_row: Optional[int] = None
+        self._template = Camada(
+            idx=0,
+            material="",
+            orientacao=0,
+            ativo=True,
+            simetria=False,
+            ply_type=DEFAULT_PLY_TYPE,
+        )
+
+    def redo(self) -> None:
+        position = self._model.rowCount()
+        if self._insert_after is not None:
+            position = min(self._insert_after + 1, self._model.rowCount())
+        self._insert_row = position
+        self._model.insert_layer(position, copy.deepcopy(self._template))
+        self._model.clear_checks()
+        self._sync_laminate()
+
+    def undo(self) -> None:
+        if self._insert_row is None:
+            return
+        self._model.remove_rows([self._insert_row])
+        self._model.clear_checks()
+        self._sync_laminate()
+
+
+class DeleteLayersCommand(_BaseStackingCommand):
+    def __init__(
+        self,
+        model: StackingTableModel,
+        laminate: Laminado,
+        rows: Iterable[int],
+    ) -> None:
+        super().__init__(model, laminate, "Excluir camadas selecionadas")
+        unique_rows = sorted({row for row in rows if row >= 0})
+        snapshot = model.layers()
+        self.removed_rows: list[tuple[int, Camada]] = [
+            (row, copy.deepcopy(snapshot[row]))
+            for row in unique_rows
+            if row < len(snapshot)
+        ]
+        self.has_changes = bool(self.removed_rows)
+
+    def redo(self) -> None:
+        if not self.has_changes:
+            return
+        rows = [row for row, _ in self.removed_rows]
+        self._model.remove_rows(rows)
+        self._model.clear_checks()
+        self._sync_laminate()
+
+    def undo(self) -> None:
+        if not self.has_changes:
+            return
+        for row, layer in self.removed_rows:
+            self._model.insert_layer(row, copy.deepcopy(layer))
+        self._model.clear_checks()
+        self._sync_laminate()
+
+
+class MoveLayerCommand(_BaseStackingCommand):
+    def __init__(
+        self,
+        model: StackingTableModel,
+        laminate: Laminado,
+        source: int,
+        target: int,
+    ) -> None:
+        super().__init__(model, laminate, "Mover camada")
+        self._source = source
+        self._target = target
+
+    def redo(self) -> None:
+        if self._model.move_row(self._source, self._target):
+            self._sync_laminate()
+
+    def undo(self) -> None:
+        if self._model.move_row(self._target, self._source):
+            self._sync_laminate()
+
+
+class BulkLayerEditCommand(_BaseStackingCommand):
+    def __init__(
+        self,
+        model: StackingTableModel,
+        laminate: Laminado,
+        changes: list[LayerFieldChange],
+        text: str,
+    ) -> None:
+        super().__init__(model, laminate, text)
+        self._changes = changes
+
+    def redo(self) -> None:
+        for change in self._changes:
+            self._model.apply_field_value(change.row, change.column, change.new_value)
+        self._sync_laminate()
+
+    def undo(self) -> None:
+        for change in reversed(self._changes):
+            self._model.apply_field_value(change.row, change.column, change.old_value)
+        self._sync_laminate()
+
+
+class AppendLayersCommand(_BaseStackingCommand):
+    def __init__(
+        self,
+        model: StackingTableModel,
+        laminate: Laminado,
+        layers: list[Camada],
+    ) -> None:
+        super().__init__(model, laminate, "Colar stacking")
+        self._layers = [copy.deepcopy(layer) for layer in layers]
+        self._start_row: Optional[int] = None
+
+    def redo(self) -> None:
+        if self._start_row is None:
+            self._start_row = self._model.rowCount()
+        start = self._start_row
+        for offset, layer in enumerate(self._layers):
+            self._model.insert_layer(start + offset, copy.deepcopy(layer))
+        self._model.clear_checks()
+        self._sync_laminate()
+
+    def undo(self) -> None:
+        if self._start_row is None:
+            return
+        rows = range(self._start_row, self._start_row + len(self._layers))
+        self._model.remove_rows(rows)
+        self._model.clear_checks()
+        self._sync_laminate()
+
+
+

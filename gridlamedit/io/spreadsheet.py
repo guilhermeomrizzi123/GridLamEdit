@@ -8,6 +8,7 @@ import re
 import unicodedata
 import zipfile
 from collections import OrderedDict
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Dict, Iterable, List, Optional, Protocol
@@ -21,7 +22,7 @@ from PySide6.QtCore import (
     QRect,
     Qt,
 )
-from PySide6.QtGui import QPalette, QColor
+from PySide6.QtGui import QColor, QPalette, QUndoCommand, QUndoStack
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QComboBox,
@@ -568,6 +569,8 @@ class StackingTableModel(QAbstractTableModel):
         self,
         camadas: list[Camada] | None = None,
         change_callback: Optional[Callable[[list[Camada]], None]] = None,
+        *,
+        undo_stack: Optional[QUndoStack] = None,
     ) -> None:
         super().__init__()
         self._camadas: list[Camada] = []
@@ -575,7 +578,78 @@ class StackingTableModel(QAbstractTableModel):
         self._change_callback = change_callback
         self._rows_red: set[int] = set()
         self._rows_green: set[int] = set()
+        self._undo_stack = undo_stack
+        self._undo_suppressed = 0
         self.update_layers(camadas or [])
+
+    def set_undo_stack(self, undo_stack: Optional[QUndoStack]) -> None:
+        self._undo_stack = undo_stack
+
+    @contextmanager
+    def suppress_undo(self) -> Iterable[None]:
+        self._undo_suppressed += 1
+        try:
+            yield
+        finally:
+            self._undo_suppressed = max(0, self._undo_suppressed - 1)
+
+    def _should_record_undo(self) -> bool:
+        return self._undo_stack is not None and self._undo_suppressed == 0
+
+    def _apply_field_value(self, row: int, column: int, value: object) -> bool:
+        if not (0 <= row < len(self._camadas)):
+            return False
+        camada = self._camadas[row]
+        if column == self.COL_PLY_TYPE:
+            text = str(value).strip() if value is not None else DEFAULT_PLY_TYPE
+            camada.ply_type = (
+                text if text in PLY_TYPE_OPTIONS else DEFAULT_PLY_TYPE
+            )
+        elif column == self.COL_MATERIAL:
+            camada.material = str(value or "").strip()
+        elif column == self.COL_ORIENTATION:
+            try:
+                camada.orientacao = int(value)
+            except (TypeError, ValueError):
+                return False
+        else:
+            return False
+
+        index = self.index(row, column)
+        self.dataChanged.emit(index, index, [Qt.DisplayRole, Qt.EditRole])
+        if self._change_callback:
+            self._change_callback(self.layers())
+        return True
+
+    def apply_field_value(self, row: int, column: int, value: object) -> bool:
+        with self.suppress_undo():
+            return self._apply_field_value(row, column, value)
+
+    def _apply_or_record_change(
+        self, row: int, column: int, old_value: object, new_value: object
+    ) -> bool:
+        if self._should_record_undo() and self._undo_stack is not None:
+            description = self._describe_edit(column, row)
+            command = _LayerFieldEditCommand(
+                self,
+                row,
+                column,
+                old_value,
+                new_value,
+                description,
+            )
+            self._undo_stack.push(command)
+            return True
+        return self._apply_field_value(row, column, new_value)
+
+    def _describe_edit(self, column: int, row: int) -> str:
+        labels = {
+            self.COL_PLY_TYPE: "tipo de ply",
+            self.COL_MATERIAL: "material",
+            self.COL_ORIENTATION: "orienta\u00e7\u00e3o",
+        }
+        label = labels.get(column, "camada")
+        return f"Atualizar {label} (linha {row + 1})"
 
     def update_layers(self, camadas: Iterable[Camada]) -> None:
         self.beginResetModel()
@@ -832,35 +906,26 @@ class StackingTableModel(QAbstractTableModel):
                 text = DEFAULT_PLY_TYPE
             if camada.ply_type == text:
                 return False
-            camada.ply_type = text
-            self.dataChanged.emit(index, index, [Qt.DisplayRole, Qt.EditRole])
-            if self._change_callback:
-                self._change_callback(self.layers())
-            return True
+            return self._apply_or_record_change(row, column, camada.ply_type, text)
 
         if column == self.COL_MATERIAL and role in (Qt.EditRole, Qt.DisplayRole):
             new_value = str(value).strip()
             if new_value == camada.material:
                 return False
-            camada.material = new_value
-        elif column == self.COL_ORIENTATION and role in (Qt.EditRole, Qt.DisplayRole):
+            return self._apply_or_record_change(row, column, camada.material, new_value)
+
+        if column == self.COL_ORIENTATION and role in (Qt.EditRole, Qt.DisplayRole):
             text = str(value).strip()
-            cleaned = text.replace("\N{DEGREE SIGN}", "").replace("º", "").strip()
+            cleaned = text.replace("\N{DEGREE SIGN}", "").replace("??", "").strip()
             try:
                 angle = normalize_angle(cleaned)
             except ValueError:
                 return False
             if angle == camada.orientacao:
                 return False
-            camada.orientacao = angle
-        else:
-            return False
+            return self._apply_or_record_change(row, column, camada.orientacao, angle)
 
-        self.dataChanged.emit(index, index, [Qt.DisplayRole, Qt.EditRole])
-        if self._change_callback:
-            self._change_callback(self.layers())
-        return True
-
+        return False
     # Helpers for controller ------------------------------------------------- #
 
     def insert_layer(self, position: int, camada: Camada) -> None:
@@ -1332,7 +1397,11 @@ class _GridUiBinding:
         self._current_laminate: Optional[str] = None
         self._current_cell_id: Optional[str] = None
         self._laminates_by_cell: dict[str, list[str]] = self._build_cell_index()
-        self.stacking_model = StackingTableModel(change_callback=self._on_layers_modified)
+        undo_stack = getattr(self.ui, "undo_stack", None)
+        self.stacking_model = StackingTableModel(
+            change_callback=self._on_layers_modified,
+            undo_stack=undo_stack,
+        )
         self._cells_widget: Optional[QListWidget] = None
         self._table_view: Optional[QTableView] = None
         self._header_view: Optional[WordWrapHeader] = None
@@ -1713,6 +1782,31 @@ class _GridUiBinding:
             self.ui._mark_dirty()
         return True, ""
 
+
+class _LayerFieldEditCommand(QUndoCommand):
+    def __init__(
+        self,
+        model: "StackingTableModel",
+        row: int,
+        column: int,
+        old_value: object,
+        new_value: object,
+        description: str,
+    ) -> None:
+        super().__init__(description)
+        self._model = model
+        self._row = row
+        self._column = column
+        self._old_value = old_value
+        self._new_value = new_value
+
+    def redo(self) -> None:
+        self._model.apply_field_value(self._row, self._column, self._new_value)
+
+    def undo(self) -> None:
+        self._model.apply_field_value(self._row, self._column, self._old_value)
+
+
 def _open_with_xlrd(file_path: Path, cause: Exception) -> _WorkbookProtocol:
     """Fallback que usa xlrd 1.2.x para planilhas .xls renomeadas."""
     if xlrd is None:
@@ -1808,3 +1902,4 @@ def parse_cells_from_planilha1(df: pd.DataFrame) -> list[str]:
     sanitized = df.dropna(how="all").reset_index(drop=True)
     section = _extract_cells_section(sanitized)
     return section.cells
+
