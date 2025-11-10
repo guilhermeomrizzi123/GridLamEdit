@@ -76,6 +76,8 @@ from gridlamedit.io.spreadsheet import (
     PLY_TYPE_OPTIONS,
     GridModel,
     Laminado,
+    MIN_COLOR_INDEX,
+    MAX_COLOR_INDEX,
     StackingTableModel,
     WordWrapHeader,
     bind_cells_to_ui,
@@ -88,6 +90,7 @@ from gridlamedit.services.project_query import (
     project_distinct_materials,
     project_distinct_orientations,
 )
+from gridlamedit.ui.dialogs.new_laminate_dialog import NewLaminateDialog
 
 logger = logging.getLogger(__name__)
 
@@ -149,6 +152,9 @@ class MainWindow(QMainWindow):
         self._associated_cells_dialog: Optional[
             AssociatedCellsDialog
         ] = None
+        self._new_laminate_dialog: Optional[NewLaminateDialog] = None
+        self._new_laminate_button_icon: Optional[QIcon] = None
+        self._new_laminate_icon_warning_emitted = False
         self._current_associated_cells: list[str] = []
         self._selection_column_index = StackingTableModel.COL_SELECT
         self._stacking_header_band: Optional[QWidget] = None
@@ -360,9 +366,11 @@ class MainWindow(QMainWindow):
                 "Cor:", (str(i) for i in range(1, 151)), "color", editable=False
             )
         )
-        layout.addLayout(
-            self._combo_with_label("Tipo:", ["Core", "Skin", "Custom"], "type")
+        type_layout = self._combo_with_label(
+            "Tipo:", ["Core", "Skin", "Custom"], "type"
         )
+        layout.addLayout(type_layout)
+        self._attach_new_laminate_button(type_layout)
         layout.addStretch()
         return layout
 
@@ -393,6 +401,102 @@ class MainWindow(QMainWindow):
         layout.addWidget(combo)
         setattr(self, f"laminate_{attr_prefix}_combo", combo)
         return layout
+
+    def _attach_new_laminate_button(self, container: QHBoxLayout) -> None:
+        button = QPushButton("Novo Laminado", self)
+        button.setObjectName("btnNovoLaminado")
+        button.setAccessibleName("Novo Laminado")
+        button.setToolTip("Criar um novo laminado")
+        button.setIcon(self._load_new_laminate_button_icon())
+        button.setIconSize(QSize(20, 20))
+        button.setMinimumSize(28, 28)
+        button.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        button.clicked.connect(self._open_new_laminate_dialog)
+        container.addWidget(button)
+        self.btn_new_laminate = button
+
+    def _load_new_laminate_button_icon(self) -> QIcon:
+        if self._new_laminate_button_icon is not None:
+            return self._new_laminate_button_icon
+        candidates = [
+            Path(__file__).resolve().parent.parent
+            / "assets"
+            / "icons"
+            / "Criar_novo_laminado_ControlV.png",
+            RESOURCES_ICONS_DIR / "Criar_novo_laminado_ControlV.png",
+            RESOURCES_ICONS_DIR / "Criar_novo_laminado_ControlV.jpg",
+        ]
+        for candidate in candidates:
+            if candidate.is_file():
+                icon = QIcon(str(candidate))
+                if not icon.isNull():
+                    self._new_laminate_button_icon = icon
+                    return icon
+        if not self._new_laminate_icon_warning_emitted:
+            logger.warning(
+                "Icone Criar_novo_laminado_ControlV.* nao encontrado; usando icone padrao."
+            )
+            self._new_laminate_icon_warning_emitted = True
+        fallback = self.style().standardIcon(QStyle.SP_FileDialogNewFolder)
+        self._new_laminate_button_icon = fallback
+        return fallback
+
+    def _laminate_color_options(self) -> list[str]:
+        return [str(idx) for idx in range(MIN_COLOR_INDEX, MAX_COLOR_INDEX + 1)]
+
+    def _laminate_type_options(self) -> list[str]:
+        defaults = ["Core", "Skin", "Custom"]
+        if not self._grid_model or not self._grid_model.laminados:
+            return defaults
+        ordered: list[str] = []
+        for item in defaults:
+            if item not in ordered:
+                ordered.append(item)
+        for laminado in self._grid_model.laminados.values():
+            tipo = (laminado.tipo or "").strip()
+            if tipo and tipo not in ordered:
+                ordered.append(tipo)
+        return ordered
+
+    def _available_cells(self) -> list[str]:
+        if self._grid_model is None:
+            return []
+        return list(self._grid_model.celulas_ordenadas or [])
+
+    def _get_new_laminate_dialog(self) -> NewLaminateDialog:
+        if self._new_laminate_dialog is None:
+            model = self._grid_model or GridModel()
+            self._new_laminate_dialog = NewLaminateDialog(
+                model,
+                color_options=self._laminate_color_options(),
+                type_options=self._laminate_type_options(),
+                cell_options=self._available_cells(),
+                parent=self,
+            )
+        return self._new_laminate_dialog
+
+    def _open_new_laminate_dialog(self) -> None:
+        if self._grid_model is None:
+            self._grid_model = GridModel()
+        cells = self._available_cells()
+        if not cells:
+            QMessageBox.warning(
+                self,
+                "Células indisponíveis",
+                "Nenhuma célula foi carregada para associar ao novo laminado.",
+            )
+            return
+        dialog = self._get_new_laminate_dialog()
+        dialog.set_grid_model(self._grid_model)
+        dialog.refresh_options(
+            color_options=self._laminate_color_options(),
+            type_options=self._laminate_type_options(),
+            cell_options=cells,
+        )
+        dialog.reset_fields()
+        if dialog.exec() == QDialog.Accepted and dialog.created_laminate is not None:
+            self._refresh_after_new_laminate(dialog.created_laminate.nome)
+            self._mark_dirty()
 
     def _build_associated_cells_view(self) -> QWidget:
         container = QWidget(self)

@@ -2,4 +2,4 @@
 
 from __future__ import annotations
 
-__all__ = ["excel_io"]
+__all__ = ["excel_io", "project_query", "laminate_service"]
