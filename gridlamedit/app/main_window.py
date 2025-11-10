@@ -352,7 +352,9 @@ class MainWindow(QMainWindow):
         layout.setSpacing(12)
         layout.setContentsMargins(0, 0, 0, 0)
 
-        layout.addLayout(self._combo_with_label("Nome:", ["LAM-1", "LAM-2"], "name"))
+        layout.addLayout(
+            self._combo_with_label("Nome:", ["LAM-1", "LAM-2"], "name")
+        )
         layout.addLayout(
             self._combo_with_label(
                 "Cor:", (str(i) for i in range(1, 151)), "color", editable=False
@@ -576,14 +578,23 @@ class MainWindow(QMainWindow):
         self.btn_new_laminate_from_paste = self.btn_icon_new_laminate_from_paste
 
         self.btn_duplicate_laminate = make_button(
-            None,
+            "",
             "Duplicar laminado existente",
             self._open_duplicate_laminate_dialog,
             "Duplicar laminado existente",
-            tool_button_style=Qt.ToolButtonTextOnly,
-            text="Duplicar",
-            fixed_width=None,
+            tool_button_style=Qt.ToolButtonIconOnly,
+            fixed_width=42,
         )
+        duplicate_icon = _load_icon_from_resources(
+            ":/icons/duplicar.png", "duplicar.png"
+        )
+        if duplicate_icon.isNull():
+            duplicate_icon = self.style().standardIcon(
+                QStyle.SP_FileDialogDetailedView
+            )
+        self.btn_duplicate_laminate.setIcon(duplicate_icon)
+        self.btn_duplicate_laminate.setIconSize(QSize(20, 20))
+        self.btn_duplicate_laminate.setMinimumSize(QSize(28, 28))
         self.btn_duplicate_laminate.setObjectName("btn_duplicate_laminate")
 
         self.add_layer_button = make_button(
@@ -1491,24 +1502,6 @@ class MainWindow(QMainWindow):
                 combo.setCurrentText(target)
         elif combo.count() > 0:
             combo.setCurrentIndex(0)
-        if combo.count() > 0:
-            self._on_change_laminate_selection()
-
-    def _on_change_laminate_selection(self) -> None:
-        combo = getattr(self, "laminate_name_combo", None)
-        binding = getattr(self, "_grid_binding", None)
-        if not isinstance(combo, QComboBox) or binding is None:
-            return
-        current = combo.currentText().strip()
-        if not current:
-            return
-        handler = getattr(binding, "_on_laminate_selected", None)
-        if callable(handler):
-            handler(current)
-            return
-        apply_method = getattr(binding, "_apply_laminate", None)
-        if callable(apply_method):
-            apply_method(current)
 
     def _open_associated_cells_dialog(self) -> None:
         laminate = self._current_laminate_instance()
