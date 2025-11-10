@@ -10,7 +10,18 @@ from enum import Enum, auto
 from pathlib import Path
 from typing import Iterable, List, Optional
 
-from PySide6.QtCore import Qt, QSize, QTimer, QEvent, QObject, QByteArray, QSettings
+from PySide6.QtCore import (
+    Qt,
+    QSize,
+    QTimer,
+    QEvent,
+    QObject,
+    QByteArray,
+    QSettings,
+    QThread,
+    Signal,
+    Slot,
+)
 from PySide6.QtGui import (
     QAction,
     QCloseEvent,
@@ -90,7 +101,9 @@ from gridlamedit.services.project_query import (
     project_distinct_materials,
     project_distinct_orientations,
 )
+from gridlamedit.services.laminate_checks import ChecksReport, run_all_checks
 from gridlamedit.ui.dialogs.new_laminate_dialog import NewLaminateDialog
+from gridlamedit.ui.dialogs.verification_report_dialog import VerificationReportDialog
 
 logger = logging.getLogger(__name__)
 
@@ -104,6 +117,27 @@ COL_SELECTION = StackingTableModel.COL_SELECT
 COL_PLY_TYPE = StackingTableModel.COL_PLY_TYPE
 COL_MATERIAL = StackingTableModel.COL_MATERIAL
 COL_ORIENTATION = StackingTableModel.COL_ORIENTATION
+
+
+class _LaminateChecksWorker(QObject):
+    """Background worker responsible for executing laminate verifications."""
+
+    finished = Signal(object)
+    failed = Signal(str)
+
+    def __init__(self, laminates: list[Laminado]) -> None:
+        super().__init__()
+        self._laminates = laminates
+
+    @Slot()
+    def run(self) -> None:
+        try:
+            report = run_all_checks(self._laminates)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.error("Falha ao executar verificacoes de laminados: %s", exc, exc_info=True)
+            self.failed.emit(str(exc))
+        else:
+            self.finished.emit(report)
 
 
 def _normalize_orientation_for_summary(value: object) -> Optional[int]:
@@ -169,6 +203,9 @@ class MainWindow(QMainWindow):
         self._band_frame_margin = 0
         self._header_band_scroll_connected = False
         self._stacking_summary_model: Optional[StackingTableModel] = None
+        self._export_checks_thread: Optional[QThread] = None
+        self._export_checks_worker: Optional[_LaminateChecksWorker] = None
+        self._last_checks_report: Optional[ChecksReport] = None
         self.undo_stack = QUndoStack(self)
         self._undo_shortcuts: list[QShortcut] = []
         self._settings = QSettings("GridLamEdit", "GridLamEdit")
@@ -2435,7 +2472,81 @@ class MainWindow(QMainWindow):
             )
             return False
 
-        source_path = self._grid_model.source_excel_path
+        if self._export_checks_thread is not None:
+            QMessageBox.information(
+                self,
+                "Exportar planilha",
+                "Uma análise já está em andamento. Aguarde sua conclusão.",
+            )
+            return False
+
+        self._start_export_verification()
+        return True
+
+    def _start_export_verification(self) -> None:
+        model = self._grid_model
+        if model is None:
+            return
+        laminates = list(model.laminados.values())
+        if not laminates:
+            QMessageBox.information(
+                self,
+                "Exportar planilha",
+                "Nenhum laminado disponível para análise.",
+            )
+            return
+
+        snapshots = [copy.deepcopy(laminado) for laminado in laminates]
+        worker = _LaminateChecksWorker(snapshots)
+        thread = QThread(self)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.finished.connect(self._handle_checks_success)
+        worker.failed.connect(self._handle_checks_failure)
+        worker.finished.connect(thread.quit)
+        worker.failed.connect(thread.quit)
+        thread.finished.connect(worker.deleteLater)
+        thread.finished.connect(self._on_checks_thread_finished)
+
+        self._export_checks_thread = thread
+        self._export_checks_worker = worker
+        thread.start()
+
+    def _handle_checks_success(self, report: ChecksReport) -> None:
+        self._last_checks_report = report
+        self._show_verification_report(report)
+
+    def _handle_checks_failure(self, message: str) -> None:
+        self._last_checks_report = None
+        QMessageBox.critical(
+            self,
+            "Falha ao executar as verificações.",
+            message or "Falha ao executar as verificações.",
+        )
+
+    def _on_checks_thread_finished(self) -> None:
+        self._export_checks_thread = None
+        self._export_checks_worker = None
+
+    def _show_verification_report(self, report: ChecksReport) -> None:
+        dialog = VerificationReportDialog(self)
+        dialog.set_report(report)
+        result = dialog.exec()
+        if result == QDialog.Accepted:
+            self._continue_export_after_report()
+
+    def _continue_export_after_report(self) -> None:
+        target_path = self._select_export_destination()
+        if target_path is None:
+            return
+        self._export_model_to_path(target_path)
+
+    def _select_export_destination(self) -> Optional[Path]:
+        model = self._grid_model
+        if model is None:
+            return None
+
+        source_path = model.source_excel_path
         if source_path:
             base_path = Path(source_path)
             suggested = base_path.with_name(f"{base_path.stem}_editado.xlsx")
@@ -2449,19 +2560,24 @@ class MainWindow(QMainWindow):
             "Planilhas Excel (*.xlsx *.xls);;Todos os arquivos (*)",
         )
         if not path_str:
+            return None
+        return Path(path_str)
+
+    def _export_model_to_path(self, target_path: Path) -> bool:
+        model = self._grid_model
+        if model is None:
             return False
 
-        target_path = Path(path_str)
         try:
-            final_path = export_grid_xlsx(self._grid_model, target_path)
+            final_path = export_grid_xlsx(model, target_path)
         except ValueError as exc:
-            QMessageBox.critical(self, "Erro ao exportar", str(exc))
+            QMessageBox.critical(self, "Falha na exportação da planilha.", str(exc))
             return False
         except Exception as exc:  # pragma: no cover - defensivo
             logger.error("Falha ao exportar planilha: %s", exc, exc_info=True)
             QMessageBox.critical(
                 self,
-                "Erro ao exportar",
+                "Falha na exportação da planilha.",
                 f"Falha ao exportar a planilha: {exc}",
             )
             return False
@@ -2686,6 +2802,3 @@ class AppendLayersCommand(_BaseStackingCommand):
         self._model.remove_rows(rows)
         self._model.clear_checks()
         self._sync_laminate()
-
-
-

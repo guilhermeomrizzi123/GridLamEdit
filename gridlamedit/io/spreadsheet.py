@@ -506,11 +506,11 @@ def save_grid_spreadsheet(path: str, model: GridModel) -> None:
                 [
                     camada.material,
                     camada.orientacao,
-                    "Sim" if camada.ativo else "NAo",
-                    "Sim" if camada.simetria else "NAo",
                     None,
                     None,
-                    camada.ply_type if camada.ply_type in PLY_TYPE_OPTIONS else DEFAULT_PLY_TYPE,
+                    None,
+                    None,
+                    None,
                 ]
             )
         rows.append(["#"])
