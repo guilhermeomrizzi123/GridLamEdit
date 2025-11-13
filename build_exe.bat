@@ -21,7 +21,13 @@ pyinstaller ^
   --noconsole ^
   --collect-submodules PySide6 ^
   --collect-data PySide6 ^
-  --add-data "gridlamedit\resources;gridlamedit\resources" ^
+  --collect-data pandas ^
+  --collect-data numpy ^
+  --hidden-import pandas ^
+  --hidden-import numpy ^
+  --hidden-import openpyxl ^
+  --hidden-import xlrd ^
+  --add-data "gridlamedit;gridlamedit" ^
   --add-data "Grid_Spreadsheet.xls;." ^
   --add-data "Grid_Spreadsheet_editado_RevA.xlsx;." ^
   --add-data "Grid_Spreadsheet_editado_RevB.xlsx;." ^
