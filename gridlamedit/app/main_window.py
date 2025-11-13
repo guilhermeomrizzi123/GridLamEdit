@@ -80,6 +80,7 @@ from gridlamedit.app.dialogs.name_laminate_dialog import NameLaminateDialog
 from gridlamedit.app.dialogs.new_laminate_paste_dialog import NewLaminatePasteDialog
 from gridlamedit.app.dialogs.stacking_summary_dialog import StackingSummaryDialog
 from gridlamedit.core.project_manager import ProjectManager
+from gridlamedit.core.paths import package_path
 from gridlamedit.io.spreadsheet import (
     Camada,
     DEFAULT_COLOR_INDEX,
@@ -108,10 +109,8 @@ from gridlamedit.ui.dialogs.verification_report_dialog import VerificationReport
 
 logger = logging.getLogger(__name__)
 
-ICONS_DIR = Path(__file__).resolve().parent / "icons"
-RESOURCES_ICONS_DIR = (
-    Path(__file__).resolve().parent.parent / "resources" / "icons"
-)
+ICONS_DIR = package_path("app", "icons")
+RESOURCES_ICONS_DIR = package_path("resources", "icons")
 
 COL_NUM = StackingTableModel.COL_NUMBER
 COL_SELECTION = StackingTableModel.COL_SELECT
@@ -457,10 +456,7 @@ class MainWindow(QMainWindow):
         if self._new_laminate_button_icon is not None:
             return self._new_laminate_button_icon
         candidates = [
-            Path(__file__).resolve().parent.parent
-            / "assets"
-            / "icons"
-            / "Criar_novo_laminado_ControlV.png",
+            package_path("assets", "icons", "Criar_novo_laminado_ControlV.png"),
             RESOURCES_ICONS_DIR / "Criar_novo_laminado_ControlV.png",
             RESOURCES_ICONS_DIR / "Criar_novo_laminado_ControlV.jpg",
         ]
