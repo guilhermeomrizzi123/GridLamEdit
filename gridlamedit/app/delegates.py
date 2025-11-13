@@ -7,6 +7,12 @@ from typing import Callable, Iterable, Optional
 from PySide6.QtCore import Qt, QRect
 from PySide6.QtWidgets import QApplication, QComboBox, QStyledItemDelegate, QWidget, QStyle, QStyleOptionButton
 
+from gridlamedit.io.spreadsheet import (
+    DEFAULT_PLY_TYPE,
+    PLY_TYPE_OPTIONS,
+    normalize_ply_type_label,
+)
+
 
 class _BaseComboDelegate(QStyledItemDelegate):
     """Combo-box based delegate that defers option listing to a provider callable."""
@@ -62,7 +68,7 @@ class PlyTypeComboDelegate(QStyledItemDelegate):
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
-        self.items = ["Structural Ply", "Nonstructural Ply"]
+        self.items = list(PLY_TYPE_OPTIONS)
 
     def createEditor(self, parent: QWidget, option, index):  # noqa: N802
         cb = QComboBox(parent)
@@ -73,14 +79,20 @@ class PlyTypeComboDelegate(QStyledItemDelegate):
     def setEditorData(self, editor: QWidget, index):  # noqa: N802
         if not isinstance(editor, QComboBox):
             return
-        current = index.data(Qt.EditRole) or index.data(Qt.DisplayRole) or "Structural Ply"
-        idx = editor.findText(str(current))
+        current = (
+            index.data(Qt.EditRole)
+            or index.data(Qt.DisplayRole)
+            or DEFAULT_PLY_TYPE
+        )
+        normalized = normalize_ply_type_label(current)
+        idx = editor.findText(normalized)
         editor.setCurrentIndex(idx if idx >= 0 else 0)
 
     def setModelData(self, editor: QWidget, model, index):  # noqa: N802
         if not isinstance(editor, QComboBox):
             return
-        model.setData(index, editor.currentText(), Qt.EditRole)
+        selection = normalize_ply_type_label(editor.currentText())
+        model.setData(index, selection, Qt.EditRole)
 
 
 class CenteredCheckBoxDelegate(QStyledItemDelegate):

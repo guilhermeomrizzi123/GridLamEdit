@@ -8,12 +8,10 @@ from typing import Any, Dict, Iterable, List, Sequence
 from gridlamedit.io.spreadsheet import (
     Camada,
     Laminado,
-    PLY_TYPE_OPTIONS,
+    is_structural_ply_label,
     normalize_angle,
+    ply_type_signature_token,
 )
-
-STRUCTURAL_LABEL = PLY_TYPE_OPTIONS[0].lower()
-PLY_TYPE_TOKENS = {option.lower() for option in PLY_TYPE_OPTIONS}
 
 
 @dataclass
@@ -127,8 +125,7 @@ def _layers_match(top: Camada, bottom: Camada) -> bool:
 
 
 def _is_structural(layer: Camada) -> bool:
-    ply_type = getattr(layer, "ply_type", "") or ""
-    return ply_type.strip().lower() == STRUCTURAL_LABEL
+    return is_structural_ply_label(getattr(layer, "ply_type", ""))
 
 
 def _normalize_material(value: object) -> str:
@@ -179,10 +176,7 @@ def _stacking_signature(layers: Sequence[Camada]) -> str:
         material = _normalize_material(layer.material)
         orientation = _normalize_orientation(layer.orientacao)
         orientation_token = "none" if orientation is None else f"{orientation:+d}"
-        ply = getattr(layer, "ply_type", "") or ""
-        ply_token = ply.strip().lower()
-        if ply_token not in PLY_TYPE_TOKENS:
-            ply_token = STRUCTURAL_LABEL
+        ply_token = ply_type_signature_token(getattr(layer, "ply_type", ""))
         tokens.append(f"{material}@{orientation_token}@{ply_token}")
     return ";".join(tokens)
 

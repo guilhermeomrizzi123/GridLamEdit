@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import copy
-from collections import Counter
+from collections import Counter, OrderedDict
 from dataclasses import dataclass
 from enum import Enum, auto
 from pathlib import Path
@@ -84,7 +84,7 @@ from gridlamedit.io.spreadsheet import (
     Camada,
     DEFAULT_COLOR_INDEX,
     DEFAULT_PLY_TYPE,
-    PLY_TYPE_OPTIONS,
+    is_structural_ply_label,
     GridModel,
     Laminado,
     MIN_COLOR_INDEX,
@@ -102,6 +102,7 @@ from gridlamedit.services.project_query import (
     project_distinct_orientations,
 )
 from gridlamedit.services.laminate_checks import ChecksReport, run_all_checks
+from gridlamedit.ui.dialogs.duplicate_removal_dialog import DuplicateRemovalDialog
 from gridlamedit.ui.dialogs.new_laminate_dialog import NewLaminateDialog
 from gridlamedit.ui.dialogs.verification_report_dialog import VerificationReportDialog
 
@@ -625,7 +626,7 @@ class MainWindow(QMainWindow):
         else:
             self._band_frame_margin = 0
 
-        titles = ["#", "Selection", "Ply Type", "Material", "Orientação"]
+        titles = ["#", "Selection", "Simetria", "Material", "Orientação"]
         self._band_labels = []
         for title in titles:
             label = QLabel(title, band)
@@ -1142,9 +1143,10 @@ class MainWindow(QMainWindow):
     ) -> str:
         layers = list(laminate.camadas) if laminate is not None else []
         total_layers = len(layers)
-        structural_label = PLY_TYPE_OPTIONS[0]
         structural_layers = sum(
-            1 for camada in layers if (camada.ply_type or DEFAULT_PLY_TYPE) == structural_label
+            1
+            for camada in layers
+            if is_structural_ply_label(getattr(camada, "ply_type", DEFAULT_PLY_TYPE))
         )
         non_structural_layers = total_layers - structural_layers
 
@@ -1182,8 +1184,8 @@ class MainWindow(QMainWindow):
 
         lines = [
             f"Total de camadas:  {total_layers}",
-            f"Camadas n\u00e3o estruturais:  {non_structural_layers}",
-            f"Camadas estruturais:  {structural_layers}",
+            f"Camadas 'N\u00e3o Considerar':  {non_structural_layers}",
+            f"Camadas 'Considerar':  {structural_layers}",
             "",
             "Orienta\u00e7\u00f5es:",
             orientation_parts,
@@ -1731,7 +1733,7 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("TODO: implementar acao.", 2000)
 
     def check_symmetry(self) -> None:
-        """Verifica se o laminado atual e simetrico considerando apenas Structural Ply."""
+        """Verifica se o laminado atual e simetrico considerando apenas camadas \"Considerar\"."""
         _, model = self._get_stacking_view_and_model()
         if model is None:
             self._info("Tabela de camadas indisponivel para verificar a simetria.")
@@ -1740,9 +1742,8 @@ class MainWindow(QMainWindow):
             model.clear_all_highlights()
 
         try:
-            colmap = self._column_map_by_header(
-                model, ["#", "Ply Type", "Material", "Orientacao", "Orientation"]
-            )
+            wanted_headers = ["#", "Simetria", "Ply Type", "Material", "Orientacao", "Orientation"]
+            colmap = self._column_map_by_header(model, wanted_headers)
         except ValueError as exc:
             logger.warning("Falha ao mapear colunas da tabela: %s", exc)
             self._info(
@@ -1750,7 +1751,13 @@ class MainWindow(QMainWindow):
             )
             return
 
-        missing = [name for name in ("#", "Ply Type", "Material") if name not in colmap]
+        missing: list[str] = []
+        if "#" not in colmap:
+            missing.append("#")
+        if "Simetria" not in colmap and "Ply Type" not in colmap:
+            missing.append("Simetria")
+        if "Material" not in colmap:
+            missing.append("Material")
         if "Orientacao" not in colmap and "Orientation" not in colmap:
             missing.append("Orientacao/Orientation")
         if missing:
@@ -1762,7 +1769,10 @@ class MainWindow(QMainWindow):
             return
 
         col_num = colmap["#"]
-        col_ply = colmap["Ply Type"]
+        col_ply = colmap.get("Simetria") or colmap.get("Ply Type")
+        if col_ply is None:
+            self._info("Nao foi possivel localizar a coluna de Simetria para a verificacao.")
+            return
         col_mat = colmap["Material"]
         if "Orientacao" in colmap:
             col_ori = colmap["Orientacao"]
@@ -1773,12 +1783,12 @@ class MainWindow(QMainWindow):
 
         def is_structural(row: int) -> bool:
             value = self._data_str(model, row, col_ply)
-            return value.lower() == "structural ply"
+            return is_structural_ply_label(value)
 
         structural_rows = [r for r in range(row_count) if is_structural(r)]
         count_struct = len(structural_rows)
         if count_struct == 0:
-            self._info("Laminado simetrico (0 ou 1 camada estrutural).")
+            self._info("Laminado simetrico (0 ou 1 camada marcada como 'Considerar').")
             return
         if count_struct == 1:
             if hasattr(model, "add_green_rows"):
@@ -1820,7 +1830,7 @@ class MainWindow(QMainWindow):
             model.add_green_rows(center_rows)
         self._scroll_to_rows(center_rows)
         self._info(
-            f"Laminado simetrico considerando apenas Structural Ply ({count_struct} camadas estruturais)."
+            f"Laminado simetrico considerando apenas camadas 'Considerar' ({count_struct} camadas)."
         )
 
     def _scroll_to_rows(self, rows: Iterable[int]) -> None:
@@ -2531,9 +2541,121 @@ class MainWindow(QMainWindow):
     def _show_verification_report(self, report: ChecksReport) -> None:
         dialog = VerificationReportDialog(self)
         dialog.set_report(report)
+        dialog.removeDuplicatesRequested.connect(
+            lambda: self._handle_remove_duplicates_request(dialog)
+        )
         result = dialog.exec()
         if result == QDialog.Accepted:
             self._continue_export_after_report()
+
+    def _handle_remove_duplicates_request(
+        self, dialog: VerificationReportDialog
+    ) -> None:
+        """Executa o fluxo de remoção de laminados duplicados sem associação."""
+        if self._grid_model is None:
+            QMessageBox.information(
+                dialog,
+                "Remover Duplicados",
+                "Nenhum projeto carregado para remover duplicados.",
+            )
+            return
+        eligible = self._duplicates_without_cell_association()
+        if not eligible:
+            QMessageBox.information(
+                dialog,
+                "Remover Duplicados",
+                "Nenhum laminado duplicado sem associa\u00e7\u00f5es foi encontrado.",
+            )
+            return
+        cleanup_dialog = DuplicateRemovalDialog(eligible, dialog)
+        if cleanup_dialog.exec() != QDialog.Accepted:
+            return
+        removed_names = self._remove_laminates_by_name(
+            lam.nome for lam in eligible if lam.nome
+        )
+        if not removed_names:
+            QMessageBox.information(
+                dialog,
+                "Remover Duplicados",
+                "Nenhum laminado foi removido.",
+            )
+            return
+        self._finalize_duplicate_cleanup(removed_names, dialog)
+
+    def _duplicates_without_cell_association(self) -> list[Laminado]:
+        """Retorna laminados duplicados que n\u00e3o est\u00e3o vinculados a nenhuma c\u00e9lula."""
+        if self._grid_model is None or self._last_checks_report is None:
+            return []
+        associated_names: set[str] = {
+            str(name).strip()
+            for name in self._grid_model.cell_to_laminate.values()
+            if str(name).strip()
+        }
+        for name, laminado in self._grid_model.laminados.items():
+            if any((cell or "").strip() for cell in getattr(laminado, "celulas", [])):
+                associated_names.add(name)
+        ordered: OrderedDict[str, Laminado] = OrderedDict()
+        for group in self._last_checks_report.duplicates:
+            for lam_name in group.laminates:
+                if not lam_name or lam_name in associated_names:
+                    continue
+                laminado = self._grid_model.laminados.get(lam_name)
+                if laminado is None:
+                    continue
+                ordered.setdefault(lam_name, laminado)
+        return list(ordered.values())
+
+    def _remove_laminates_by_name(self, names: Iterable[str]) -> list[str]:
+        """Remove laminados pelo nome e limpa mapeamentos residuais."""
+        if self._grid_model is None:
+            return []
+        removed: list[str] = []
+        for name in names:
+            clean_name = (name or "").strip()
+            if not clean_name:
+                continue
+            if clean_name in self._grid_model.laminados:
+                del self._grid_model.laminados[clean_name]
+                removed.append(clean_name)
+        if not removed:
+            return []
+        cells_to_clear = [
+            cell_id
+            for cell_id, lam_name in self._grid_model.cell_to_laminate.items()
+            if lam_name in removed
+        ]
+        for cell_id in cells_to_clear:
+            self._grid_model.cell_to_laminate.pop(cell_id, None)
+        self._mark_dirty()
+        return removed
+
+    def _finalize_duplicate_cleanup(
+        self,
+        removed_names: list[str],
+        dialog: VerificationReportDialog,
+    ) -> None:
+        """Reaplica o binding, atualiza o relat\u00f3rio e informa o usu\u00e1rio."""
+        if self._grid_model is None:
+            return
+        remaining_names = list(self._grid_model.laminados.keys())
+        preferred_name = ""
+        current_combo_value = ""
+        if hasattr(self, "laminate_name_combo"):
+            current_combo_value = self.laminate_name_combo.currentText().strip()
+        if current_combo_value and current_combo_value in self._grid_model.laminados:
+            preferred_name = current_combo_value
+        elif remaining_names:
+            preferred_name = remaining_names[0]
+        self._refresh_after_new_laminate(preferred_name)
+        snapshots = [copy.deepcopy(lam) for lam in self._grid_model.laminados.values()]
+        new_report = run_all_checks(snapshots)
+        self._last_checks_report = new_report
+        dialog.set_report(new_report)
+        QMessageBox.information(
+            dialog,
+            "Remover Duplicados",
+            f"{len(removed_names)} laminado(s) duplicados removidos.",
+        )
 
     def _continue_export_after_report(self) -> None:
         target_path = self._select_export_destination()

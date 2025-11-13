@@ -4,13 +4,14 @@ from __future__ import annotations
 
 from typing import Iterable, Sequence
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QGroupBox,
     QListWidget,
     QListWidgetItem,
+    QPushButton,
     QTabWidget,
     QTreeWidget,
     QTreeWidgetItem,
@@ -27,6 +28,8 @@ from gridlamedit.services.laminate_checks import (
 
 class VerificationReportDialog(QDialog):
     """Modal dialog that displays laminate verification data before export."""
+
+    removeDuplicatesRequested = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -49,6 +52,11 @@ class VerificationReportDialog(QDialog):
         self.button_box = QDialogButtonBox(
             QDialogButtonBox.Ok | QDialogButtonBox.Cancel, Qt.Horizontal, self
         )
+        remove_duplicates_button = QPushButton("Remover Duplicados", self)
+        remove_duplicates_button.setObjectName("btnRemoveDuplicatesReport")
+        remove_duplicates_button.clicked.connect(self._emit_remove_duplicates_request)
+        # Mantem o botao alinhado ao fluxo de exportacao para incentivar a limpeza antes da saida.
+        self.button_box.addButton(remove_duplicates_button, QDialogButtonBox.ActionRole)
         export_button = self.button_box.button(QDialogButtonBox.Ok)
         export_button.setText("Exportar")
         export_button.setDefault(True)
@@ -136,12 +144,20 @@ class VerificationReportDialog(QDialog):
             return
 
         tree.setEnabled(True)
-        for group in groups:
-            parent = QTreeWidgetItem([group.summary or group.signature])
+        for idx, group in enumerate(groups, start=1):
+            title = f"Grupo{idx}"
+            parent = QTreeWidgetItem([title])
+            tooltip = group.summary or group.signature
+            if tooltip:
+                parent.setToolTip(0, tooltip)
             for name in group.laminates:
                 QTreeWidgetItem(parent, [name])
             tree.addTopLevelItem(parent)
         tree.expandAll()
+
+    def _emit_remove_duplicates_request(self) -> None:
+        """Propaga o clique no botao `Remover Duplicados` para o chamador."""
+        self.removeDuplicatesRequested.emit()
 
 
 __all__ = ["VerificationReportDialog"]

@@ -66,11 +66,57 @@ INDEX_ALIASES = ("Index", "#", "Idx", "Ordem", "SequAancia", "Sequencia")
 CELL_MAPPING_ALIASES = ("Cell", "Cells", "Celula", "CAlula", "C")
 CELL_ID_PATTERN = re.compile(r"^C\d+$", re.IGNORECASE)
 NO_LAMINATE_LABEL = "(sem laminado)"
-PLY_TYPE_OPTIONS: tuple[str, str] = ("Structural Ply", "Nonstructural Ply")
+PLY_TYPE_OPTIONS: tuple[str, str] = ("Considerar", "N\u00e3o Considerar")
 DEFAULT_PLY_TYPE = PLY_TYPE_OPTIONS[0]
 DEFAULT_COLOR_INDEX = 1
 MIN_COLOR_INDEX = 1
 MAX_COLOR_INDEX = 150
+
+
+def _normalize_ply_type_token(value: object) -> str:
+    if value is None:
+        return ""
+    text = str(value).strip()
+    if not text:
+        return ""
+    normalized = unicodedata.normalize("NFKD", text)
+    ascii_only = "".join(ch for ch in normalized if not unicodedata.combining(ch))
+    ascii_only = ascii_only.lower()
+    return re.sub(r"[^a-z0-9]+", "", ascii_only)
+
+
+# Mantem compatibilidade com valores antigos (ex.: "Structural Ply").
+_PLY_TYPE_CANONICAL_MAP: dict[str, str] = {
+    _normalize_ply_type_token("Structural Ply"): PLY_TYPE_OPTIONS[0],
+    _normalize_ply_type_token("Structural"): PLY_TYPE_OPTIONS[0],
+    _normalize_ply_type_token("Considerar"): PLY_TYPE_OPTIONS[0],
+    _normalize_ply_type_token("Nonstructural Ply"): PLY_TYPE_OPTIONS[1],
+    _normalize_ply_type_token("Non structural Ply"): PLY_TYPE_OPTIONS[1],
+    _normalize_ply_type_token("Nonstructural"): PLY_TYPE_OPTIONS[1],
+    _normalize_ply_type_token("Nao Considerar"): PLY_TYPE_OPTIONS[1],
+    _normalize_ply_type_token("N\u00e3o Considerar"): PLY_TYPE_OPTIONS[1],
+}
+
+
+def normalize_ply_type_label(value: object) -> str:
+    token = _normalize_ply_type_token(value)
+    if not token:
+        return DEFAULT_PLY_TYPE
+    return _PLY_TYPE_CANONICAL_MAP.get(token, DEFAULT_PLY_TYPE)
+
+
+def is_structural_ply_label(value: object) -> bool:
+    return normalize_ply_type_label(value) == PLY_TYPE_OPTIONS[0]
+
+
+def is_known_ply_type_value(value: object) -> bool:
+    token = _normalize_ply_type_token(value)
+    return bool(token) and token in _PLY_TYPE_CANONICAL_MAP
+
+
+def ply_type_signature_token(value: object) -> str:
+    token = _normalize_ply_type_token(normalize_ply_type_label(value))
+    return token or _normalize_ply_type_token(DEFAULT_PLY_TYPE)
 
 
 class WordWrapHeader(QHeaderView):
@@ -559,7 +605,7 @@ class StackingTableModel(QAbstractTableModel):
     HEADERS = [
         "#",
         "Selection",
-        "Ply Type",
+        "Simetria",
         "Material",
         "Orientacao",
     ]
@@ -601,10 +647,7 @@ class StackingTableModel(QAbstractTableModel):
             return False
         camada = self._camadas[row]
         if column == self.COL_PLY_TYPE:
-            text = str(value).strip() if value is not None else DEFAULT_PLY_TYPE
-            camada.ply_type = (
-                text if text in PLY_TYPE_OPTIONS else DEFAULT_PLY_TYPE
-            )
+            camada.ply_type = normalize_ply_type_label(value)
         elif column == self.COL_MATERIAL:
             camada.material = str(value or "").strip()
         elif column == self.COL_ORIENTATION:
@@ -644,7 +687,7 @@ class StackingTableModel(QAbstractTableModel):
 
     def _describe_edit(self, column: int, row: int) -> str:
         labels = {
-            self.COL_PLY_TYPE: "tipo de ply",
+            self.COL_PLY_TYPE: "simetria",
             self.COL_MATERIAL: "material",
             self.COL_ORIENTATION: "orienta\u00e7\u00e3o",
         }
@@ -662,10 +705,11 @@ class StackingTableModel(QAbstractTableModel):
 
     @staticmethod
     def _ensure_layer_defaults(camada: Camada) -> Camada:
-        ply_type = getattr(camada, "ply_type", None)
-        if ply_type not in PLY_TYPE_OPTIONS:
-            legacy_flag = getattr(camada, "nao_estrutural", False)
-            camada.ply_type = PLY_TYPE_OPTIONS[1] if legacy_flag else DEFAULT_PLY_TYPE
+        legacy_flag = getattr(camada, "nao_estrutural", False)
+        normalized_label = normalize_ply_type_label(getattr(camada, "ply_type", None))
+        if legacy_flag and normalized_label == DEFAULT_PLY_TYPE:
+            normalized_label = PLY_TYPE_OPTIONS[1]
+        camada.ply_type = normalized_label
         if hasattr(camada, "nao_estrutural"):
             try:
                 delattr(camada, "nao_estrutural")
@@ -711,14 +755,14 @@ class StackingTableModel(QAbstractTableModel):
             if column == self.COL_NUMBER:
                 return str(index.row() + 1)
             if column == self.COL_PLY_TYPE:
-                return camada.ply_type
+                return normalize_ply_type_label(camada.ply_type)
             if column == self.COL_MATERIAL:
                 return camada.material
             if column == self.COL_ORIENTATION:
                 return f"{camada.orientacao}\N{DEGREE SIGN}"
         elif role == Qt.EditRole:
             if column == self.COL_PLY_TYPE:
-                return camada.ply_type
+                return normalize_ply_type_label(camada.ply_type)
             if column == self.COL_MATERIAL:
                 return camada.material
             if column == self.COL_ORIENTATION:
@@ -901,9 +945,7 @@ class StackingTableModel(QAbstractTableModel):
             return True
 
         if column == self.COL_PLY_TYPE and role in (Qt.EditRole, Qt.DisplayRole):
-            text = str(value).strip() if value is not None else DEFAULT_PLY_TYPE
-            if text not in PLY_TYPE_OPTIONS:
-                text = DEFAULT_PLY_TYPE
+            text = normalize_ply_type_label(value)
             if camada.ply_type == text:
                 return False
             return self._apply_or_record_change(row, column, camada.ply_type, text)
@@ -1323,16 +1365,14 @@ def _parse_configuration_section(
                 ply_type_value = DEFAULT_PLY_TYPE
             else:
                 candidate = str(ply_raw).strip()
-                if candidate not in PLY_TYPE_OPTIONS:
+                if not is_known_ply_type_value(candidate):
                     logger.warning(
-                        "Laminado '%s': valor de Ply Type '%s' invalido; usando '%s'.",
+                        "Laminado '%s': valor de Simetria '%s' invalido; usando '%s'.",
                         laminate_name,
                         candidate,
                         DEFAULT_PLY_TYPE,
                     )
-                    ply_type_value = DEFAULT_PLY_TYPE
-                else:
-                    ply_type_value = candidate
+                ply_type_value = normalize_ply_type_label(candidate)
 
             layers.append(
                 Camada(
