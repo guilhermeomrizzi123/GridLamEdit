@@ -16,7 +16,7 @@ echo Limpando e gerando executavel GridLamEdit...
 pyinstaller ^
   --noconfirm ^
   --clean ^
-  --onedir ^
+  --onefile ^
   --name GridLamEdit ^
   --noconsole ^
   --collect-submodules PySide6 ^
@@ -42,5 +42,5 @@ if errorlevel 1 (
 )
 
 echo.
-echo Build concluido. Distribua o conteudo da pasta dist\GridLamEdit\
+echo Build concluido. O executavel unico esta em dist\GridLamEdit.exe
 exit /b 0
