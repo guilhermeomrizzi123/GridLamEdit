@@ -16,22 +16,7 @@ echo Limpando e gerando executavel GridLamEdit...
 pyinstaller ^
   --noconfirm ^
   --clean ^
-  --onefile ^
-  --name GridLamEdit ^
-  --noconsole ^
-  --collect-submodules PySide6 ^
-  --collect-data PySide6 ^
-  --collect-data pandas ^
-  --collect-data numpy ^
-  --hidden-import pandas ^
-  --hidden-import numpy ^
-  --hidden-import openpyxl ^
-  --hidden-import xlrd ^
-  --add-data "gridlamedit;gridlamedit" ^
-  --add-data "Grid_Spreadsheet.xls;." ^
-  --add-data "Grid_Spreadsheet_editado_RevA.xlsx;." ^
-  --add-data "Grid_Spreadsheet_editado_RevB.xlsx;." ^
-  gridlamedit\app\main.py
+  GridLamEdit.spec
 
 REM Opcional: inclua --icon caminho\para\icone.ico no comando acima quando possuir um arquivo .ico.
 
