@@ -113,6 +113,7 @@ ICONS_DIR = package_path("app", "icons")
 RESOURCES_ICONS_DIR = package_path("resources", "icons")
 
 COL_NUM = StackingTableModel.COL_NUMBER
+COL_SEQUENCE = StackingTableModel.COL_SEQUENCE
 COL_SELECTION = StackingTableModel.COL_SELECT
 COL_PLY_TYPE = StackingTableModel.COL_PLY_TYPE
 COL_MATERIAL = StackingTableModel.COL_MATERIAL
@@ -195,6 +196,7 @@ class MainWindow(QMainWindow):
         self._band_labels: list[QLabel] = []
         self._header_band_mapping: list[int] = [
             StackingTableModel.COL_NUMBER,
+            StackingTableModel.COL_SEQUENCE,
             StackingTableModel.COL_SELECT,
             StackingTableModel.COL_PLY_TYPE,
             StackingTableModel.COL_MATERIAL,
@@ -622,7 +624,7 @@ class MainWindow(QMainWindow):
         else:
             self._band_frame_margin = 0
 
-        titles = ["#", "Selection", "Simetria", "Material", "Orientação"]
+        titles = ["#", "Sequence", "Selection", "Simetria", "Material", "Orientação"]
         self._band_labels = []
         for title in titles:
             label = QLabel(title, band)
@@ -944,6 +946,7 @@ class MainWindow(QMainWindow):
         header = view.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.Stretch)
         header.setSectionResizeMode(StackingTableModel.COL_NUMBER, QHeaderView.Fixed)
+        header.setSectionResizeMode(StackingTableModel.COL_SEQUENCE, QHeaderView.Fixed)
         header.setSectionResizeMode(StackingTableModel.COL_SELECT, QHeaderView.Fixed)
         header.setSectionResizeMode(StackingTableModel.COL_PLY_TYPE, QHeaderView.Fixed)
         header.setSectionResizeMode(StackingTableModel.COL_MATERIAL, QHeaderView.Stretch)
@@ -954,6 +957,7 @@ class MainWindow(QMainWindow):
         header.setFixedHeight(max(header.height(), header.sizeHint().height()))
 
         view.setColumnWidth(StackingTableModel.COL_NUMBER, 60)
+        view.setColumnWidth(StackingTableModel.COL_SEQUENCE, 110)
         view.setColumnWidth(StackingTableModel.COL_SELECT, 120)
         view.setColumnWidth(StackingTableModel.COL_PLY_TYPE, 160)
         view.verticalHeader().setVisible(False)
@@ -1951,6 +1955,18 @@ class MainWindow(QMainWindow):
 
         new_layers: list[Camada] = []
         for angle in orientations:
+            if angle is None:
+                new_layers.append(
+                    Camada(
+                        idx=0,
+                        material="",
+                        orientacao=None,
+                        ativo=True,
+                        simetria=False,
+                        ply_type=DEFAULT_PLY_TYPE,
+                    )
+                )
+                continue
             try:
                 normalized = normalize_angle(angle)
             except ValueError:

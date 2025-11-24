@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from typing import Iterable
+from typing import Iterable, Optional
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
@@ -19,7 +19,7 @@ from PySide6.QtWidgets import (
 
 from gridlamedit.io.spreadsheet import normalize_angle
 
-_TOKEN_PATTERN = re.compile(r"^[+-]?\d+(?:\.\d+)?°?$")
+_TOKEN_PATTERN = re.compile(r"^[+-]?\d+(?:\.\d+)?(?:\N{DEGREE SIGN}|\u00ba)?$")
 _SPLIT_PATTERN = re.compile(r"[,\s;\/|]+")
 
 
@@ -28,7 +28,7 @@ class NewLaminatePasteDialog(QDialog):
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.result_orientations: list[int] = []
+        self.result_orientations: list[Optional[int]] = []
         self._setup_ui()
 
     def _setup_ui(self) -> None:
@@ -41,7 +41,8 @@ class NewLaminatePasteDialog(QDialog):
         instructions = QLabel(
             (
                 "Cole abaixo as orientações (ex.: 0, 45, -45, 90). "
-                "Você pode colar com Ctrl+V. Caracteres não compatíveis serão ignorados."
+                "Você pode colar com Ctrl+V. Caracteres não compatíveis serão ignorados. "
+                "Use 'x' para representar camadas vazias."
             ),
             self,
         )
@@ -98,16 +99,21 @@ class NewLaminatePasteDialog(QDialog):
         self.result_orientations = full_sequence
         self.accept()
 
-    def _parse_orientations(self, raw_text: str) -> list[int]:
+    def _parse_orientations(self, raw_text: str) -> list[Optional[int]]:
         tokens = _SPLIT_PATTERN.split(raw_text or "")
-        orientations: list[int] = []
+        orientations: list[Optional[int]] = []
         for token in tokens:
             cleaned = token.strip()
             if not cleaned:
                 continue
+            if cleaned.lower() == "x":
+                orientations.append(None)
+                continue
             if not _TOKEN_PATTERN.match(cleaned):
                 continue
-            normalized_token = cleaned.replace("°", "").replace("º", "")
+            normalized_token = (
+                cleaned.replace("\N{DEGREE SIGN}", "").replace("\u00ba", "")
+            )
             try:
                 number = float(normalized_token)
             except ValueError:
@@ -126,8 +132,8 @@ class NewLaminatePasteDialog(QDialog):
             self.cb_last_layer_center.setChecked(False)
 
     def _build_symmetric_sequence(
-        self, base: Iterable[int], *, include_center: bool
-    ) -> list[int]:
+        self, base: Iterable[Optional[int]], *, include_center: bool
+    ) -> list[Optional[int]]:
         items = list(base)
         if not items:
             return []

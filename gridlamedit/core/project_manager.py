@@ -38,6 +38,7 @@ def _serialize_model(model: GridModel) -> dict:
                     "ativo": layer.ativo,
                     "simetria": layer.simetria,
                     "ply_type": getattr(layer, "ply_type", DEFAULT_PLY_TYPE),
+                    "sequence": getattr(layer, "sequence", f"Seq.{layer.idx + 1}"),
                 }
                 for layer in laminate.camadas
             ],
@@ -95,14 +96,24 @@ def _deserialize_model(data: dict) -> GridModel:
                     if bool(layer.get("nao_estrutural", False))
                     else DEFAULT_PLY_TYPE
                 )
+            orientation_raw = layer.get("orientacao", None)
+            orientation_value: Optional[int]
+            try:
+                orientation_value = int(orientation_raw)
+            except (TypeError, ValueError):
+                orientation_value = None
+            sequence_value = str(layer.get("sequence", "") or "").strip()
+            if not sequence_value:
+                sequence_value = f"Seq.{index + 1}"
             layers.append(
                 Camada(
                     idx=int(layer.get("idx", index)),
                     material=str(layer.get("material", "")),
-                    orientacao=int(layer.get("orientacao", 0)),
+                    orientacao=orientation_value,
                     ativo=bool(layer.get("ativo", True)),
                     simetria=bool(layer.get("simetria", False)),
                     ply_type=str(ply_type),
+                    sequence=sequence_value,
                 )
             )
         laminate = Laminado(

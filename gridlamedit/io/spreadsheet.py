@@ -298,10 +298,11 @@ class Camada:
 
     idx: int
     material: str
-    orientacao: int
+    orientacao: Optional[int]
     ativo: bool
     simetria: bool
     ply_type: str = DEFAULT_PLY_TYPE
+    sequence: str = ""
 
 
 @dataclass
@@ -548,10 +549,13 @@ def save_grid_spreadsheet(path: str, model: GridModel) -> None:
         rows.append(["Stacking"])
 
         for camada in laminado.camadas:
+            orientation_value = (
+                camada.orientacao if camada.orientacao is not None else ""
+            )
             rows.append(
                 [
                     camada.material,
-                    camada.orientacao,
+                    orientation_value,
                     None,
                     None,
                     None,
@@ -594,21 +598,24 @@ class StackingTableModel(QAbstractTableModel):
     """Apresenta as camadas do laminado na tabela de stacking."""
 
     COL_NUMBER = 0
-    COL_SELECT = 1
-    COL_PLY_TYPE = 2
-    COL_MATERIAL = 3
-    COL_ORIENTATION = 4
+    COL_SEQUENCE = 1
+    COL_SELECT = 2
+    COL_PLY_TYPE = 3
+    COL_MATERIAL = 4
+    COL_ORIENTATION = 5
 
     COL_NON_STRUCT = COL_PLY_TYPE  # Alias para compatibilidade retroativa.
     COL_CHECK = COL_SELECT
 
     HEADERS = [
         "#",
+        "Sequence",
         "Selection",
         "Simetria",
         "Material",
         "Orientacao",
     ]
+    _SEQUENCE_PATTERN = re.compile(r"^Seq\.(\d+)$")
     headers = HEADERS
 
     def __init__(
@@ -642,19 +649,72 @@ class StackingTableModel(QAbstractTableModel):
     def _should_record_undo(self) -> bool:
         return self._undo_stack is not None and self._undo_suppressed == 0
 
+    def _default_sequence_label(self, row: int) -> str:
+        return f"Seq.{row + 1}"
+
+    def _normalize_sequence_input(self, value: object, row: int) -> Optional[str]:
+        text = str(value or "").strip()
+        if not text:
+            return self._default_sequence_label(row)
+        match = self._SEQUENCE_PATTERN.fullmatch(text)
+        if match is None:
+            return None
+        try:
+            number = int(match.group(1))
+        except ValueError:
+            return None
+        if number <= 0:
+            return None
+        return f"Seq.{number}"
+
+    def _force_sequence_sync(self) -> None:
+        if not self._camadas:
+            return
+        changed_rows: list[int] = []
+        for idx, camada in enumerate(self._camadas):
+            expected = self._default_sequence_label(idx)
+            if camada.sequence != expected:
+                camada.sequence = expected
+                changed_rows.append(idx)
+        if not changed_rows:
+            return
+        for row in changed_rows:
+            index = self.index(row, self.COL_SEQUENCE)
+            self.dataChanged.emit(index, index, [Qt.DisplayRole, Qt.EditRole])
+
     def _apply_field_value(self, row: int, column: int, value: object) -> bool:
         if not (0 <= row < len(self._camadas)):
             return False
         camada = self._camadas[row]
-        if column == self.COL_PLY_TYPE:
+        if column == self.COL_SEQUENCE:
+            normalized = self._normalize_sequence_input(value, row)
+            if normalized is None:
+                return False
+            camada.sequence = normalized
+        elif column == self.COL_PLY_TYPE:
             camada.ply_type = normalize_ply_type_label(value)
         elif column == self.COL_MATERIAL:
             camada.material = str(value or "").strip()
         elif column == self.COL_ORIENTATION:
-            try:
-                camada.orientacao = int(value)
-            except (TypeError, ValueError):
-                return False
+            if value is None:
+                camada.orientacao = None
+            else:
+                text = str(value).strip()
+                if not text:
+                    camada.orientacao = None
+                else:
+                    cleaned = (
+                        text.replace("\N{DEGREE SIGN}", "")
+                        .replace("\u00ba", "")
+                        .strip()
+                    )
+                    try:
+                        camada.orientacao = int(cleaned)
+                    except (TypeError, ValueError):
+                        try:
+                            camada.orientacao = normalize_angle(cleaned)
+                        except (TypeError, ValueError):
+                            return False
         else:
             return False
 
@@ -687,6 +747,7 @@ class StackingTableModel(QAbstractTableModel):
 
     def _describe_edit(self, column: int, row: int) -> str:
         labels = {
+            self.COL_SEQUENCE: "sequencia",
             self.COL_PLY_TYPE: "simetria",
             self.COL_MATERIAL: "material",
             self.COL_ORIENTATION: "orienta\u00e7\u00e3o",
@@ -701,6 +762,7 @@ class StackingTableModel(QAbstractTableModel):
         self._rows_red.clear()
         self._rows_green.clear()
         self._sync_indices()
+        self._force_sequence_sync()
         self.endResetModel()
 
     @staticmethod
@@ -754,24 +816,38 @@ class StackingTableModel(QAbstractTableModel):
         if role == Qt.DisplayRole:
             if column == self.COL_NUMBER:
                 return str(index.row() + 1)
+            if column == self.COL_SEQUENCE:
+                return camada.sequence or self._default_sequence_label(index.row())
             if column == self.COL_PLY_TYPE:
                 return normalize_ply_type_label(camada.ply_type)
             if column == self.COL_MATERIAL:
                 return camada.material
             if column == self.COL_ORIENTATION:
+                if camada.orientacao is None:
+                    return ""
                 return f"{camada.orientacao}\N{DEGREE SIGN}"
         elif role == Qt.EditRole:
+            if column == self.COL_SEQUENCE:
+                return camada.sequence or self._default_sequence_label(index.row())
             if column == self.COL_PLY_TYPE:
                 return normalize_ply_type_label(camada.ply_type)
             if column == self.COL_MATERIAL:
                 return camada.material
             if column == self.COL_ORIENTATION:
+                if camada.orientacao is None:
+                    return ""
                 return f"{camada.orientacao}\N{DEGREE SIGN}"
         elif role == Qt.CheckStateRole:
             if column == self.COL_SELECT:
                 return Qt.Checked if self._checked[index.row()] else Qt.Unchecked
         elif role == Qt.TextAlignmentRole:
-            if column in (self.COL_NUMBER, self.COL_SELECT, self.COL_PLY_TYPE, self.COL_ORIENTATION):
+            if column in (
+                self.COL_NUMBER,
+                self.COL_SEQUENCE,
+                self.COL_SELECT,
+                self.COL_PLY_TYPE,
+                self.COL_ORIENTATION,
+            ):
                 return int(Qt.AlignVCenter | Qt.AlignCenter)
             return int(Qt.AlignVCenter | Qt.AlignLeft)
         elif role == Qt.BackgroundRole:
@@ -919,6 +995,8 @@ class StackingTableModel(QAbstractTableModel):
         base_flags = Qt.ItemIsSelectable | Qt.ItemIsEnabled
         if column == self.COL_SELECT:
             return base_flags | Qt.ItemIsUserCheckable
+        if column == self.COL_SEQUENCE:
+            return base_flags | Qt.ItemIsEditable
         if column in (self.COL_PLY_TYPE, self.COL_MATERIAL, self.COL_ORIENTATION):
             return base_flags | Qt.ItemIsEditable
         return base_flags
@@ -950,6 +1028,14 @@ class StackingTableModel(QAbstractTableModel):
                 return False
             return self._apply_or_record_change(row, column, camada.ply_type, text)
 
+        if column == self.COL_SEQUENCE and role in (Qt.EditRole, Qt.DisplayRole):
+            normalized = self._normalize_sequence_input(value, row)
+            if normalized is None:
+                return False
+            if camada.sequence == normalized:
+                return False
+            return self._apply_or_record_change(row, column, camada.sequence, normalized)
+
         if column == self.COL_MATERIAL and role in (Qt.EditRole, Qt.DisplayRole):
             new_value = str(value).strip()
             if new_value == camada.material:
@@ -958,7 +1044,13 @@ class StackingTableModel(QAbstractTableModel):
 
         if column == self.COL_ORIENTATION and role in (Qt.EditRole, Qt.DisplayRole):
             text = str(value).strip()
-            cleaned = text.replace("\N{DEGREE SIGN}", "").replace("??", "").strip()
+            if not text or text.lower() == "x":
+                if camada.orientacao is None:
+                    return False
+                return self._apply_or_record_change(row, column, camada.orientacao, None)
+            cleaned = (
+                text.replace("\N{DEGREE SIGN}", "").replace("\u00ba", "").strip()
+            )
             try:
                 angle = normalize_angle(cleaned)
             except ValueError:
@@ -978,6 +1070,7 @@ class StackingTableModel(QAbstractTableModel):
         self.endInsertRows()
         self._shift_highlights_on_insert(position)
         self._sync_indices()
+        self._force_sequence_sync()
         if self._change_callback:
             self._change_callback(self.layers())
 
@@ -996,6 +1089,7 @@ class StackingTableModel(QAbstractTableModel):
             removed_rows.sort()
             self._adjust_highlights_on_remove(removed_rows)
             self._sync_indices()
+            self._force_sequence_sync()
             if self._change_callback:
                 self._change_callback(self.layers())
         return removed
@@ -1051,6 +1145,7 @@ class StackingTableModel(QAbstractTableModel):
         self.endMoveRows()
         self._update_highlights_on_move(source, target)
         self._sync_indices()
+        self._force_sequence_sync()
         if self._change_callback:
             self._change_callback(self.layers())
         return True
@@ -1382,6 +1477,7 @@ def _parse_configuration_section(
                     ativo=active,
                     simetria=symmetry,
                     ply_type=ply_type_value,
+                    sequence=f"Seq.{len(layers) + 1}",
                 )
             )
             idx += 1
