@@ -302,6 +302,7 @@ class Camada:
     ativo: bool
     simetria: bool
     ply_type: str = DEFAULT_PLY_TYPE
+    ply_label: str = ""
     sequence: str = ""
 
 
@@ -598,24 +599,27 @@ class StackingTableModel(QAbstractTableModel):
     """Apresenta as camadas do laminado na tabela de stacking."""
 
     COL_NUMBER = 0
-    COL_SEQUENCE = 1
-    COL_SELECT = 2
-    COL_PLY_TYPE = 3
-    COL_MATERIAL = 4
-    COL_ORIENTATION = 5
+    COL_SELECT = 1
+    COL_SEQUENCE = 2
+    COL_PLY = 3
+    COL_PLY_TYPE = 4
+    COL_MATERIAL = 5
+    COL_ORIENTATION = 6
 
     COL_NON_STRUCT = COL_PLY_TYPE  # Alias para compatibilidade retroativa.
     COL_CHECK = COL_SELECT
 
     HEADERS = [
         "#",
-        "Sequence",
         "Selection",
+        "Sequence",
+        "Ply",
         "Simetria",
         "Material",
         "Orientacao",
     ]
     _SEQUENCE_PATTERN = re.compile(r"^Seq\.(\d+)$")
+    _PLY_PATTERN = re.compile(r"^Ply\.(\d+)$")
     headers = HEADERS
 
     def __init__(
@@ -652,6 +656,9 @@ class StackingTableModel(QAbstractTableModel):
     def _default_sequence_label(self, row: int) -> str:
         return f"Seq.{row + 1}"
 
+    def _default_ply_label(self, row: int) -> str:
+        return f"Ply.{row + 1}"
+
     def _normalize_sequence_input(self, value: object, row: int) -> Optional[str]:
         text = str(value or "").strip()
         if not text:
@@ -666,6 +673,21 @@ class StackingTableModel(QAbstractTableModel):
         if number <= 0:
             return None
         return f"Seq.{number}"
+
+    def _normalize_ply_input(self, value: object, row: int) -> Optional[str]:
+        text = str(value or "").strip()
+        if not text:
+            return self._default_ply_label(row)
+        match = self._PLY_PATTERN.fullmatch(text)
+        if match is None:
+            return None
+        try:
+            number = int(match.group(1))
+        except ValueError:
+            return None
+        if number <= 0:
+            return None
+        return f"Ply.{number}"
 
     def _force_sequence_sync(self) -> None:
         if not self._camadas:
@@ -682,19 +704,68 @@ class StackingTableModel(QAbstractTableModel):
             index = self.index(row, self.COL_SEQUENCE)
             self.dataChanged.emit(index, index, [Qt.DisplayRole, Qt.EditRole])
 
+    def _force_ply_sync(self) -> None:
+        if not self._camadas:
+            return
+        changed_rows: list[int] = []
+        for idx, camada in enumerate(self._camadas):
+            current = getattr(camada, "ply_label", "")
+            normalized = self._normalize_ply_input(current, idx)
+            expected = normalized if normalized is not None else self._default_ply_label(idx)
+            if camada.ply_label != expected:
+                camada.ply_label = expected
+                changed_rows.append(idx)
+        if not changed_rows:
+            return
+        for row in changed_rows:
+            index = self.index(row, self.COL_PLY)
+            self.dataChanged.emit(index, index, [Qt.DisplayRole, Qt.EditRole])
+
     def _apply_field_value(self, row: int, column: int, value: object) -> bool:
         if not (0 <= row < len(self._camadas)):
             return False
         camada = self._camadas[row]
+        extra_columns: list[int] = []
         if column == self.COL_SEQUENCE:
             normalized = self._normalize_sequence_input(value, row)
             if normalized is None:
                 return False
             camada.sequence = normalized
+        elif column == self.COL_PLY:
+            normalized_ply = self._normalize_ply_input(value, row)
+            if normalized_ply is None:
+                return False
+            camada.ply_label = normalized_ply
         elif column == self.COL_PLY_TYPE:
-            camada.ply_type = normalize_ply_type_label(value)
+            normalized_type = normalize_ply_type_label(value)
+            camada.ply_type = normalized_type
+            material_text = str(getattr(camada, "material", "") or "")
+            if (
+                material_text
+                and "foil" in material_text.lower()
+                and hasattr(camada, "_auto_symmetry_backup")
+            ):
+                setattr(camada, "_auto_symmetry_backup", normalized_type)
         elif column == self.COL_MATERIAL:
-            camada.material = str(value or "").strip()
+            new_material = str(value or "").strip()
+            camada.material = new_material
+            material_lower = new_material.lower()
+            if material_lower and "foil" in material_lower:
+                setattr(camada, "_auto_symmetry_backup", camada.ply_type)
+                target_label = PLY_TYPE_OPTIONS[1]
+                if camada.ply_type != target_label:
+                    camada.ply_type = target_label
+                    extra_columns.append(self.COL_PLY_TYPE)
+            else:
+                backup = getattr(camada, "_auto_symmetry_backup", None)
+                if backup is not None:
+                    if camada.ply_type != backup:
+                        camada.ply_type = backup
+                        extra_columns.append(self.COL_PLY_TYPE)
+                    try:
+                        delattr(camada, "_auto_symmetry_backup")
+                    except AttributeError:
+                        pass
         elif column == self.COL_ORIENTATION:
             if value is None:
                 camada.orientacao = None
@@ -720,6 +791,9 @@ class StackingTableModel(QAbstractTableModel):
 
         index = self.index(row, column)
         self.dataChanged.emit(index, index, [Qt.DisplayRole, Qt.EditRole])
+        for extra_column in extra_columns:
+            extra_index = self.index(row, extra_column)
+            self.dataChanged.emit(extra_index, extra_index, [Qt.DisplayRole, Qt.EditRole])
         if self._change_callback:
             self._change_callback(self.layers())
         return True
@@ -748,6 +822,7 @@ class StackingTableModel(QAbstractTableModel):
     def _describe_edit(self, column: int, row: int) -> str:
         labels = {
             self.COL_SEQUENCE: "sequencia",
+            self.COL_PLY: "ply",
             self.COL_PLY_TYPE: "simetria",
             self.COL_MATERIAL: "material",
             self.COL_ORIENTATION: "orienta\u00e7\u00e3o",
@@ -763,6 +838,7 @@ class StackingTableModel(QAbstractTableModel):
         self._rows_green.clear()
         self._sync_indices()
         self._force_sequence_sync()
+        self._force_ply_sync()
         self.endResetModel()
 
     @staticmethod
@@ -772,6 +848,7 @@ class StackingTableModel(QAbstractTableModel):
         if legacy_flag and normalized_label == DEFAULT_PLY_TYPE:
             normalized_label = PLY_TYPE_OPTIONS[1]
         camada.ply_type = normalized_label
+        camada.ply_label = str(getattr(camada, "ply_label", "") or "")
         if hasattr(camada, "nao_estrutural"):
             try:
                 delattr(camada, "nao_estrutural")
@@ -818,6 +895,8 @@ class StackingTableModel(QAbstractTableModel):
                 return str(index.row() + 1)
             if column == self.COL_SEQUENCE:
                 return camada.sequence or self._default_sequence_label(index.row())
+            if column == self.COL_PLY:
+                return camada.ply_label or self._default_ply_label(index.row())
             if column == self.COL_PLY_TYPE:
                 return normalize_ply_type_label(camada.ply_type)
             if column == self.COL_MATERIAL:
@@ -829,6 +908,8 @@ class StackingTableModel(QAbstractTableModel):
         elif role == Qt.EditRole:
             if column == self.COL_SEQUENCE:
                 return camada.sequence or self._default_sequence_label(index.row())
+            if column == self.COL_PLY:
+                return camada.ply_label or self._default_ply_label(index.row())
             if column == self.COL_PLY_TYPE:
                 return normalize_ply_type_label(camada.ply_type)
             if column == self.COL_MATERIAL:
@@ -843,8 +924,9 @@ class StackingTableModel(QAbstractTableModel):
         elif role == Qt.TextAlignmentRole:
             if column in (
                 self.COL_NUMBER,
-                self.COL_SEQUENCE,
                 self.COL_SELECT,
+                self.COL_SEQUENCE,
+                self.COL_PLY,
                 self.COL_PLY_TYPE,
                 self.COL_ORIENTATION,
             ):
@@ -995,7 +1077,7 @@ class StackingTableModel(QAbstractTableModel):
         base_flags = Qt.ItemIsSelectable | Qt.ItemIsEnabled
         if column == self.COL_SELECT:
             return base_flags | Qt.ItemIsUserCheckable
-        if column == self.COL_SEQUENCE:
+        if column in (self.COL_SEQUENCE, self.COL_PLY):
             return base_flags | Qt.ItemIsEditable
         if column in (self.COL_PLY_TYPE, self.COL_MATERIAL, self.COL_ORIENTATION):
             return base_flags | Qt.ItemIsEditable
@@ -1036,6 +1118,16 @@ class StackingTableModel(QAbstractTableModel):
                 return False
             return self._apply_or_record_change(row, column, camada.sequence, normalized)
 
+        if column == self.COL_PLY and role in (Qt.EditRole, Qt.DisplayRole):
+            normalized_ply = self._normalize_ply_input(value, row)
+            if normalized_ply is None:
+                return False
+            if camada.ply_label == normalized_ply:
+                return False
+            return self._apply_or_record_change(
+                row, column, camada.ply_label, normalized_ply
+            )
+
         if column == self.COL_MATERIAL and role in (Qt.EditRole, Qt.DisplayRole):
             new_value = str(value).strip()
             if new_value == camada.material:
@@ -1071,6 +1163,7 @@ class StackingTableModel(QAbstractTableModel):
         self._shift_highlights_on_insert(position)
         self._sync_indices()
         self._force_sequence_sync()
+        self._force_ply_sync()
         if self._change_callback:
             self._change_callback(self.layers())
 
@@ -1090,6 +1183,7 @@ class StackingTableModel(QAbstractTableModel):
             self._adjust_highlights_on_remove(removed_rows)
             self._sync_indices()
             self._force_sequence_sync()
+            self._force_ply_sync()
             if self._change_callback:
                 self._change_callback(self.layers())
         return removed
@@ -1146,6 +1240,7 @@ class StackingTableModel(QAbstractTableModel):
         self._update_highlights_on_move(source, target)
         self._sync_indices()
         self._force_sequence_sync()
+        self._force_ply_sync()
         if self._change_callback:
             self._change_callback(self.layers())
         return True
@@ -1477,6 +1572,7 @@ def _parse_configuration_section(
                     ativo=active,
                     simetria=symmetry,
                     ply_type=ply_type_value,
+                    ply_label=f"Ply.{len(layers) + 1}",
                     sequence=f"Seq.{len(layers) + 1}",
                 )
             )

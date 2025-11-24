@@ -114,6 +114,7 @@ RESOURCES_ICONS_DIR = package_path("resources", "icons")
 
 COL_NUM = StackingTableModel.COL_NUMBER
 COL_SEQUENCE = StackingTableModel.COL_SEQUENCE
+COL_PLY = StackingTableModel.COL_PLY
 COL_SELECTION = StackingTableModel.COL_SELECT
 COL_PLY_TYPE = StackingTableModel.COL_PLY_TYPE
 COL_MATERIAL = StackingTableModel.COL_MATERIAL
@@ -196,8 +197,9 @@ class MainWindow(QMainWindow):
         self._band_labels: list[QLabel] = []
         self._header_band_mapping: list[int] = [
             StackingTableModel.COL_NUMBER,
-            StackingTableModel.COL_SEQUENCE,
             StackingTableModel.COL_SELECT,
+            StackingTableModel.COL_SEQUENCE,
+            StackingTableModel.COL_PLY,
             StackingTableModel.COL_PLY_TYPE,
             StackingTableModel.COL_MATERIAL,
             StackingTableModel.COL_ORIENTATION,
@@ -270,13 +272,6 @@ class MainWindow(QMainWindow):
                 None,
             ),
             (
-                "new_laminate_action",
-                "Novo Laminado",
-                self._enter_creating_mode,
-                "Cadastrar um novo laminado.",
-                None,
-            ),
-            (
                 "save_action",
                 "Salvar",
                 self._on_save_triggered,
@@ -297,6 +292,13 @@ class MainWindow(QMainWindow):
                 "Exportar planilha Excel com as alteracoes atuais.",
                 QKeySequence("Ctrl+E"),
             ),
+            (
+                "exit_action",
+                "Fechar",
+                self.close,
+                "Fechar o aplicativo.",
+                QKeySequence.Quit,
+            ),
         ]
 
         for attr_name, text, handler, tip, shortcut in action_specs:
@@ -313,11 +315,12 @@ class MainWindow(QMainWindow):
         file_menu = menu_bar.addMenu("Arquivo")
         file_menu.addAction(self.open_project_action)
         file_menu.addAction(self.load_spreadsheet_action)
-        file_menu.addAction(self.new_laminate_action)
         file_menu.addSeparator()
         file_menu.addAction(self.save_action)
         file_menu.addAction(self.save_as_action)
         file_menu.addAction(self.export_excel_action)
+        file_menu.addSeparator()
+        file_menu.addAction(self.exit_action)
 
     def _setup_central_widget(self) -> None:
         self.view_editor = self._build_editor_view()
@@ -624,7 +627,15 @@ class MainWindow(QMainWindow):
         else:
             self._band_frame_margin = 0
 
-        titles = ["#", "Sequence", "Selection", "Simetria", "Material", "Orientação"]
+        titles = [
+            "#",
+            "Selection",
+            "Sequence",
+            "Ply",
+            "Simetria",
+            "Material",
+            "Orientação",
+        ]
         self._band_labels = []
         for title in titles:
             label = QLabel(title, band)
@@ -751,6 +762,14 @@ class MainWindow(QMainWindow):
             self._show_todo_message,  # type: ignore[arg-type]
             "Duplicar camada",
             QStyle.SP_FileDialogDetailedView,
+        )
+        self.btn_renumber_sequence = make_button(
+            None,
+            "Renumerar sequência (Seq.1, Seq.2...)",
+            self.on_renumber_sequences,
+            "Renumerar sequência das camadas",
+            QStyle.SP_BrowserReload,
+            tool_button_style=Qt.ToolButtonIconOnly,
         )
         self.btn_bulk_change_material = QToolButton(self)
         self.btn_bulk_change_material.setObjectName("btn_bulk_change_material")
@@ -946,8 +965,9 @@ class MainWindow(QMainWindow):
         header = view.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.Stretch)
         header.setSectionResizeMode(StackingTableModel.COL_NUMBER, QHeaderView.Fixed)
-        header.setSectionResizeMode(StackingTableModel.COL_SEQUENCE, QHeaderView.Fixed)
         header.setSectionResizeMode(StackingTableModel.COL_SELECT, QHeaderView.Fixed)
+        header.setSectionResizeMode(StackingTableModel.COL_SEQUENCE, QHeaderView.Fixed)
+        header.setSectionResizeMode(StackingTableModel.COL_PLY, QHeaderView.Fixed)
         header.setSectionResizeMode(StackingTableModel.COL_PLY_TYPE, QHeaderView.Fixed)
         header.setSectionResizeMode(StackingTableModel.COL_MATERIAL, QHeaderView.Stretch)
         header.setSectionResizeMode(
@@ -957,8 +977,9 @@ class MainWindow(QMainWindow):
         header.setFixedHeight(max(header.height(), header.sizeHint().height()))
 
         view.setColumnWidth(StackingTableModel.COL_NUMBER, 60)
-        view.setColumnWidth(StackingTableModel.COL_SEQUENCE, 110)
         view.setColumnWidth(StackingTableModel.COL_SELECT, 120)
+        view.setColumnWidth(StackingTableModel.COL_SEQUENCE, 110)
+        view.setColumnWidth(StackingTableModel.COL_PLY, 90)
         view.setColumnWidth(StackingTableModel.COL_PLY_TYPE, 160)
         view.verticalHeader().setVisible(False)
         self._sync_header_band()
@@ -1527,6 +1548,8 @@ class MainWindow(QMainWindow):
                     ativo=ativo,
                     simetria=simetria,
                     ply_type=DEFAULT_PLY_TYPE,
+                    ply_label=f"Ply.{len(camadas) + 1}",
+                    sequence=f"Seq.{len(camadas) + 1}",
                 )
             )
 
@@ -1998,6 +2021,40 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(
                 "Camadas adicionadas a partir da colagem.", 3000
             )
+
+    def on_renumber_sequences(self) -> None:
+        _, model, laminate = self._stacking_binding_context()
+        if model is None or laminate is None:
+            return
+        layers_snapshot = model.layers()
+        changes: list[LayerFieldChange] = []
+        for row, layer in enumerate(layers_snapshot):
+            expected = f"Seq.{row + 1}"
+            stored_value = layer.sequence or ""
+            display_value = stored_value or expected
+            if display_value == expected:
+                continue
+            changes.append(
+                LayerFieldChange(
+                    row=row,
+                    column=COL_SEQUENCE,
+                    old_value=stored_value,
+                    new_value=expected,
+                )
+            )
+        if not changes:
+            QMessageBox.information(
+                self,
+                "Renumerar sequência",
+                "A sequência já está atualizada.",
+            )
+            return
+        command = BulkLayerEditCommand(
+            model, laminate, changes, "Renumerar sequência"
+        )
+        self.undo_stack.push(command)
+        self._update_save_actions_enabled()
+        self.update_stacking_summary_ui()
 
     def on_bulk_change_material(self) -> None:
         rows = self._selected_row_indexes()
