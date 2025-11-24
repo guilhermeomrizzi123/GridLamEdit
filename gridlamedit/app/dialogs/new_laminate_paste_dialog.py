@@ -19,7 +19,7 @@ from PySide6.QtWidgets import (
 
 from gridlamedit.io.spreadsheet import normalize_angle
 
-_TOKEN_PATTERN = re.compile(r"^[+-]?\d+(?:\.\d+)?(?:\N{DEGREE SIGN}|\u00ba)?$")
+_TOKEN_PATTERN = re.compile(r"^[+-]?\d+(?:[.,]\d+)?(?:\N{DEGREE SIGN}|\u00ba)?$")
 _SPLIT_PATTERN = re.compile(r"[,\s;\/|]+")
 
 
@@ -28,7 +28,7 @@ class NewLaminatePasteDialog(QDialog):
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.result_orientations: list[Optional[int]] = []
+        self.result_orientations: list[Optional[float]] = []
         self._setup_ui()
 
     def _setup_ui(self) -> None:
@@ -40,8 +40,8 @@ class NewLaminatePasteDialog(QDialog):
 
         instructions = QLabel(
             (
-                "Cole abaixo as orientações (ex.: 0, 45, -45, 90). "
-                "Você pode colar com Ctrl+V. Caracteres não compatíveis serão ignorados. "
+                "Cole abaixo as orienta\u00e7\u00f5es (qualquer valor entre -100\N{DEGREE SIGN} e +100\N{DEGREE SIGN}). "
+                "Voc\u00ea pode colar com Ctrl+V. Caracteres incompat\u00edveis ser\u00e3o ignorados. "
                 "Use 'x' para representar camadas vazias."
             ),
             self,
@@ -54,11 +54,11 @@ class NewLaminatePasteDialog(QDialog):
         self.txt_paste.setMinimumHeight(220)
         layout.addWidget(self.txt_paste)
 
-        self.cb_symmetric = QCheckBox("Criar laminado simétrico", self)
+        self.cb_symmetric = QCheckBox("Criar laminado sim\u00e9trico", self)
         layout.addWidget(self.cb_symmetric)
 
         self.cb_last_layer_center = QCheckBox(
-            "Considerar última camada como camada central do laminado", self
+            "Considerar \u00faltima camada como camada central do laminado", self
         )
         self.cb_last_layer_center.setEnabled(False)
         layout.addWidget(self.cb_last_layer_center)
@@ -83,8 +83,8 @@ class NewLaminatePasteDialog(QDialog):
         if not orientations_base:
             QMessageBox.warning(
                 self,
-                "Dados inválidos",
-                "Nenhuma orientação válida encontrada.",
+                "Dados inv\u00e1lidos",
+                "Nenhuma orienta\u00e7\u00e3o v\u00e1lida encontrada.",
             )
             return
 
@@ -99,9 +99,9 @@ class NewLaminatePasteDialog(QDialog):
         self.result_orientations = full_sequence
         self.accept()
 
-    def _parse_orientations(self, raw_text: str) -> list[Optional[int]]:
+    def _parse_orientations(self, raw_text: str) -> list[Optional[float]]:
         tokens = _SPLIT_PATTERN.split(raw_text or "")
-        orientations: list[Optional[int]] = []
+        orientations: list[Optional[float]] = []
         for token in tokens:
             cleaned = token.strip()
             if not cleaned:
@@ -111,16 +111,8 @@ class NewLaminatePasteDialog(QDialog):
                 continue
             if not _TOKEN_PATTERN.match(cleaned):
                 continue
-            normalized_token = (
-                cleaned.replace("\N{DEGREE SIGN}", "").replace("\u00ba", "")
-            )
             try:
-                number = float(normalized_token)
-            except ValueError:
-                continue
-            rounded = int(round(number))
-            try:
-                orientation = normalize_angle(rounded)
+                orientation = normalize_angle(cleaned)
             except ValueError:
                 continue
             orientations.append(orientation)
@@ -132,8 +124,8 @@ class NewLaminatePasteDialog(QDialog):
             self.cb_last_layer_center.setChecked(False)
 
     def _build_symmetric_sequence(
-        self, base: Iterable[Optional[int]], *, include_center: bool
-    ) -> list[Optional[int]]:
+        self, base: Iterable[Optional[float]], *, include_center: bool
+    ) -> list[Optional[float]]:
         items = list(base)
         if not items:
             return []

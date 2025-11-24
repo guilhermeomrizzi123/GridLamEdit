@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import re
 from typing import Iterable, Sequence
 
 from PySide6.QtCore import Qt
@@ -16,7 +15,12 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from gridlamedit.io.spreadsheet import normalize_angle
+from gridlamedit.io.spreadsheet import (
+    ORIENTATION_MAX,
+    ORIENTATION_MIN,
+    format_orientation_value,
+    normalize_angle,
+)
 
 try:
     from gridlamedit.app.services.excel_io import (
@@ -25,11 +29,7 @@ try:
 except ImportError:  # pragma: no cover - fallback
     legacy_normalize_angle = None
 
-_ORIENTATION_PATTERN = re.compile(
-    r"^[+-]?\d+(?:\.\d+)?(?:\N{DEGREE SIGN}|\N{MASCULINE ORDINAL INDICATOR})?$"
-)
-_DEGREE_TOKENS = {"\N{DEGREE SIGN}", "\N{MASCULINE ORDINAL INDICATOR}"}
-_BASE_ORIENTATIONS = [0, 45, -45, 90]
+_DEFAULT_SUGGESTIONS = [0.0, 45.0, -45.0, 90.0]
 
 
 class BulkOrientationDialog(QDialog):
@@ -39,22 +39,25 @@ class BulkOrientationDialog(QDialog):
         self,
         parent: QWidget | None = None,
         *,
-        available_orientations: Sequence[int] | Iterable[int] | None = None,
+        available_orientations: Sequence[float] | Iterable[float] | None = None,
     ) -> None:
         super().__init__(parent)
-        self.new_orientation: int | None = None
+        self.new_orientation: float | None = None
         self._setup_ui()
         self._populate_orientations(available_orientations)
 
     def _setup_ui(self) -> None:
-        self.setWindowTitle("Trocar orientação (camadas selecionadas)")
+        self.setWindowTitle("Trocar orienta\u00e7\u00e3o (camadas selecionadas)")
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(16, 16, 16, 16)
         layout.setSpacing(12)
 
         instructions = QLabel(
-            "Selecione ou informe a nova orientação (ex.: 0, 45, -45, 90).",
+            (
+                "Informe a nova orienta\u00e7\u00e3o (qualquer valor entre "
+                f"{ORIENTATION_MIN:.0f}\N{DEGREE SIGN} e {ORIENTATION_MAX:.0f}\N{DEGREE SIGN})."
+            ),
             self,
         )
         instructions.setWordWrap(True)
@@ -79,17 +82,17 @@ class BulkOrientationDialog(QDialog):
         button_box.rejected.connect(self.reject)
         layout.addWidget(button_box)
 
-        self.resize(360, 180)
+        self.resize(400, 190)
 
     def _populate_orientations(
-        self, orientations: Sequence[int] | Iterable[int] | None
+        self, orientations: Sequence[float] | Iterable[float] | None
     ) -> None:
-        ordered: list[int] = []
-        for value in _BASE_ORIENTATIONS:
+        ordered: list[float] = []
+        for value in _DEFAULT_SUGGESTIONS:
             if value not in ordered:
-                ordered.append(value)
+                ordered.append(float(value))
 
-        extras: set[int] = set()
+        extras: set[float] = set()
         if orientations:
             for item in orientations:
                 normalized = self._coerce_orientation_value(item)
@@ -101,9 +104,9 @@ class BulkOrientationDialog(QDialog):
 
         self.cmb_orientation.clear()
         for value in ordered:
-            self.cmb_orientation.addItem(str(value))
+            self.cmb_orientation.addItem(format_orientation_value(value))
 
-    def _coerce_orientation_value(self, value: object) -> int | None:
+    def _coerce_orientation_value(self, value: object) -> float | None:
         candidate = value
         if legacy_normalize_angle is not None:
             try:
@@ -111,37 +114,20 @@ class BulkOrientationDialog(QDialog):
             except Exception:  # pragma: no cover - defensive
                 candidate = value
         try:
-            number = float(candidate)
+            return normalize_angle(candidate)
         except (TypeError, ValueError):
             try:
-                number = float(str(candidate).strip())
+                return normalize_angle(str(candidate))
             except (TypeError, ValueError):
                 return None
-        return int(round(number))
 
     def _on_accept_clicked(self) -> None:
         text = self.cmb_orientation.currentText().strip()
-        if not text or not _ORIENTATION_PATTERN.match(text):
+        if not text:
             self._show_invalid_message()
             return
-        cleaned = text
-        for token in _DEGREE_TOKENS:
-            cleaned = cleaned.replace(token, "")
-        cleaned = cleaned.strip()
-        candidate_value: object = cleaned
-        if legacy_normalize_angle is not None:
-            try:
-                candidate_value = legacy_normalize_angle(cleaned)
-            except Exception:  # pragma: no cover - defensive
-                candidate_value = cleaned
         try:
-            number = float(candidate_value)
-        except (TypeError, ValueError):
-            self._show_invalid_message()
-            return
-        rounded = int(round(number))
-        try:
-            self.new_orientation = normalize_angle(rounded)
+            self.new_orientation = normalize_angle(text)
         except ValueError:
             self._show_invalid_message()
             return
@@ -150,6 +136,9 @@ class BulkOrientationDialog(QDialog):
     def _show_invalid_message(self) -> None:
         QMessageBox.warning(
             self,
-            "Dados inválidos",
-            "Informe uma orientação válida (ex.: 0, 45, -45, 90).",
+            "Dados inv\u00e1lidos",
+            (
+                "Informe uma orienta\u00e7\u00e3o num\u00e9rica em graus "
+                f"entre {ORIENTATION_MIN:.0f}\N{DEGREE SIGN} e {ORIENTATION_MAX:.0f}\N{DEGREE SIGN}."
+            ),
         )

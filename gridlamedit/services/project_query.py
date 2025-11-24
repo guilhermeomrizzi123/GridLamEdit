@@ -36,12 +36,12 @@ def project_distinct_materials(project: GridModel | Any) -> list[str]:
     return sorted(materials, key=str.casefold)
 
 
-def project_distinct_orientations(project: GridModel | Any) -> list[int]:
+def project_distinct_orientations(project: GridModel | Any) -> list[float]:
     """
-    Retorna orientações distintas usadas em todos os laminados do projeto.
-    Ignora vazios/None. Normaliza para int. Sem duplicatas.
+    Retorna orienta\u00e7\u00f5es distintas usadas em todos os laminados do projeto.
+    Ignora vazios/None. Normaliza para float. Sem duplicatas.
     """
-    orientations: set[int] = set()
+    orientations: set[float] = set()
     for laminate in _iter_laminates(project):
         for layer in getattr(laminate, "camadas", []):
             value = getattr(layer, "orientacao", None)
@@ -49,5 +49,5 @@ def project_distinct_orientations(project: GridModel | Any) -> list[int]:
                 normalized = normalize_angle(value)
             except (TypeError, ValueError):
                 continue
-            orientations.add(int(normalized))
+            orientations.add(normalized)
     return sorted(orientations)

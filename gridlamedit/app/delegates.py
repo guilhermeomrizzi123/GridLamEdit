@@ -4,8 +4,18 @@ from __future__ import annotations
 
 from typing import Callable, Iterable, Optional
 
-from PySide6.QtCore import Qt, QRect
-from PySide6.QtWidgets import QApplication, QComboBox, QStyledItemDelegate, QWidget, QStyle, QStyleOptionButton
+from PySide6.QtCore import Qt, QRect, QRegularExpression
+from PySide6.QtGui import QRegularExpressionValidator
+from PySide6.QtWidgets import (
+    QApplication,
+    QComboBox,
+    QCompleter,
+    QLineEdit,
+    QStyledItemDelegate,
+    QWidget,
+    QStyle,
+    QStyleOptionButton,
+)
 
 from gridlamedit.io.spreadsheet import (
     DEFAULT_PLY_TYPE,
@@ -59,8 +69,44 @@ class MaterialComboDelegate(_BaseComboDelegate):
     """Delegate para edicao inline da coluna de material."""
 
 
-class OrientationComboDelegate(_BaseComboDelegate):
-    """Delegate para edicao inline da coluna de orientacao."""
+class OrientationComboDelegate(QStyledItemDelegate):
+    """Delegate que aceita orientacoes livres no intervalo permitido."""
+
+    _pattern = QRegularExpression("^[+-]?\\d{0,3}(?:[.,]\\d+)?(?:[\\N{DEGREE SIGN}\\u00ba])?$")
+
+    def __init__(
+        self,
+        parent: Optional[QWidget] = None,
+        *,
+        items_provider: Optional[Callable[[], Iterable[str]]] = None,
+    ) -> None:
+        super().__init__(parent)
+        self._items_provider = items_provider or (lambda: [])
+
+    def createEditor(self, parent: QWidget, option, index):  # noqa: D401, N802
+        editor = QLineEdit(parent)
+        validator = QRegularExpressionValidator(self._pattern, editor)
+        validator.setObjectName("orientationValidator")
+        editor.setValidator(validator)
+        suggestions = [str(item) for item in self._items_provider() if str(item).strip()]
+        if suggestions:
+            completer = QCompleter(suggestions, editor)
+            completer.setCaseSensitivity(Qt.CaseInsensitive)
+            completer.setFilterMode(Qt.MatchContains)
+            editor.setCompleter(completer)
+        editor.setPlaceholderText("Ex.: -10\N{DEGREE SIGN}, 8.5\N{DEGREE SIGN}")
+        return editor
+
+    def setEditorData(self, editor: QWidget, index):  # noqa: N802
+        if not isinstance(editor, QLineEdit):
+            return
+        text = index.data(Qt.EditRole) or index.data(Qt.DisplayRole) or ""
+        editor.setText(str(text))
+
+    def setModelData(self, editor: QWidget, model, index):  # noqa: N802
+        if not isinstance(editor, QLineEdit):
+            return
+        model.setData(index, editor.text(), Qt.EditRole)
 
 
 class PlyTypeComboDelegate(QStyledItemDelegate):

@@ -15,6 +15,7 @@ from gridlamedit.io.spreadsheet import (
     GridModel,
     Laminado,
     PLY_TYPE_OPTIONS,
+    normalize_angle,
     normalize_color_index,
     normalize_hex_color,
 )
@@ -128,9 +129,9 @@ def _deserialize_model(data: dict) -> GridModel:
                     else DEFAULT_PLY_TYPE
                 )
             orientation_raw = layer.get("orientacao", None)
-            orientation_value: Optional[int]
+            orientation_value: Optional[float]
             try:
-                orientation_value = int(orientation_raw)
+                orientation_value = normalize_angle(orientation_raw)
             except (TypeError, ValueError):
                 orientation_value = None
             sequence_value = str(layer.get("sequence", "") or "").strip()

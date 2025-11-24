@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Sequence
 
+import math
+
 from gridlamedit.io.spreadsheet import (
     Camada,
     Laminado,
@@ -119,9 +121,13 @@ def _is_laminate_symmetric(laminado: Laminado) -> bool:
 
 
 def _layers_match(top: Camada, bottom: Camada) -> bool:
-    return _normalize_material(top.material) == _normalize_material(bottom.material) and (
-        _normalize_orientation(top.orientacao) == _normalize_orientation(bottom.orientacao)
-    )
+    if _normalize_material(top.material) != _normalize_material(bottom.material):
+        return False
+    top_orientation = _normalize_orientation(top.orientacao)
+    bottom_orientation = _normalize_orientation(bottom.orientacao)
+    if top_orientation is None or bottom_orientation is None:
+        return top_orientation is None and bottom_orientation is None
+    return math.isclose(top_orientation, bottom_orientation, rel_tol=0.0, abs_tol=1e-9)
 
 
 def _is_structural(layer: Camada) -> bool:
@@ -134,14 +140,29 @@ def _normalize_material(value: object) -> str:
     return collapsed.upper()
 
 
-def _normalize_orientation(value: object) -> int | None:
+def _normalize_orientation(value: object) -> float | None:
     try:
         return normalize_angle(value)
     except Exception:
         try:
-            return normalize_angle(int(value))
+            return normalize_angle(str(value))
         except Exception:
             return None
+
+
+def _orientation_token(value: float | None) -> str:
+    if value is None:
+        return "none"
+    number = float(value)
+    if math.isclose(number, 0.0, abs_tol=1e-9):
+        number = 0.0
+    if number.is_integer():
+        base = str(int(number))
+    else:
+        base = f"{number}".rstrip("0").rstrip(".")
+    if base in {"", "-0"}:
+        base = "0"
+    return f"+{base}" if number >= 0 else base
 
 
 def _build_duplicate_signature(laminado: Laminado) -> str:
@@ -175,7 +196,7 @@ def _stacking_signature(layers: Sequence[Camada]) -> str:
     for layer in layers:
         material = _normalize_material(layer.material)
         orientation = _normalize_orientation(layer.orientacao)
-        orientation_token = "none" if orientation is None else f"{orientation:+d}"
+        orientation_token = _orientation_token(orientation)
         ply_token = ply_type_signature_token(getattr(layer, "ply_type", ""))
         tokens.append(f"{material}@{orientation_token}@{ply_token}")
     return ";".join(tokens)

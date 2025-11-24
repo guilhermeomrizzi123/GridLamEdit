@@ -95,6 +95,7 @@ from gridlamedit.io.spreadsheet import (
     WordWrapHeader,
     bind_cells_to_ui,
     bind_model_to_ui,
+    format_orientation_value,
     load_grid_spreadsheet,
     normalize_angle,
 )
@@ -143,21 +144,21 @@ class _LaminateChecksWorker(QObject):
             self.finished.emit(report)
 
 
-def _normalize_orientation_for_summary(value: object) -> Optional[int]:
+def _normalize_orientation_for_summary(value: object) -> Optional[float]:
     if value is None:
         return None
     try:
         return normalize_angle(value)
     except Exception:
         try:
-            return int(round(float(value)))
+            return normalize_angle(str(value))
         except Exception:
             return None
 
 
-def _count_oriented_layers(layers: Iterable[Camada]) -> tuple[int, Counter[int]]:
+def _count_oriented_layers(layers: Iterable[Camada]) -> tuple[int, Counter[float]]:
     """Return total oriented layers and counts by angle."""
-    counts: Counter[int] = Counter()
+    counts: Counter[float] = Counter()
     total = 0
     for camada in layers:
         normalized = _normalize_orientation_for_summary(
@@ -170,16 +171,13 @@ def _count_oriented_layers(layers: Iterable[Camada]) -> tuple[int, Counter[int]]
     return total, counts
 
 
-def _format_auto_name(total_layers: int, counts: Counter[int]) -> str:
+def _format_auto_name(total_layers: int, counts: Counter[float]) -> str:
     base = f"L{total_layers}"
     if not counts:
         return base
-    priority = [45, 0, -45, 90]
-    ordered: list[int] = [angle for angle in priority if angle in counts]
-    others = sorted(angle for angle in counts if angle not in ordered)
-    ordered.extend(others)
+    ordered = sorted(counts.keys())
     suffix = "".join(
-        f"(P{counts[angle]}|{angle}\N{DEGREE SIGN})"
+        f"(P{counts[angle]}|{format_orientation_value(angle)})"
         for angle in ordered
     )
     return f"{base}{suffix}"
@@ -1477,7 +1475,7 @@ class MainWindow(QMainWindow):
         non_structural_layers = total_layers - structural_layers
 
         materials_counter: Counter[str] = Counter()
-        orientations_counter: Counter[int] = Counter()
+        orientations_counter: Counter[float] = Counter()
 
         for camada in layers:
             material_text = (camada.material or "").strip()
@@ -1493,7 +1491,7 @@ class MainWindow(QMainWindow):
             return "Ply" if count == 1 else "Plies"
 
         orientation_parts = "".join(
-            f"[{count} {_pluralize(count)} a {angle} graus]"
+            f"[{count} {_pluralize(count)} a {format_orientation_value(angle)}]"
             for angle, count in sorted(orientations_counter.items(), key=lambda item: item[0])
         )
         materials_parts = "".join(
@@ -2248,27 +2246,23 @@ class MainWindow(QMainWindow):
         text = (raw or "").strip()
         if not text:
             return ""
-        cleaned = (
-            text.replace("\N{DEGREE SIGN}", "")
-            .replace("\u00ba", "")
-            .replace("deg", "")
-            .replace("DEG", "")
-            .strip()
-        )
         try:
-            angle = normalize_angle(cleaned)
+            angle = normalize_angle(text)
         except Exception:
-            filtered = "".join(ch for ch in cleaned if ch.isdigit() or ch in "+-")
+            cleaned = (
+                text.replace("\N{DEGREE SIGN}", "")
+                .replace("\u00ba", "")
+                .replace("deg", "")
+                .replace("DEG", "")
+                .strip()
+            )
+            filtered = "".join(ch for ch in cleaned if ch.isdigit() or ch in "+-.")
             if not filtered:
                 return text
             if filtered[0] not in "+-":
                 filtered = f"+{filtered}"
             return filtered
-        if angle > 0:
-            return f"+{angle}"
-        if angle < 0:
-            return f"{angle}"
-        return "0"
+        return format_orientation_value(angle)
 
     def _eq(self, left: str, right: str) -> bool:
         return (left or "").strip().lower() == (right or "").strip().lower()

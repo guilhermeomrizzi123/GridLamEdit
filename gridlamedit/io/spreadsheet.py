@@ -52,7 +52,10 @@ except Exception:  # pragma: no cover - fallback quando xlrd nAo disponAvel
 
 logger = logging.getLogger(__name__)
 
-ALLOWED_ANGLES = {-90, -45, 0, 45, 90}
+ORIENTATION_MIN = -100.0
+ORIENTATION_MAX = 100.0
+_DEGREE_TOKENS = ("\N{DEGREE SIGN}", "\u00ba")
+_ORIENTATION_TEXT_PATTERN = re.compile(r"^[+-]?\d+(?:[.,]\d+)?$")
 
 LAMINATE_ALIASES = ("Laminate", "Laminate Name", "Laminado", "Nome")
 COLOR_ALIASES = ("Color", "Colour", "Cor", "ColorIdx", "Color Index")
@@ -299,7 +302,7 @@ class Camada:
 
     idx: int
     material: str
-    orientacao: Optional[int]
+    orientacao: Optional[float]
     ativo: bool
     simetria: bool
     ply_type: str = DEFAULT_PLY_TYPE
@@ -346,32 +349,58 @@ class GridModel:
         ]
 
 
-def normalize_angle(value: object) -> int:
-    """Normaliza a orientacao para inteiro dentro do conjunto permitido."""
+def normalize_angle(value: object) -> float:
+    """Normaliza a orientacao para graus decimais dentro do intervalo permitido."""
     if value is None:
         raise ValueError("orientacao ausente")
 
     if isinstance(value, bool):
         raise ValueError(f"valor booleano invalido para orientacao: {value!r}")
 
+    number: float
     if isinstance(value, (int, float)):
         if isinstance(value, float) and math.isnan(value):
             raise ValueError("orientacao ausente")
-        angle = int(round(float(value)))
+        number = float(value)
     else:
         text = str(value).strip()
         if not text:
             raise ValueError("orientacao ausente")
-        cleaned = re.sub(r"[^\d\-]+", "", text)
-        if not cleaned:
+        cleaned = text
+        for token in _DEGREE_TOKENS:
+            cleaned = cleaned.replace(token, "")
+        cleaned = cleaned.replace("deg", "").replace("DEG", "").strip()
+        cleaned = cleaned.replace(",", ".")
+        if not _ORIENTATION_TEXT_PATTERN.fullmatch(cleaned):
             raise ValueError(f"orientacao invalida: {value!r}")
-        angle = int(cleaned)
+        try:
+            number = float(cleaned)
+        except ValueError as exc:  # pragma: no cover - defensive
+            raise ValueError(f"orientacao invalida: {value!r}") from exc
 
-    if angle not in ALLOWED_ANGLES:
+    if number < ORIENTATION_MIN or number > ORIENTATION_MAX:
         raise ValueError(
-            f"orientacao {angle} fora do conjunto permitido {sorted(ALLOWED_ANGLES)}"
+            f"orientacao {number} fora do intervalo permitido [{ORIENTATION_MIN}, {ORIENTATION_MAX}]"
         )
-    return angle
+    if math.isclose(number, 0.0, abs_tol=1e-9):
+        return 0.0
+    return number
+
+
+def format_orientation_value(value: Optional[float]) -> str:
+    """Retorna a orientacao formatada com simbolo de grau."""
+    if value is None:
+        return ""
+    number = float(value)
+    if math.isclose(number, 0.0, abs_tol=1e-9):
+        number = 0.0
+    if number.is_integer():
+        text = str(int(number))
+    else:
+        text = f"{number}".rstrip("0").rstrip(".")
+        if not text or text in {"-0", "-0.0"}:
+            text = "0"
+    return f"{text}\N{DEGREE SIGN}"
 
 
 def normalize_bool(value: object) -> bool:
@@ -792,19 +821,14 @@ class StackingTableModel(QAbstractTableModel):
                 camada.orientacao = None
             else:
                 text = str(value).strip()
-                if not text:
+                if not text or text.lower() == "x":
                     camada.orientacao = None
                 else:
-                    cleaned = (
-                        text.replace("\N{DEGREE SIGN}", "")
-                        .replace("\u00ba", "")
-                        .strip()
-                    )
                     try:
-                        camada.orientacao = int(cleaned)
+                        camada.orientacao = normalize_angle(value)
                     except (TypeError, ValueError):
                         try:
-                            camada.orientacao = normalize_angle(cleaned)
+                            camada.orientacao = normalize_angle(text)
                         except (TypeError, ValueError):
                             return False
         else:
@@ -923,9 +947,7 @@ class StackingTableModel(QAbstractTableModel):
             if column == self.COL_MATERIAL:
                 return camada.material
             if column == self.COL_ORIENTATION:
-                if camada.orientacao is None:
-                    return ""
-                return f"{camada.orientacao}\N{DEGREE SIGN}"
+                return format_orientation_value(camada.orientacao)
         elif role == Qt.EditRole:
             if column == self.COL_SEQUENCE:
                 return camada.sequence or self._default_sequence_label(index.row())
@@ -936,9 +958,7 @@ class StackingTableModel(QAbstractTableModel):
             if column == self.COL_MATERIAL:
                 return camada.material
             if column == self.COL_ORIENTATION:
-                if camada.orientacao is None:
-                    return ""
-                return f"{camada.orientacao}\N{DEGREE SIGN}"
+                return format_orientation_value(camada.orientacao)
         elif role == Qt.CheckStateRole:
             if column == self.COL_SELECT:
                 return Qt.Checked if self._checked[index.row()] else Qt.Unchecked
@@ -1161,14 +1181,14 @@ class StackingTableModel(QAbstractTableModel):
                 if camada.orientacao is None:
                     return False
                 return self._apply_or_record_change(row, column, camada.orientacao, None)
-            cleaned = (
-                text.replace("\N{DEGREE SIGN}", "").replace("\u00ba", "").strip()
-            )
             try:
-                angle = normalize_angle(cleaned)
+                angle = normalize_angle(value)
             except ValueError:
-                return False
-            if angle == camada.orientacao:
+                try:
+                    angle = normalize_angle(text)
+                except ValueError:
+                    return False
+            if camada.orientacao is not None and math.isclose(camada.orientacao, angle, rel_tol=0.0, abs_tol=1e-9):
                 return False
             return self._apply_or_record_change(row, column, camada.orientacao, angle)
 
@@ -1953,17 +1973,17 @@ class _GridUiBinding:
         return materials
 
     def orientation_options(self) -> list[str]:
-        preferred_order = [0, 45, -45, 90, -90]
-        options: list[str] = []
-        added: set[int] = set()
-        for angle in preferred_order:
-            if angle in ALLOWED_ANGLES and angle not in added:
-                options.append(f"{angle}\N{DEGREE SIGN}")
-                added.add(angle)
-        for angle in sorted(ALLOWED_ANGLES):
-            if angle not in added:
-                options.append(f"{angle}\N{DEGREE SIGN}")
-        return options
+        orientations = sorted(
+            {
+                float(camada.orientacao)
+                for laminado in self.model.laminados.values()
+                for camada in laminado.camadas
+                if camada.orientacao is not None
+            }
+        )
+        if not orientations:
+            return []
+        return [format_orientation_value(value) for value in orientations]
 
     def _refresh_cell_item_label(self, cell_id: str) -> None:
         if self._cells_widget is None:
