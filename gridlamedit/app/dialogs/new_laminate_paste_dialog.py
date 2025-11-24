@@ -56,6 +56,14 @@ class NewLaminatePasteDialog(QDialog):
         self.cb_symmetric = QCheckBox("Criar laminado simétrico", self)
         layout.addWidget(self.cb_symmetric)
 
+        self.cb_last_layer_center = QCheckBox(
+            "Considerar última camada como camada central do laminado", self
+        )
+        self.cb_last_layer_center.setEnabled(False)
+        layout.addWidget(self.cb_last_layer_center)
+
+        self.cb_symmetric.toggled.connect(self._on_symmetric_toggled)
+
         button_box = QDialogButtonBox(
             QDialogButtonBox.Ok | QDialogButtonBox.Cancel, Qt.Horizontal, self
         )
@@ -80,7 +88,10 @@ class NewLaminatePasteDialog(QDialog):
             return
 
         if self.cb_symmetric.isChecked():
-            full_sequence = self._build_symmetric_sequence(orientations_base)
+            include_center = self.cb_last_layer_center.isChecked()
+            full_sequence = self._build_symmetric_sequence(
+                orientations_base, include_center=include_center
+            )
         else:
             full_sequence = orientations_base
 
@@ -109,12 +120,19 @@ class NewLaminatePasteDialog(QDialog):
             orientations.append(orientation)
         return orientations
 
-    def _build_symmetric_sequence(self, base: Iterable[int]) -> list[int]:
+    def _on_symmetric_toggled(self, checked: bool) -> None:
+        self.cb_last_layer_center.setEnabled(checked)
+        if not checked:
+            self.cb_last_layer_center.setChecked(False)
+
+    def _build_symmetric_sequence(
+        self, base: Iterable[int], *, include_center: bool
+    ) -> list[int]:
         items = list(base)
         if not items:
             return []
-        if len(items) % 2 == 0:
-            return items + list(reversed(items))
-        half = items[:-1]
-        center = items[-1]
-        return half + [center] + list(reversed(half))
+        if include_center:
+            mirrored = items[:-1]
+            center = items[-1]
+            return mirrored + [center] + list(reversed(mirrored))
+        return items + list(reversed(items))
