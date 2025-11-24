@@ -80,6 +80,7 @@ from gridlamedit.app.dialogs.duplicate_laminate_dialog import DuplicateLaminateD
 from gridlamedit.app.dialogs.name_laminate_dialog import NameLaminateDialog
 from gridlamedit.app.dialogs.new_laminate_paste_dialog import NewLaminatePasteDialog
 from gridlamedit.app.dialogs.stacking_summary_dialog import StackingSummaryDialog
+from gridlamedit.app.virtualstacking import VirtualStackingWindow
 from gridlamedit.core.project_manager import ProjectManager
 from gridlamedit.core.paths import package_path
 from gridlamedit.io.spreadsheet import (
@@ -223,6 +224,7 @@ class MainWindow(QMainWindow):
             AssociatedCellsDialog
         ] = None
         self._new_laminate_dialog: Optional[NewLaminateDialog] = None
+        self._virtual_stacking_window: Optional[VirtualStackingWindow] = None
         self._new_laminate_button_icon: Optional[QIcon] = None
         self._new_laminate_icon_warning_emitted = False
         self._setting_new_laminate_name = False
@@ -329,6 +331,13 @@ class MainWindow(QMainWindow):
                 QKeySequence("Ctrl+E"),
             ),
             (
+                "virtual_stacking_action",
+                "Abrir Virtual Stacking",
+                self.open_virtual_stacking,
+                "Abrir interface do Virtual Stacking.",
+                QKeySequence("Ctrl+Shift+V"),
+            ),
+            (
                 "exit_action",
                 "Fechar",
                 self.close,
@@ -357,6 +366,20 @@ class MainWindow(QMainWindow):
         file_menu.addAction(self.export_excel_action)
         file_menu.addSeparator()
         file_menu.addAction(self.exit_action)
+
+        virtual_menu = menu_bar.addMenu("Virtual Stacking")
+        virtual_menu.addAction(self.virtual_stacking_action)
+
+    def open_virtual_stacking(self) -> None:
+        """Open the Virtual Stacking dialog populated with the current project."""
+        if self._virtual_stacking_window is None:
+            self._virtual_stacking_window = VirtualStackingWindow(self)
+
+        project = self._grid_model
+        self._virtual_stacking_window.populate_from_project(project)
+        self._virtual_stacking_window.show()
+        self._virtual_stacking_window.raise_()
+        self._virtual_stacking_window.activateWindow()
 
     def _setup_central_widget(self) -> None:
         self.view_editor = self._build_editor_view()
