@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import copy
+import secrets
 from collections import Counter, OrderedDict
 from dataclasses import dataclass
 from enum import Enum, auto
@@ -154,6 +155,41 @@ def _normalize_orientation_for_summary(value: object) -> Optional[int]:
             return None
 
 
+def _count_oriented_layers(layers: Iterable[Camada]) -> tuple[int, Counter[int]]:
+    """Return total oriented layers and counts by angle."""
+    counts: Counter[int] = Counter()
+    total = 0
+    for camada in layers:
+        normalized = _normalize_orientation_for_summary(
+            getattr(camada, "orientacao", None)
+        )
+        if normalized is None:
+            continue
+        total += 1
+        counts[normalized] += 1
+    return total, counts
+
+
+def _format_auto_name(total_layers: int, counts: Counter[int]) -> str:
+    base = f"L{total_layers}"
+    if not counts:
+        return base
+    priority = [45, 0, -45, 90]
+    ordered: list[int] = [angle for angle in priority if angle in counts]
+    others = sorted(angle for angle in counts if angle not in ordered)
+    ordered.extend(others)
+    suffix = "".join(
+        f"(P{counts[angle]}|{angle}\N{DEGREE SIGN})"
+        for angle in ordered
+    )
+    return f"{base}{suffix}"
+
+
+def _build_auto_name_from_layers(layers: Iterable[Camada]) -> str:
+    total, counts = _count_oriented_layers(layers)
+    return _format_auto_name(total, counts)
+
+
 def _load_icon_from_resources(
     resource_path: str, fallback_filename: str
 ) -> QIcon:
@@ -191,10 +227,12 @@ class MainWindow(QMainWindow):
         self._new_laminate_dialog: Optional[NewLaminateDialog] = None
         self._new_laminate_button_icon: Optional[QIcon] = None
         self._new_laminate_icon_warning_emitted = False
+        self._setting_new_laminate_name = False
         self._current_associated_cells: list[str] = []
         self._selection_column_index = StackingTableModel.COL_SELECT
         self._stacking_header_band: Optional[QWidget] = None
         self._band_labels: list[QLabel] = []
+        self._auto_rename_guard = False
         self._header_band_mapping: list[int] = [
             StackingTableModel.COL_NUMBER,
             StackingTableModel.COL_SELECT,
@@ -400,9 +438,23 @@ class MainWindow(QMainWindow):
         layout.setSpacing(12)
         layout.setContentsMargins(0, 0, 0, 0)
 
-        layout.addLayout(
-            self._combo_with_label("Nome:", ["LAM-1", "LAM-2"], "name")
+        name_combo_layout = self._combo_with_label(
+            "Nome:", ["LAM-1", "LAM-2"], "name"
         )
+        name_row = QHBoxLayout()
+        name_row.setSpacing(6)
+        self.auto_rename_checkbox = QCheckBox("Automatic Rename", self)
+        self.auto_rename_checkbox.setObjectName("chkAutomaticRename")
+        self.auto_rename_checkbox.setToolTip(
+            "Atualiza o nome e a cor automaticamente."
+        )
+        self.auto_rename_checkbox.setChecked(True)
+        self.auto_rename_checkbox.toggled.connect(
+            self._on_auto_rename_checkbox_toggled
+        )
+        name_row.addWidget(self.auto_rename_checkbox)
+        name_row.addLayout(name_combo_layout)
+        layout.addLayout(name_row)
         layout.addLayout(
             self._combo_with_label(
                 "Cor:", (str(i) for i in range(1, 151)), "color", editable=False
@@ -444,6 +496,259 @@ class MainWindow(QMainWindow):
         setattr(self, f"laminate_{attr_prefix}_combo", combo)
         return layout
 
+    # Automatic rename helpers --------------------------------------------------
+
+    def _color_token(self, value: object) -> str:
+        if isinstance(value, int):
+            return str(value)
+        text = str(value or "").strip()
+        if not text:
+            return str(DEFAULT_COLOR_INDEX)
+        return text.upper()
+
+    def _set_color_combo_value(self, laminate: Optional[Laminado]) -> None:
+        combo = getattr(self, "laminate_color_combo", None)
+        if not isinstance(combo, QComboBox) or laminate is None:
+            return
+        token = self._color_token(getattr(laminate, "color_index", DEFAULT_COLOR_INDEX))
+        combo.blockSignals(True)
+        idx = combo.findText(token)
+        if idx < 0:
+            combo.addItem(token)
+            idx = combo.findText(token)
+        combo.setCurrentIndex(idx if idx >= 0 else 0)
+        combo.blockSignals(False)
+
+    def _ensure_unique_laminate_color(self, laminate: Laminado) -> None:
+        if self._grid_model is None:
+            return
+        used = {
+            self._color_token(other.color_index)
+            for other in self._grid_model.laminados.values()
+            if other is not laminate
+        }
+        current = self._color_token(laminate.color_index)
+        if current and current not in used:
+            return
+        for idx in range(MIN_COLOR_INDEX, MAX_COLOR_INDEX + 1):
+            token = str(idx)
+            if token not in used:
+                laminate.color_index = idx
+                self._set_color_combo_value(laminate)
+                return
+        for _ in range(32):
+            token = f"#{secrets.token_hex(3).upper()}"
+            if token not in used:
+                laminate.color_index = token
+                self._set_color_combo_value(laminate)
+                return
+        logger.warning(
+            "Nao foi possivel atribuir uma cor unica ao laminado '%s'.",
+            laminate.nome,
+        )
+
+    def _generate_unique_laminate_name(
+        self, base_name: str, laminate: Laminado
+    ) -> str:
+        if self._grid_model is None:
+            return base_name
+        laminados = self._grid_model.laminados
+        candidate = base_name or laminate.nome
+        suffix = 1
+        while (
+            candidate in laminados
+            and laminados[candidate] is not laminate
+        ):
+            candidate = f"{base_name}_{suffix}"
+            suffix += 1
+        return candidate
+
+    def _rename_laminate(self, laminate: Laminado, new_name: str) -> None:
+        if self._grid_model is None:
+            return
+        old_name = laminate.nome
+        if not new_name or new_name == old_name:
+            return
+        laminados = self._grid_model.laminados
+        if (
+            new_name in laminados
+            and laminados[new_name] is not laminate
+        ):
+            return
+        updated = OrderedDict()
+        for name, lam in laminados.items():
+            if name == old_name:
+                updated[new_name] = lam
+            else:
+                updated[name] = lam
+        self._grid_model.laminados = updated
+        laminate.nome = new_name
+        for cell_id, mapped in list(self._grid_model.cell_to_laminate.items()):
+            if mapped == old_name:
+                self._grid_model.cell_to_laminate[cell_id] = new_name
+        binding = getattr(self, "_grid_binding", None)
+        if binding is not None:
+            if getattr(binding, "_current_laminate", None) == old_name:
+                binding._current_laminate = new_name  # type: ignore[attr-defined]
+            if hasattr(binding, "_build_cell_index"):
+                binding._laminates_by_cell = binding._build_cell_index()  # type: ignore[attr-defined]
+            for cell_id, mapped in self._grid_model.cell_to_laminate.items():
+                if mapped == new_name:
+                    binding._refresh_cell_item_label(cell_id)  # type: ignore[attr-defined]
+        combo = getattr(self, "laminate_name_combo", None)
+        if isinstance(combo, QComboBox):
+            combo.blockSignals(True)
+            idx = combo.findText(old_name)
+            if idx >= 0:
+                combo.setItemText(idx, new_name)
+                combo.setCurrentIndex(idx)
+            combo.blockSignals(False)
+        self._update_window_title()
+
+    def _apply_auto_rename_if_needed(
+        self, laminate: Optional[Laminado], *, force: bool = False
+    ) -> None:
+        if (
+            laminate is None
+            or not getattr(laminate, "auto_rename_enabled", False)
+            or self._grid_model is None
+        ):
+            return
+        if self._auto_rename_guard:
+            return
+        self._auto_rename_guard = True
+        try:
+            auto_name = _build_auto_name_from_layers(laminate.camadas)
+            auto_name = self._generate_unique_laminate_name(auto_name, laminate)
+            changed = False
+            if force or auto_name != laminate.nome:
+                before = laminate.nome
+                self._rename_laminate(laminate, auto_name)
+                if laminate.nome != before:
+                    changed = True
+            before_color = self._color_token(laminate.color_index)
+            self._ensure_unique_laminate_color(laminate)
+            if self._color_token(laminate.color_index) != before_color:
+                changed = True
+            self._set_color_combo_value(laminate)
+            self._update_auto_rename_controls(laminate)
+            if changed:
+                self._mark_dirty()
+        finally:
+            self._auto_rename_guard = False
+
+    def _update_auto_rename_controls(
+        self, laminate: Optional[Laminado]
+    ) -> None:
+        checkbox = getattr(self, "auto_rename_checkbox", None)
+        color_combo = getattr(self, "laminate_color_combo", None)
+        name_combo = getattr(self, "laminate_name_combo", None)
+        enabled = bool(laminate and getattr(laminate, "auto_rename_enabled", False))
+        if isinstance(checkbox, QCheckBox):
+            checkbox.blockSignals(True)
+            checkbox.setChecked(enabled)
+            checkbox.blockSignals(False)
+        if isinstance(name_combo, QComboBox) and name_combo.isEditable():
+            line_edit = name_combo.lineEdit()
+            if line_edit is not None:
+                line_edit.setReadOnly(enabled)
+        if isinstance(color_combo, QComboBox):
+            color_combo.setEnabled(not enabled)
+
+    def _on_auto_rename_checkbox_toggled(self, checked: bool) -> None:
+        laminate = self._current_laminate_instance()
+        if laminate is None:
+            return
+        laminate.auto_rename_enabled = checked
+        self._update_auto_rename_controls(laminate)
+        if checked:
+            self._apply_auto_rename_if_needed(laminate, force=True)
+        self._mark_dirty()
+
+    def _on_binding_laminate_changed(
+        self, laminate_name: Optional[str]
+    ) -> None:
+        laminate: Optional[Laminado] = None
+        if self._grid_model is not None and laminate_name:
+            laminate = self._grid_model.laminados.get(laminate_name)
+        self._update_auto_rename_controls(laminate)
+        self._set_color_combo_value(laminate)
+        self._apply_auto_rename_if_needed(laminate)
+
+    def _on_binding_layers_modified(
+        self, laminate_name: Optional[str]
+    ) -> None:
+        if self._grid_model is None:
+            return
+        if laminate_name:
+            laminate = self._grid_model.laminados.get(laminate_name)
+        else:
+            laminate = self._current_laminate_instance()
+        self._apply_auto_rename_if_needed(laminate)
+
+    def _sync_all_auto_renamed_laminates(self) -> None:
+        if self._grid_model is None:
+            return
+        for laminate in self._grid_model.laminados.values():
+            if getattr(laminate, "auto_rename_enabled", False):
+                self._apply_auto_rename_if_needed(laminate, force=True)
+
+    def _on_new_laminate_auto_rename_toggled(self, checked: bool) -> None:
+        name_edit = getattr(self, "new_laminate_name_edit", None)
+        color_combo = getattr(self, "new_laminate_color_combo", None)
+        if isinstance(name_edit, QLineEdit):
+            name_edit.setReadOnly(checked)
+        if isinstance(color_combo, QComboBox):
+            color_combo.setEnabled(not checked)
+        if checked:
+            self._update_new_laminate_auto_name()
+
+    def _collect_new_laminate_layers_for_auto_name(self) -> list[Camada]:
+        layers: list[Camada] = []
+        table = getattr(self, "new_laminate_stacking_table", None)
+        if not isinstance(table, QTableWidget):
+            return layers
+        for row in range(table.rowCount()):
+            orientation_item = table.item(row, 1)
+            orientation_text = orientation_item.text() if orientation_item else ""
+            orientacao = None
+            if orientation_text.strip():
+                try:
+                    orientacao = normalize_angle(orientation_text)
+                except ValueError:
+                    orientacao = None
+            material_item = table.item(row, 0)
+            material = material_item.text() if material_item else ""
+            layers.append(
+                Camada(
+                    idx=row,
+                    material=material,
+                    orientacao=orientacao,
+                    ativo=True,
+                    simetria=False,
+                )
+            )
+        return layers
+
+    def _update_new_laminate_auto_name(self) -> None:
+        checkbox = getattr(self, "new_laminate_auto_rename_checkbox", None)
+        name_edit = getattr(self, "new_laminate_name_edit", None)
+        if (
+            not isinstance(checkbox, QCheckBox)
+            or not checkbox.isChecked()
+            or not isinstance(name_edit, QLineEdit)
+        ):
+            return
+        if self._setting_new_laminate_name:
+            return
+        layers = self._collect_new_laminate_layers_for_auto_name()
+        auto_name = _build_auto_name_from_layers(layers)
+        self._setting_new_laminate_name = True
+        try:
+            name_edit.setText(auto_name)
+        finally:
+            self._setting_new_laminate_name = False
+
     def _attach_new_laminate_button(self, container: QHBoxLayout) -> None:
         button = QPushButton("Novo Laminado", self)
         button.setObjectName("btnNovoLaminado")
@@ -484,7 +789,7 @@ class MainWindow(QMainWindow):
         return [str(idx) for idx in range(MIN_COLOR_INDEX, MAX_COLOR_INDEX + 1)]
 
     def _laminate_type_options(self) -> list[str]:
-        defaults = ["Core", "Skin", "Custom"]
+        defaults = ["SS", "Core", "Skin", "Custom"]
         if not self._grid_model or not self._grid_model.laminados:
             return defaults
         ordered: list[str] = []
@@ -764,10 +1069,10 @@ class MainWindow(QMainWindow):
             QStyle.SP_FileDialogDetailedView,
         )
         self.btn_renumber_sequence = make_button(
-            None,
-            "Renumerar sequência (Seq.1, Seq.2...)",
+            ":/icons/renumber_sequence.svg",
+            "Renumerar sequ\u00eancia (Seq.1, Seq.2...)",
             self.on_renumber_sequences,
-            "Renumerar sequência das camadas",
+            "Renumerar sequ\u00eancia das camadas",
             QStyle.SP_BrowserReload,
             tool_button_style=Qt.ToolButtonIconOnly,
         )
@@ -1301,8 +1606,20 @@ class MainWindow(QMainWindow):
         name_label = QLabel("Name:", view)
         self.new_laminate_name_edit = QLineEdit(view)
         self.new_laminate_name_edit.setPlaceholderText("Ex.: Web-RIB-26")
-        form_row.addWidget(name_label)
-        form_row.addWidget(self.new_laminate_name_edit, stretch=1)
+        self.new_laminate_auto_rename_checkbox = QCheckBox(
+            "Automatic Rename", view
+        )
+        self.new_laminate_auto_rename_checkbox.setChecked(True)
+        self.new_laminate_auto_rename_checkbox.toggled.connect(
+            self._on_new_laminate_auto_rename_toggled
+        )
+        self._on_new_laminate_auto_rename_toggled(True)
+        name_container = QHBoxLayout()
+        name_container.setSpacing(6)
+        name_container.addWidget(self.new_laminate_auto_rename_checkbox)
+        name_container.addWidget(name_label)
+        name_container.addWidget(self.new_laminate_name_edit, stretch=1)
+        form_row.addLayout(name_container, stretch=1)
 
         color_label = QLabel("ColorIdx:", view)
         color_layout = QHBoxLayout()
@@ -1343,6 +1660,9 @@ class MainWindow(QMainWindow):
         )
         self.new_laminate_stacking_table.setSelectionMode(
             QTableWidget.SingleSelection
+        )
+        self.new_laminate_stacking_table.itemChanged.connect(
+            lambda *_: self._update_new_laminate_auto_name()
         )
         layout.addWidget(self.new_laminate_stacking_table, stretch=1)
 
@@ -1413,11 +1733,14 @@ class MainWindow(QMainWindow):
                 default_idx if default_idx >= 0 else 0
             )
         self.new_laminate_type_combo.setCurrentIndex(0)
+        if hasattr(self, "new_laminate_auto_rename_checkbox"):
+            self.new_laminate_auto_rename_checkbox.setChecked(True)
 
         table = self.new_laminate_stacking_table
         table.setRowCount(0)
         self._new_laminate_add_layer()
         table.setCurrentCell(0, 0)
+        self._update_new_laminate_auto_name()
 
     def _new_laminate_add_layer(self) -> None:
         table = self.new_laminate_stacking_table
@@ -1425,6 +1748,7 @@ class MainWindow(QMainWindow):
         table.insertRow(row)
         self._apply_layer_row(table, row, ("", "0", True, False))
         table.setCurrentCell(row, 0)
+        self._update_new_laminate_auto_name()
 
     def _new_laminate_remove_layer(self) -> None:
         table = self.new_laminate_stacking_table
@@ -1436,6 +1760,7 @@ class MainWindow(QMainWindow):
         table.removeRow(current)
         if table.rowCount() == 0:
             self._new_laminate_add_layer()
+        self._update_new_laminate_auto_name()
 
     def _new_laminate_move_layer(self, direction: int) -> None:
         table = self.new_laminate_stacking_table
@@ -1450,6 +1775,7 @@ class MainWindow(QMainWindow):
         self._apply_layer_row(table, current, target_data)
         self._apply_layer_row(table, target, current_data)
         table.setCurrentCell(target, 0)
+        self._update_new_laminate_auto_name()
 
     def _collect_layer_row(
         self, table: QTableWidget, row: int
@@ -1568,6 +1894,12 @@ class MainWindow(QMainWindow):
             celulas=[],
             camadas=camadas,
         )
+        auto_checkbox = getattr(
+            self, "new_laminate_auto_rename_checkbox", None
+        )
+        laminado.auto_rename_enabled = bool(
+            isinstance(auto_checkbox, QCheckBox) and auto_checkbox.isChecked()
+        )
 
         self._grid_model.laminados[name] = laminado
         self._refresh_after_new_laminate(name)
@@ -1584,7 +1916,10 @@ class MainWindow(QMainWindow):
         binding = getattr(self, "_grid_binding", None)
         if binding is not None:
             self._configure_stacking_table(binding)
+        self._sync_all_auto_renamed_laminates()
         bind_cells_to_ui(self._grid_model, self)
+        current_name = getattr(binding, "_current_laminate", None) if binding else None
+        self._on_binding_laminate_changed(current_name)
         if hasattr(self, "laminate_name_combo"):
             idx = self.laminate_name_combo.findText(laminate_name)
             if idx >= 0:
@@ -2370,7 +2705,10 @@ class MainWindow(QMainWindow):
         binding = getattr(self, "_grid_binding", None)
         if binding is not None:
             self._configure_stacking_table(binding)
+        self._sync_all_auto_renamed_laminates()
         bind_cells_to_ui(self._grid_model, self)
+        current_name = getattr(binding, "_current_laminate", None) if binding else None
+        self._on_binding_laminate_changed(current_name)
         self._apply_ui_state(self.project_manager.get_ui_state())
         self.project_manager.capture_from_model(
             self._grid_model, self._collect_ui_state()
@@ -2411,7 +2749,10 @@ class MainWindow(QMainWindow):
         binding = getattr(self, "_grid_binding", None)
         if binding is not None:
             self._configure_stacking_table(binding)
+        self._sync_all_auto_renamed_laminates()
         bind_cells_to_ui(self._grid_model, self)
+        current_name = getattr(binding, "_current_laminate", None) if binding else None
+        self._on_binding_laminate_changed(current_name)
         self._apply_ui_state(self.project_manager.get_ui_state())
         self.project_manager.capture_from_model(
             self._grid_model, self._collect_ui_state()

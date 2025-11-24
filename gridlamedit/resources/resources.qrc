@@ -6,5 +6,6 @@
     <file>icons/undo.svg</file>
     <file>icons/redo.svg</file>
     <file>icons/stacking_summary.svg</file>
+    <file>icons/renumber_sequence.svg</file>
   </qresource>
 </RCC>

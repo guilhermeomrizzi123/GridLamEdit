@@ -7,6 +7,7 @@ from typing import Iterable, Optional, Sequence
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QDialog,
     QDialogButtonBox,
@@ -44,14 +45,28 @@ class NewLaminateDialog(QDialog):
         self.setObjectName("dlgNewLaminate")
         self._grid_model = grid_model
         self._color_options = [str(option) for option in color_options]
-        self._type_options = [str(option) for option in type_options]
+        self._type_options = self._prepare_type_options(type_options)
         self._cell_options = [str(option) for option in cell_options]
         if not self._color_options:
             self._color_options = [str(index) for index in range(1, 151)]
         if not self._type_options:
-            self._type_options = ["Core", "Skin", "Custom"]
+            self._type_options = ["SS", "Core", "Skin", "Custom"]
         self.created_laminate = None
         self._build_ui()
+
+    def _prepare_type_options(
+        self, source: Optional[Sequence[str]]
+    ) -> list[str]:
+        ordered = ["SS"]
+        for option in source or []:
+            text = str(option).strip()
+            if not text:
+                continue
+            if text.upper() == "SS":
+                continue
+            if text not in ordered:
+                ordered.append(text)
+        return ordered
 
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
@@ -69,6 +84,15 @@ class NewLaminateDialog(QDialog):
         self.edt_nome.setClearButtonEnabled(True)
         form_layout.addRow("Nome:", self.edt_nome)
 
+        self.chk_auto_rename = QCheckBox("Automatic Rename", self)
+        self.chk_auto_rename.setObjectName("chkAutomaticRenameNewLaminate")
+        self.chk_auto_rename.setChecked(True)
+        self.chk_auto_rename.setToolTip(
+            "Atualiza o nome automaticamente conforme o stacking."
+        )
+        self.chk_auto_rename.toggled.connect(self._handle_auto_rename_toggle)
+        form_layout.addRow("", self.chk_auto_rename)
+
         self.cmb_cor = QComboBox(self)
         self.cmb_cor.setObjectName("cmbCor")
         self.cmb_cor.addItems(self._color_options or [str(index) for index in range(1, 151)])
@@ -76,7 +100,7 @@ class NewLaminateDialog(QDialog):
 
         self.cmb_tipo = QComboBox(self)
         self.cmb_tipo.setObjectName("cmbTipo")
-        self.cmb_tipo.addItems(self._type_options or ["Core", "Skin", "Custom"])
+        self.cmb_tipo.addItems(self._type_options or ["SS", "Core", "Skin", "Custom"])
         self.cmb_tipo.setEditable(False)
         form_layout.addRow("Tipo:", self.cmb_tipo)
 
@@ -99,6 +123,7 @@ class NewLaminateDialog(QDialog):
         self.button_box.rejected.connect(self.reject)
         layout.addWidget(self.button_box)
 
+        self._handle_auto_rename_toggle(True)
         self.edt_nome.setFocus()
 
     def refresh_options(
@@ -114,9 +139,9 @@ class NewLaminateDialog(QDialog):
             self.cmb_cor.clear()
             self.cmb_cor.addItems(self._color_options)
         if type_options is not None:
-            self._type_options = [str(option) for option in type_options]
+            self._type_options = self._prepare_type_options(type_options)
             self.cmb_tipo.clear()
-            self.cmb_tipo.addItems(self._type_options or ["Core", "Skin", "Custom"])
+            self.cmb_tipo.addItems(self._type_options or ["SS", "Core", "Skin", "Custom"])
         if cell_options is not None:
             self._cell_options = [str(option) for option in cell_options]
             self._populate_cells()
@@ -130,6 +155,8 @@ class NewLaminateDialog(QDialog):
             self.cmb_tipo.setCurrentIndex(0)
         if self.cmb_celula.count():
             self.cmb_celula.setCurrentIndex(0)
+        if hasattr(self, "chk_auto_rename"):
+            self.chk_auto_rename.setChecked(True)
         self.created_laminate = None
 
     def set_grid_model(self, grid_model: GridModel) -> None:
@@ -193,5 +220,12 @@ class NewLaminateDialog(QDialog):
             )
             return
 
+        laminado.auto_rename_enabled = bool(self.chk_auto_rename.isChecked())
         self.created_laminate = laminado
         self.accept()
+
+    def _handle_auto_rename_toggle(self, checked: bool) -> None:
+        self.edt_nome.setReadOnly(checked)
+        self.cmb_cor.setEnabled(not checked)
+        if checked and not self.edt_nome.text().strip():
+            self.edt_nome.setText("L0")

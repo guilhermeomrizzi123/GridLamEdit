@@ -16,6 +16,7 @@ from gridlamedit.io.spreadsheet import (
     Laminado,
     PLY_TYPE_OPTIONS,
     normalize_color_index,
+    normalize_hex_color,
 )
 
 logger = logging.getLogger(__name__)
@@ -24,7 +25,23 @@ logger = logging.getLogger(__name__)
 def _serialize_model(model: GridModel) -> dict:
     laminates_data: list[dict] = []
     for laminate in model.laminados.values():
-        color_index = int(laminate.color_index or DEFAULT_COLOR_INDEX)
+        color_value = getattr(laminate, "color_index", DEFAULT_COLOR_INDEX)
+        color_index = DEFAULT_COLOR_INDEX
+        color_hex: Optional[str] = None
+        if isinstance(color_value, str):
+            normalized = normalize_hex_color(color_value)
+            if normalized:
+                color_hex = normalized
+            else:
+                try:
+                    color_index = int(float(color_value))
+                except (TypeError, ValueError):
+                    color_index = DEFAULT_COLOR_INDEX
+        else:
+            try:
+                color_index = int(color_value or DEFAULT_COLOR_INDEX)
+            except (TypeError, ValueError):
+                color_index = DEFAULT_COLOR_INDEX
         laminate_dict = {
             "nome": laminate.nome,
             "color_index": color_index,
@@ -45,7 +62,12 @@ def _serialize_model(model: GridModel) -> dict:
                 }
                 for layer in laminate.camadas
             ],
+            "auto_rename_enabled": bool(
+                getattr(laminate, "auto_rename_enabled", False)
+            ),
         }
+        if color_hex:
+            laminate_dict["color_hex"] = color_hex
         laminates_data.append(laminate_dict)
 
     return {
@@ -66,29 +88,35 @@ def _deserialize_model(data: dict) -> GridModel:
     compat_warnings: list[str] = []
     for lam_data in data.get("laminados", []):
         lam_name = str(lam_data.get("nome", ""))
-        raw_color_idx = lam_data.get("color_index", None)
-        color_index = DEFAULT_COLOR_INDEX
-        if raw_color_idx is None:
-            legacy_hex = lam_data.get("cor_hex")
-            if legacy_hex:
-                message = (
-                    f"Laminado '{lam_name or '(sem nome)'}' traz cor hexadecimal '{legacy_hex}'; "
-                    f"convertendo para indice {DEFAULT_COLOR_INDEX}."
-                )
-                logger.warning(message)
-                compat_warnings.append(message)
+        color_value: int | str = DEFAULT_COLOR_INDEX
+        raw_hex = lam_data.get("color_hex")
+        normalized_hex = normalize_hex_color(raw_hex) if raw_hex else None
+        if normalized_hex:
+            color_value = normalized_hex
         else:
-            color_index = normalize_color_index(raw_color_idx, DEFAULT_COLOR_INDEX)
-            try:
-                parsed_value = int(float(raw_color_idx))
-            except (TypeError, ValueError):
-                parsed_value = None
-            if parsed_value is None or parsed_value != color_index:
-                message = (
-                    f"Laminado '{lam_name or '(sem nome)'}' possui indice de cor invalido "
-                    f"'{raw_color_idx}'; usando {color_index}."
-                )
-                compat_warnings.append(message)
+            raw_color_idx = lam_data.get("color_index", None)
+            if raw_color_idx is None:
+                legacy_hex = lam_data.get("cor_hex")
+                if legacy_hex:
+                    message = (
+                        f"Laminado '{lam_name or '(sem nome)'}' traz cor hexadecimal '{legacy_hex}'; "
+                        f"convertendo para indice {DEFAULT_COLOR_INDEX}."
+                    )
+                    logger.warning(message)
+                    compat_warnings.append(message)
+            else:
+                color_index = normalize_color_index(raw_color_idx, DEFAULT_COLOR_INDEX)
+                color_value = color_index
+                try:
+                    parsed_value = int(float(raw_color_idx))
+                except (TypeError, ValueError):
+                    parsed_value = None
+                if parsed_value is None or parsed_value != color_index:
+                    message = (
+                        f"Laminado '{lam_name or '(sem nome)'}' possui indice de cor invalido "
+                        f"'{raw_color_idx}'; usando {color_index}."
+                    )
+                    compat_warnings.append(message)
 
         layers: list[Camada] = []
         for index, layer in enumerate(lam_data.get("camadas", [])):
@@ -126,9 +154,12 @@ def _deserialize_model(data: dict) -> GridModel:
         laminate = Laminado(
             nome=lam_name,
             tipo=str(lam_data.get("tipo", "")),
-            color_index=color_index,
+            color_index=color_value,
             celulas=list(lam_data.get("celulas", [])),
             camadas=layers,
+            auto_rename_enabled=bool(
+                lam_data.get("auto_rename_enabled", False)
+            ),
         )
         laminates[laminate.nome] = laminate
 

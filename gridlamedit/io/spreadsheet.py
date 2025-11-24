@@ -71,6 +71,7 @@ DEFAULT_PLY_TYPE = PLY_TYPE_OPTIONS[0]
 DEFAULT_COLOR_INDEX = 1
 MIN_COLOR_INDEX = 1
 MAX_COLOR_INDEX = 150
+_HEX_COLOR_PATTERN = re.compile(r"#?[0-9a-fA-F]{6}")
 
 
 def _normalize_ply_type_token(value: object) -> str:
@@ -312,9 +313,10 @@ class Laminado:
 
     nome: str
     tipo: str
-    color_index: int = DEFAULT_COLOR_INDEX
+    color_index: int | str = DEFAULT_COLOR_INDEX
     celulas: list[str] = field(default_factory=list)
     camadas: list[Camada] = field(default_factory=list)
+    auto_rename_enabled: bool = False
 
 
 @dataclass
@@ -463,6 +465,21 @@ def normalize_color_index(value: object, default: int = DEFAULT_COLOR_INDEX) -> 
     return default
 
 
+def normalize_hex_color(value: object) -> Optional[str]:
+    """Retorna cor hexadecimal no formato #RRGGBB se aplicável."""
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    candidate = text.replace("#", "").strip()
+    if not _HEX_COLOR_PATTERN.fullmatch(candidate):
+        return None
+    return f"#{candidate.upper()}"
+
+
 def load_grid_spreadsheet(path: str) -> GridModel:
     """Carrega a planilha do Grid Design em um GridModel."""
     file_path = Path(path)
@@ -550,6 +567,10 @@ def save_grid_spreadsheet(path: str, model: GridModel) -> None:
         rows.append(["Stacking"])
 
         for camada in laminado.camadas:
+            material_text = (camada.material or "").strip()
+            has_orientation = camada.orientacao is not None
+            if not material_text and not has_orientation:
+                continue
             orientation_value = (
                 camada.orientacao if camada.orientacao is not None else ""
             )
@@ -1496,7 +1517,12 @@ def _parse_configuration_section(
                 break
 
             if normalized in normalized_color_aliases:
-                color_index = normalize_color_index(row.iloc[1] if len(row) > 1 else None)
+                color_value = row.iloc[1] if len(row) > 1 else None
+                hex_color = normalize_hex_color(color_value)
+                if hex_color:
+                    color_index = hex_color
+                else:
+                    color_index = normalize_color_index(color_value)
                 idx += 1
                 continue
 
@@ -1843,6 +1869,14 @@ class _GridUiBinding:
         finally:
             self._updating = False
             self._update_layers_count()
+            callback = getattr(self.ui, "_on_binding_laminate_changed", None)
+            if callable(callback):
+                try:
+                    callback(laminado.nome)
+                except Exception:  # pragma: no cover - defensive
+                    logger.debug(
+                        "Falha ao notificar troca de laminado ativo.", exc_info=True
+                    )
 
     def _cells_for_laminate(self, laminate_name: str) -> list[str]:
         mapped = [
@@ -1945,14 +1979,25 @@ class _GridUiBinding:
     def _update_layers_count(self, *args) -> None:
         label = getattr(self.ui, "layers_count_label", None)
         if label is not None and hasattr(label, "setText"):
+            oriented_layers = sum(
+                1 for camada in self.stacking_model.layers() if camada.orientacao is not None
+            )
             label.setText(
-                f"Quantidade Total de Camadas: {self.stacking_model.rowCount()}"
+                f"Quantidade Total de Camadas: {oriented_layers}"
             )
 
     def _on_layers_modified(self, _layers: list[Camada]) -> None:
         if hasattr(self.ui, "_mark_dirty"):
             self.ui._mark_dirty()
         self._update_layers_count()
+        callback = getattr(self.ui, "_on_binding_layers_modified", None)
+        if callable(callback):
+            try:
+                callback(self._current_laminate)
+            except Exception:  # pragma: no cover - defensive
+                logger.debug(
+                    "Falha ao notificar modificacao de camadas.", exc_info=True
+                )
 
     def add_layer(self, after_row: Optional[int] = None) -> bool:
         if not self._current_laminate:
