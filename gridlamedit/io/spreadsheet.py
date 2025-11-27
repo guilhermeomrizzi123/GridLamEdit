@@ -673,8 +673,7 @@ class StackingTableModel(QAbstractTableModel):
         "Material",
         "Orientacao",
     ]
-    _SEQUENCE_PATTERN = re.compile(r"^Seq\.(\d+)$")
-    _PLY_PATTERN = re.compile(r"^Ply\.(\d+)$")
+    _LABEL_PATTERN = re.compile(r"^(?P<prefix>[A-Za-z][A-Za-z0-9_-]*)\.?(?P<number>\d+)$")
     headers = HEADERS
 
     def __init__(
@@ -708,48 +707,66 @@ class StackingTableModel(QAbstractTableModel):
     def _should_record_undo(self) -> bool:
         return self._undo_stack is not None and self._undo_suppressed == 0
 
+    def _prefix_and_separator(self, attr: str, default_prefix: str) -> tuple[str, str]:
+        for camada in self._camadas:
+            text = str(getattr(camada, attr, "") or "").strip()
+            match = self._LABEL_PATTERN.fullmatch(text)
+            if match:
+                prefix = match.group("prefix") or default_prefix
+                separator = "." if "." in text else ""
+                return prefix, separator
+        return default_prefix, "."
+
     def _default_sequence_label(self, row: int) -> str:
-        return f"Seq.{row + 1}"
+        prefix, separator = self._prefix_and_separator("sequence", "Seq")
+        return f"{prefix}{separator}{row + 1}"
 
     def _default_ply_label(self, row: int) -> str:
-        return f"Ply.{row + 1}"
+        prefix, separator = self._prefix_and_separator("ply_label", "Ply")
+        return f"{prefix}{separator}{row + 1}"
 
     def _normalize_sequence_input(self, value: object, row: int) -> Optional[str]:
         text = str(value or "").strip()
         if not text:
             return self._default_sequence_label(row)
-        match = self._SEQUENCE_PATTERN.fullmatch(text)
+        match = self._LABEL_PATTERN.fullmatch(text)
         if match is None:
             return None
+        prefix = match.group("prefix") or "Seq"
         try:
-            number = int(match.group(1))
+            number = int(match.group("number"))
         except ValueError:
             return None
         if number <= 0:
             return None
-        return f"Seq.{number}"
+        separator = "." if "." in text else ""
+        return f"{prefix}{separator}{number}"
 
     def _normalize_ply_input(self, value: object, row: int) -> Optional[str]:
         text = str(value or "").strip()
         if not text:
             return self._default_ply_label(row)
-        match = self._PLY_PATTERN.fullmatch(text)
+        match = self._LABEL_PATTERN.fullmatch(text)
         if match is None:
             return None
+        prefix = match.group("prefix") or "Ply"
         try:
-            number = int(match.group(1))
+            number = int(match.group("number"))
         except ValueError:
             return None
         if number <= 0:
             return None
-        return f"Ply.{number}"
+        separator = "." if "." in text else ""
+        return f"{prefix}{separator}{number}"
 
     def _force_sequence_sync(self) -> None:
         if not self._camadas:
             return
         changed_rows: list[int] = []
         for idx, camada in enumerate(self._camadas):
-            expected = self._default_sequence_label(idx)
+            current = getattr(camada, "sequence", "")
+            normalized = self._normalize_sequence_input(current, idx)
+            expected = normalized if normalized is not None else self._default_sequence_label(idx)
             if camada.sequence != expected:
                 camada.sequence = expected
                 changed_rows.append(idx)

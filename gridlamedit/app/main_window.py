@@ -784,6 +784,7 @@ class MainWindow(QMainWindow):
             laminate = self._grid_model.laminados.get(name)
             if laminate is not None:
                 self._apply_auto_rename_if_needed(laminate, force=True)
+        self._refresh_cells_list_labels()
         self.update_stacking_summary_ui()
         self._mark_dirty()
 

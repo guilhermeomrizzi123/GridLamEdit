@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 from collections import Counter, OrderedDict
 import math
+import re
 from dataclasses import dataclass
 from typing import Callable, Iterable, Optional
 
@@ -48,6 +49,9 @@ class VirtualStackingCell:
     laminate: Laminado
 
 
+_PREFIX_NUMBER_PATTERN = re.compile(r"^([^.]*?)[.]?(\d+)$")
+
+
 class _InsertLayerCommand(QtGui.QUndoCommand):
     """Undoable insertion of new layers for a laminate."""
 
@@ -56,11 +60,15 @@ class _InsertLayerCommand(QtGui.QUndoCommand):
         model: StackingTableModel,
         laminate: Laminado,
         positions: list[int],
+        default_material: str = "",
+        default_orientation: float = 0.0,
     ) -> None:
         super().__init__("Inserir camada")
         self._model = model
         self._laminate = laminate
         self._positions = positions
+        self._default_material = default_material
+        self._default_orientation = default_orientation
         self._inserted: list[int] = []
 
     def redo(self) -> None:
@@ -71,8 +79,8 @@ class _InsertLayerCommand(QtGui.QUndoCommand):
                 target_pos,
                 Camada(
                     idx=0,
-                    material="",
-                    orientacao=None,
+                    material=self._default_material,
+                    orientacao=self._default_orientation,
                     ativo=True,
                     simetria=False,
                     ply_type=DEFAULT_PLY_TYPE,
@@ -323,6 +331,7 @@ class VirtualStackingModel(QtCore.QAbstractTableModel):
         row: int,
         laminate: Optional[Laminado] = None,
     ) -> list[Camada]:
+        default_material = str(self._most_used_material_provider() or "").strip()
         layers = stacking_model.layers()
         if row >= len(layers):
             missing = row - len(layers) + 1
@@ -331,8 +340,8 @@ class VirtualStackingModel(QtCore.QAbstractTableModel):
                     len(layers),
                     Camada(
                         idx=0,
-                        material="",
-                        orientacao=None,
+                        material=default_material,
+                        orientacao=0.0,
                         ativo=True,
                         simetria=False,
                         ply_type=DEFAULT_PLY_TYPE,
@@ -523,6 +532,7 @@ class VirtualStackingWindow(QtWidgets.QDialog):
 
     def _build_ui(self) -> None:
         toolbar_layout = self._build_toolbar()
+        prefix_layout = self._build_prefix_toolbar()
 
         self.model = VirtualStackingModel(
             self,
@@ -558,6 +568,8 @@ class VirtualStackingWindow(QtWidgets.QDialog):
         main_layout = QtWidgets.QVBoxLayout(self)
         if toolbar_layout is not None:
             main_layout.addLayout(toolbar_layout)
+        if prefix_layout is not None:
+            main_layout.addLayout(prefix_layout)
         main_layout.addWidget(self.table)
         if self.summary_table is not None:
             main_layout.addWidget(self.summary_table)
@@ -565,6 +577,26 @@ class VirtualStackingWindow(QtWidgets.QDialog):
         self.undo_stack.canUndoChanged.connect(self._update_undo_buttons)
         self.undo_stack.canRedoChanged.connect(self._update_undo_buttons)
         self.undo_stack.indexChanged.connect(lambda _idx: self._on_undo_stack_changed())
+
+    def _build_prefix_toolbar(self) -> Optional[QtWidgets.QHBoxLayout]:
+        layout = QtWidgets.QHBoxLayout()
+        layout.setContentsMargins(4, 0, 4, 4)
+        layout.setSpacing(8)
+
+        seq_button = QtWidgets.QToolButton(self)
+        seq_button.setText("Renomear Sequence")
+        seq_button.setToolTip("Renomear prefixo de todas as sequencias")
+        seq_button.clicked.connect(self._rename_all_sequences)
+        layout.addWidget(seq_button)
+
+        ply_button = QtWidgets.QToolButton(self)
+        ply_button.setText("Renomear Ply")
+        ply_button.setToolTip("Renomear prefixo de todos os plies")
+        ply_button.clicked.connect(self._rename_all_ply)
+        layout.addWidget(ply_button)
+
+        layout.addStretch()
+        return layout
 
     def _apply_orientation_delegate(self) -> None:
         material_delegate = MaterialComboDelegate(
@@ -787,6 +819,40 @@ class VirtualStackingWindow(QtWidgets.QDialog):
             except Exception:
                 pass
 
+    def _extract_label_prefix(self, label: str, default: str) -> str:
+        text = str(label or "").strip()
+        match = _PREFIX_NUMBER_PATTERN.match(text)
+        if match:
+            prefix = (match.group(1) or "").strip()
+            return prefix or default
+        return default
+
+    def _extract_label_number(self, label: str, fallback: int) -> int:
+        text = str(label or "").strip()
+        match = _PREFIX_NUMBER_PATTERN.match(text)
+        if match:
+            try:
+                return int(match.group(2))
+            except ValueError:
+                return fallback
+        return fallback
+
+    def _current_prefix_from_project(self, attr: str, default: str) -> str:
+        if self._project is None:
+            return default
+        for laminate in getattr(self._project, "laminados", {}).values():
+            for layer in getattr(laminate, "camadas", []):
+                label = getattr(layer, attr, "")
+                if label:
+                    return self._extract_label_prefix(label, default)
+        return default
+
+    def _current_sequence_prefix(self) -> str:
+        return self._current_prefix_from_project("sequence", "Seq")
+
+    def _current_ply_prefix(self) -> str:
+        return self._current_prefix_from_project("ply_label", "Ply")
+
     def _most_used_material(self) -> Optional[str]:
         """Retorna o material mais utilizado em todos os laminados carregados."""
         if self._project is None:
@@ -803,6 +869,91 @@ class VirtualStackingWindow(QtWidgets.QDialog):
             return None
         most_common = counts.most_common(1)
         return most_common[0][0] if most_common else None
+
+    def _prompt_prefix_dialog(self, title: str, current_prefix: str) -> Optional[str]:
+        dialog = QtWidgets.QDialog(self)
+        dialog.setWindowTitle(title)
+        layout = QtWidgets.QVBoxLayout(dialog)
+        layout.addWidget(QtWidgets.QLabel(f"Prefixo atual: {current_prefix}", dialog))
+        input_box = QtWidgets.QLineEdit(dialog)
+        input_box.setText(current_prefix)
+        layout.addWidget(input_box)
+        buttons = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel,
+            parent=dialog,
+        )
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        input_box.selectAll()
+        input_box.setFocus()
+        if dialog.exec() == QtWidgets.QDialog.Accepted:
+            return input_box.text().strip()
+        return None
+
+    def _apply_global_prefix_change(
+        self,
+        target_attr: str,
+        column: int,
+        new_prefix: str,
+    ) -> list[str]:
+        if self._project is None:
+            return []
+        prefix = new_prefix.strip().rstrip(".")
+        if not prefix:
+            return []
+        changed: list[str] = []
+        for laminate in getattr(self._project, "laminados", {}).values():
+            model = self._stacking_model_for(laminate)
+            if model is None:
+                continue
+            layers = model.layers()
+            updated = False
+            for idx, layer in enumerate(layers):
+                current_label = getattr(layer, target_attr, "")
+                number = self._extract_label_number(current_label, idx + 1)
+                target_label = f"{prefix}{number}"
+                if str(current_label or "") == target_label:
+                    continue
+                if model.apply_field_value(idx, column, target_label):
+                    updated = True
+                else:
+                    setattr(layer, target_attr, target_label)
+                    updated = True
+            if updated:
+                laminate.camadas = model.layers()
+                changed.append(laminate.nome)
+        if changed:
+            self._notify_changes(changed)
+        return changed
+
+    def _rename_all_sequences(self) -> None:
+        current_prefix = self._current_sequence_prefix()
+        new_prefix = self._prompt_prefix_dialog("Renomear Sequence", current_prefix)
+        if new_prefix is None:
+            return
+        cleaned = new_prefix.strip().rstrip(".")
+        if not cleaned or cleaned == current_prefix.rstrip("."):
+            return
+        self._apply_global_prefix_change(
+            "sequence",
+            StackingTableModel.COL_SEQUENCE,
+            cleaned,
+        )
+
+    def _rename_all_ply(self) -> None:
+        current_prefix = self._current_ply_prefix()
+        new_prefix = self._prompt_prefix_dialog("Renomear Ply", current_prefix)
+        if new_prefix is None:
+            return
+        cleaned = new_prefix.strip().rstrip(".")
+        if not cleaned or cleaned == current_prefix.rstrip("."):
+            return
+        self._apply_global_prefix_change(
+            "ply_label",
+            StackingTableModel.COL_PLY,
+            cleaned,
+        )
 
     def _auto_rename_if_enabled(self, laminate: Laminado) -> None:
         if (
@@ -1149,7 +1300,13 @@ class VirtualStackingWindow(QtWidgets.QDialog):
                 return
             laminate, stacking_model, row = entry
             insert_at = max(0, min(row, stacking_model.rowCount()))
-            command = _InsertLayerCommand(stacking_model, laminate, [insert_at])
+            default_material = self._most_used_material() or ""
+            command = _InsertLayerCommand(
+                stacking_model,
+                laminate,
+                [insert_at],
+                default_material=default_material,
+            )
             self._execute_command(command)
             laminate.camadas = stacking_model.layers()
             try:
@@ -1184,7 +1341,13 @@ class VirtualStackingWindow(QtWidgets.QDialog):
                 positions.extend(range(model.rowCount(), max_row + 1))
             positions = sorted(set(positions))
             if positions:
-                command = _InsertLayerCommand(model, laminate, positions)
+                default_material = self._most_used_material() or ""
+                command = _InsertLayerCommand(
+                    model,
+                    laminate,
+                    positions,
+                    default_material=default_material,
+                )
                 self._execute_command(command)
                 laminate.camadas = model.layers()
                 for pos in positions:
