@@ -801,6 +801,8 @@ class StackingTableModel(QAbstractTableModel):
                 setattr(camada, "_auto_symmetry_backup", normalized_type)
         elif column == self.COL_MATERIAL:
             new_material = str(value or "").strip()
+            if new_material and camada.orientacao is None:
+                return False
             camada.material = new_material
             material_lower = new_material.lower()
             if material_lower and "foil" in material_lower:
@@ -834,6 +836,9 @@ class StackingTableModel(QAbstractTableModel):
                             camada.orientacao = normalize_angle(text)
                         except (TypeError, ValueError):
                             return False
+            if camada.orientacao is None and camada.material:
+                camada.material = ""
+                extra_columns.append(self.COL_MATERIAL)
         else:
             return False
 
@@ -897,6 +902,8 @@ class StackingTableModel(QAbstractTableModel):
             normalized_label = PLY_TYPE_OPTIONS[1]
         camada.ply_type = normalized_label
         camada.ply_label = str(getattr(camada, "ply_label", "") or "")
+        if getattr(camada, "orientacao", None) is None:
+            camada.material = ""
         if hasattr(camada, "nao_estrutural"):
             try:
                 delattr(camada, "nao_estrutural")

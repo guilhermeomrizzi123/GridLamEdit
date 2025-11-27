@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 from collections import Counter, OrderedDict
 import math
 from dataclasses import dataclass
@@ -58,9 +59,10 @@ class _InsertLayerCommand(QtGui.QUndoCommand):
 
     def redo(self) -> None:
         self._inserted = []
-        for pos in self._positions:
+        for offset, pos in enumerate(sorted(self._positions)):
+            target_pos = pos + offset
             self._model.insert_layer(
-                pos,
+                target_pos,
                 Camada(
                     idx=0,
                     material="",
@@ -70,7 +72,7 @@ class _InsertLayerCommand(QtGui.QUndoCommand):
                     ply_type=DEFAULT_PLY_TYPE,
                 ),
             )
-            self._inserted.append(pos)
+            self._inserted.append(target_pos)
         self._laminate.camadas = self._model.layers()
 
     def undo(self) -> None:
@@ -78,6 +80,40 @@ class _InsertLayerCommand(QtGui.QUndoCommand):
             return
         for pos in sorted(self._inserted, reverse=True):
             self._model.remove_rows([pos])
+        self._laminate.camadas = self._model.layers()
+
+
+class _RemoveLayerCommand(QtGui.QUndoCommand):
+    """Undoable removal of layers for a laminate."""
+
+    def __init__(
+        self,
+        model: StackingTableModel,
+        laminate: Laminado,
+        rows: list[int],
+    ) -> None:
+        super().__init__("Remover camada")
+        self._model = model
+        self._laminate = laminate
+        self._rows = sorted(set(rows))
+        self._backup: list[tuple[int, Camada]] = []
+
+    def redo(self) -> None:
+        self._backup = []
+        layers = self._model.layers()
+        for row in self._rows:
+            if 0 <= row < len(layers):
+                self._backup.append((row, copy.deepcopy(layers[row])))
+        if not self._backup:
+            return
+        self._model.remove_rows([row for row, _ in self._backup])
+        self._laminate.camadas = self._model.layers()
+
+    def undo(self) -> None:
+        if not self._backup:
+            return
+        for row, camada in sorted(self._backup, key=lambda item: item[0]):
+            self._model.insert_layer(row, copy.deepcopy(camada))
         self._laminate.camadas = self._model.layers()
 
 
@@ -793,6 +829,84 @@ class VirtualStackingWindow(QtWidgets.QDialog):
                 return {laminate: {index.row()}}
         return self._selected_targets()
 
+    def _stacking_entry_for_index(
+        self, index: QtCore.QModelIndex
+    ) -> Optional[tuple[Laminado, StackingTableModel, int]]:
+        if not index.isValid() or index.column() < 2:
+            return None
+        cell_idx = index.column() - 2
+        if not (0 <= cell_idx < len(self._cells)):
+            return None
+        laminate = self._cells[cell_idx].laminate
+        model = self._stacking_model_for(laminate)
+        if model is None:
+            return None
+        return laminate, model, index.row()
+
+    def _edit_orientation_at(self, index: QtCore.QModelIndex) -> None:
+        entry = self._stacking_entry_for_index(index)
+        if entry is None:
+            return
+        laminate, stacking_model, row = entry
+        if not (0 <= row < stacking_model.rowCount()):
+            QtWidgets.QMessageBox.information(
+                self,
+                "Orientacao inexistente",
+                "A linha selecionada nao existe para este laminado.",
+            )
+            return
+        current_index = stacking_model.index(row, StackingTableModel.COL_ORIENTATION)
+        current_text = stacking_model.data(current_index, QtCore.Qt.DisplayRole) or ""
+
+        dialog = QtWidgets.QInputDialog(self)
+        dialog.setInputMode(QtWidgets.QInputDialog.TextInput)
+        dialog.setWindowTitle("Editar orientacao")
+        dialog.setLabelText("Defina a orientacao (-100 a 100 graus ou vazio):")
+        dialog.setTextValue(str(current_text))
+        editor = dialog.findChild(QtWidgets.QLineEdit)
+        if editor is not None:
+            validator = QtGui.QRegularExpressionValidator(
+                OrientationComboDelegate._pattern, editor
+            )
+            editor.setValidator(validator)
+            editor.setPlaceholderText("Ex.: -45, 0, 12.5 ou deixe em branco")
+        if dialog.exec() != QtWidgets.QDialog.Accepted:
+            return
+        new_value = dialog.textValue().strip()
+        if not self.model.setData(index, new_value, QtCore.Qt.EditRole):
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Orientacao invalida",
+                "Use valores entre -100 e 100 graus ou deixe em branco.",
+            )
+
+    def _clear_orientation_at(self, index: QtCore.QModelIndex) -> None:
+        if not index.isValid():
+            return
+        if not self.model.setData(index, "", QtCore.Qt.EditRole):
+            QtWidgets.QMessageBox.information(
+                self,
+                "Limpar orientacao",
+                "Nao foi possivel limpar esta celula. Verifique se a linha existe.",
+            )
+
+    def _remove_layer_at(self, index: QtCore.QModelIndex) -> None:
+        entry = self._stacking_entry_for_index(index)
+        if entry is None:
+            return
+        laminate, stacking_model, row = entry
+        if not (0 <= row < stacking_model.rowCount()):
+            QtWidgets.QMessageBox.information(
+                self,
+                "Remover camada",
+                "Selecione uma linha existente para remover.",
+            )
+            return
+        command = _RemoveLayerCommand(stacking_model, laminate, [row])
+        self._execute_command(command)
+        self._after_laminate_changed(laminate)
+        self._notify_changes([laminate.nome])
+
     def _insert_layer(self, *, below: bool, index: Optional[QtCore.QModelIndex] = None) -> None:
         targets = self._targets_for_insertion(index)
         if not targets:
@@ -849,11 +963,21 @@ class VirtualStackingWindow(QtWidgets.QDialog):
         menu = QtWidgets.QMenu(self)
         above_action = menu.addAction("Adicionar camada acima")
         below_action = menu.addAction("Adicionar camada abaixo")
+        menu.addSeparator()
+        edit_action = menu.addAction("Editar orientacao...")
+        clear_action = menu.addAction("Limpar orientacao")
+        remove_action = menu.addAction("Remover camada")
         chosen = menu.exec(self.table.viewport().mapToGlobal(pos))
         if chosen == above_action:
             self._insert_layer(below=False, index=index)
         elif chosen == below_action:
             self._insert_layer(below=True, index=index)
+        elif chosen == edit_action:
+            self._edit_orientation_at(index)
+        elif chosen == clear_action:
+            self._clear_orientation_at(index)
+        elif chosen == remove_action:
+            self._remove_layer_at(index)
 
     def _laminate_for_cell(
         self, model: GridModel, cell_id: str
