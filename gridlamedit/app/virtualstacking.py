@@ -21,7 +21,6 @@ from gridlamedit.io.spreadsheet import (
     normalize_angle,
 )
 from gridlamedit.app.delegates import OrientationComboDelegate
-from gridlamedit.app.dialogs.bulk_orientation_dialog import BulkOrientationDialog
 from gridlamedit.services.laminate_service import auto_name_for_laminate
 from gridlamedit.services.project_query import project_distinct_orientations
 
@@ -134,11 +133,14 @@ class VirtualStackingModel(QtCore.QAbstractTableModel):
             if 0 <= cell_index < len(self.cells):
                 cell = self.cells[cell_index]
                 laminate = cell.laminate
-                lam_name = getattr(laminate, "nome", "") or cell.cell_id
+                lam_name = (getattr(laminate, "nome", "") or "").strip() or cell.cell_id
                 tag_text = (getattr(laminate, "tag", "") or "").strip()
-                label = f"#\n{cell.cell_id} | {lam_name}"
+                display_name = lam_name or cell.cell_id
                 if tag_text:
-                    label = f"{label} ({tag_text})"
+                    tag_suffix = f"({tag_text})"
+                    if tag_suffix not in display_name:
+                        display_name = f"{display_name}{tag_suffix}"
+                label = f"#\n{cell.cell_id} | {display_name}"
                 return label
         elif orientation == QtCore.Qt.Vertical:
             return str(section + 1)
@@ -324,6 +326,11 @@ class VirtualStackingWindow(QtWidgets.QDialog):
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Virtual Stacking - View Mode: Cells")
+        self.setWindowFlags(
+            self.windowFlags()
+            | QtCore.Qt.WindowMinMaxButtonsHint
+            | QtCore.Qt.WindowSystemMenuHint
+        )
         self.resize(1200, 700)
 
         self._layers: list[VirtualStackingLayer] = []
@@ -337,24 +344,6 @@ class VirtualStackingWindow(QtWidgets.QDialog):
 
 
     def _build_ui(self) -> None:
-        top_layout = QtWidgets.QHBoxLayout()
-        top_layout.addStretch()
-        self.btn_header_maximize = QtWidgets.QToolButton(self)
-        self.btn_header_maximize.setToolTip("Maximizar/Restaurar")
-        self.btn_header_maximize.setIcon(
-            self.style().standardIcon(QtWidgets.QStyle.SP_TitleBarMaxButton)
-        )
-        self.btn_header_maximize.clicked.connect(self._toggle_maximize)
-        top_layout.addWidget(self.btn_header_maximize)
-
-        self.btn_header_close = QtWidgets.QToolButton(self)
-        self.btn_header_close.setToolTip("Fechar")
-        self.btn_header_close.setIcon(
-            self.style().standardIcon(QtWidgets.QStyle.SP_TitleBarCloseButton)
-        )
-        self.btn_header_close.clicked.connect(self.close)
-        top_layout.addWidget(self.btn_header_close)
-
         toolbar_layout = self._build_toolbar()
 
         self.model = VirtualStackingModel(
@@ -376,16 +365,18 @@ class VirtualStackingWindow(QtWidgets.QDialog):
         self.table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectItems)
         self.table.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
         self.table.setHorizontalScrollMode(QtWidgets.QAbstractItemView.ScrollPerPixel)
+        self.table.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAsNeeded)
         self.table.setEditTriggers(
             QtWidgets.QAbstractItemView.DoubleClicked
             | QtWidgets.QAbstractItemView.SelectedClicked
         )
+        self.table.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self._show_context_menu)
         self._apply_orientation_delegate()
         self.summary_table = self._build_summary_table()
         self._sync_scrollbars()
 
         main_layout = QtWidgets.QVBoxLayout(self)
-        main_layout.addLayout(top_layout)
         if toolbar_layout is not None:
             main_layout.addLayout(toolbar_layout)
         main_layout.addWidget(self.table)
@@ -409,10 +400,10 @@ class VirtualStackingWindow(QtWidgets.QDialog):
         summary.setModel(QtGui.QStandardItemModel(1, 0, summary))
         summary.verticalHeader().setVisible(False)
         summary.horizontalHeader().setVisible(False)
+        summary.setWordWrap(True)
         summary.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
         summary.setSelectionMode(QtWidgets.QAbstractItemView.NoSelection)
         summary.setFocusPolicy(QtCore.Qt.NoFocus)
-        summary.setFixedHeight(48)
         summary.setHorizontalScrollMode(QtWidgets.QAbstractItemView.ScrollPerPixel)
         summary.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
         summary.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
@@ -458,30 +449,6 @@ class VirtualStackingWindow(QtWidgets.QDialog):
         layout = QtWidgets.QHBoxLayout()
         layout.setSpacing(8)
 
-        self.btn_change_orientation = QtWidgets.QToolButton(self)
-        self.btn_change_orientation.setText("Trocar orientacao")
-        self.btn_change_orientation.setToolTip("Trocar orientacao das celulas selecionadas")
-        self.btn_change_orientation.clicked.connect(self._change_orientation)
-        layout.addWidget(self.btn_change_orientation)
-
-        self.btn_insert_above = QtWidgets.QToolButton(self)
-        self.btn_insert_above.setText("Inserir acima")
-        self.btn_insert_above.setToolTip("Inserir linha acima da selecao")
-        self.btn_insert_above.clicked.connect(lambda: self._insert_layer(below=False))
-        layout.addWidget(self.btn_insert_above)
-
-        self.btn_insert_below = QtWidgets.QToolButton(self)
-        self.btn_insert_below.setText("Inserir abaixo")
-        self.btn_insert_below.setToolTip("Inserir linha abaixo da selecao")
-        self.btn_insert_below.clicked.connect(lambda: self._insert_layer(below=True))
-        layout.addWidget(self.btn_insert_below)
-
-        self.btn_symmetry = QtWidgets.QToolButton(self)
-        self.btn_symmetry.setText("Verificar simetria")
-        self.btn_symmetry.setToolTip("Verificar simetria das camadas dos laminados")
-        self.btn_symmetry.clicked.connect(self._check_symmetry)
-        layout.addWidget(self.btn_symmetry)
-
         layout.addStretch()
 
         self.btn_undo = QtWidgets.QToolButton(self)
@@ -526,6 +493,7 @@ class VirtualStackingWindow(QtWidgets.QDialog):
         self._apply_orientation_delegate()
         self._resize_columns()
         self._update_summary_row()
+        self._check_symmetry()
 
     def _collect_virtual_data(
         self, project: GridModel
@@ -699,8 +667,8 @@ class VirtualStackingWindow(QtWidgets.QDialog):
                 key=lambda pair: self._orientation_token(pair[0]) or 0.0,
             )
             ori_parts = [f"{label}: {count}" for label, count in ordered]
-            parts.append(", ".join(ori_parts))
-        return " | ".join(parts)
+            parts.extend(ori_parts)
+        return "\n".join(parts)
 
     def _update_summary_row(self) -> None:
         summary_model = (
@@ -712,6 +680,8 @@ class VirtualStackingWindow(QtWidgets.QDialog):
             return
         column_count = self.model.columnCount()
         summary_model.setColumnCount(column_count)
+        metrics = self.fontMetrics()
+        max_lines = 1
         for col in range(column_count):
             if col < 2:
                 text = ""
@@ -724,7 +694,17 @@ class VirtualStackingWindow(QtWidgets.QDialog):
             if col in (0, 1):
                 item.setBackground(QtGui.QBrush(QtGui.QColor(240, 240, 240)))
             summary_model.setItem(0, col, item)
+            max_lines = max(max_lines, max(1, text.count("\n") + 1))
+        self._update_summary_height(max_lines, metrics)
         self._resize_summary_columns()
+
+    def _update_summary_height(self, lines: int, metrics: QtGui.QFontMetrics) -> None:
+        if not hasattr(self, "summary_table"):
+            return
+        line_height = metrics.lineSpacing() + 2
+        padding = 10
+        target_height = max(48, lines * line_height + padding)
+        self.summary_table.setFixedHeight(target_height)
 
     def _resize_summary_columns(self) -> None:
         header = self.table.horizontalHeader()
@@ -750,48 +730,6 @@ class VirtualStackingWindow(QtWidgets.QDialog):
             if header.sectionSize(col) < 110:
                 header.resizeSection(col, 110)
         self._resize_summary_columns()
-
-    def _change_orientation(self) -> None:
-        targets = self._selected_targets()
-        if not targets:
-            QtWidgets.QMessageBox.information(
-                self,
-                "Trocar orientacao",
-                "Selecione pelo menos uma celula para alterar a orientacao.",
-            )
-            return
-        project_orientations = project_distinct_orientations(self._project)
-        dialog = BulkOrientationDialog(
-            parent=self,
-            available_orientations=project_orientations,
-        )
-        if dialog.exec() != QtWidgets.QDialog.Accepted:
-            return
-        new_orientation = dialog.new_orientation
-        if new_orientation is None:
-            return
-        affected: list[str] = []
-        for laminate, rows in targets.items():
-            model = self._stacking_model_for(laminate)
-            if model is None:
-                continue
-            changed = False
-            for row in sorted(rows):
-                if row >= model.rowCount():
-                    continue
-                index = model.index(row, StackingTableModel.COL_ORIENTATION)
-                if not index.isValid():
-                    continue
-                if model.setData(
-                    index, new_orientation, QtCore.Qt.EditRole
-                ):
-                    changed = True
-            if changed:
-                laminate.camadas = model.layers()
-                self._after_laminate_changed(laminate)
-                affected.append(laminate.nome)
-        if affected:
-            self._notify_changes(affected)
 
     def _orientations_match(self, left: Optional[float], right: Optional[float]) -> bool:
         if left is None and right is None:
@@ -844,21 +782,19 @@ class VirtualStackingWindow(QtWidgets.QDialog):
                     }
                 )
         self.model.set_highlights(red_cells, green_cells)
-        if red_cells:
-            QtWidgets.QMessageBox.warning(
-                self,
-                "Verificar simetria",
-                "Foram encontradas camadas que quebram a simetria.",
-            )
-        else:
-            QtWidgets.QMessageBox.information(
-                self,
-                "Verificar simetria",
-                "Nenhuma quebra de simetria encontrada.",
-            )
 
-    def _insert_layer(self, *, below: bool) -> None:
-        targets = self._selected_targets()
+    def _targets_for_insertion(
+        self, index: Optional[QtCore.QModelIndex] = None
+    ) -> dict[Laminado, set[int]]:
+        if index is not None and index.isValid() and index.column() >= 2:
+            cell_idx = index.column() - 2
+            if 0 <= cell_idx < len(self._cells):
+                laminate = self._cells[cell_idx].laminate
+                return {laminate: {index.row()}}
+        return self._selected_targets()
+
+    def _insert_layer(self, *, below: bool, index: Optional[QtCore.QModelIndex] = None) -> None:
+        targets = self._targets_for_insertion(index)
         if not targets:
             QtWidgets.QMessageBox.information(
                 self,
@@ -889,19 +825,6 @@ class VirtualStackingWindow(QtWidgets.QDialog):
         if affected:
             self._notify_changes(affected)
 
-    def _toggle_maximize(self) -> None:
-        if self.isMaximized():
-            self.showNormal()
-        else:
-            self.showMaximized()
-        icon = (
-            self.style().standardIcon(QtWidgets.QStyle.SP_TitleBarNormalButton)
-            if self.isMaximized()
-            else self.style().standardIcon(QtWidgets.QStyle.SP_TitleBarMaxButton)
-        )
-        if hasattr(self, "btn_header_maximize"):
-            self.btn_header_maximize.setIcon(icon)
-
     def _on_model_change(self, laminate_names: list[str]) -> None:
         self._notify_changes(laminate_names)
 
@@ -911,13 +834,26 @@ class VirtualStackingWindow(QtWidgets.QDialog):
                 self._project.mark_dirty(True)
             except Exception:
                 pass
-        self.model.clear_highlights()
         self._rebuild_view()
         self._update_undo_buttons()
         try:
             self.stacking_changed.emit(laminate_names)
         except Exception:
             pass
+
+    def _show_context_menu(self, pos: QtCore.QPoint) -> None:
+        index = self.table.indexAt(pos)
+        if not index.isValid() or index.column() < 2:
+            return
+        self.table.setCurrentIndex(index)
+        menu = QtWidgets.QMenu(self)
+        above_action = menu.addAction("Adicionar camada acima")
+        below_action = menu.addAction("Adicionar camada abaixo")
+        chosen = menu.exec(self.table.viewport().mapToGlobal(pos))
+        if chosen == above_action:
+            self._insert_layer(below=False, index=index)
+        elif chosen == below_action:
+            self._insert_layer(below=True, index=index)
 
     def _laminate_for_cell(
         self, model: GridModel, cell_id: str
