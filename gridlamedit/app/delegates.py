@@ -72,8 +72,6 @@ class MaterialComboDelegate(_BaseComboDelegate):
 class OrientationComboDelegate(QStyledItemDelegate):
     """Delegate que aceita orientacoes livres no intervalo permitido."""
 
-    _pattern = QRegularExpression("^[+-]?\\d{0,3}(?:[.,]\\d+)?(?:[\\N{DEGREE SIGN}\\u00ba])?$")
-
     def __init__(
         self,
         parent: Optional[QWidget] = None,
@@ -85,9 +83,7 @@ class OrientationComboDelegate(QStyledItemDelegate):
 
     def createEditor(self, parent: QWidget, option, index):  # noqa: D401, N802
         editor = QLineEdit(parent)
-        validator = QRegularExpressionValidator(self._pattern, editor)
-        validator.setObjectName("orientationValidator")
-        editor.setValidator(validator)
+        editor.setValidator(None)  # Validation handled by model (normalize_angle).
         suggestions = [str(item) for item in self._items_provider() if str(item).strip()]
         if suggestions:
             completer = QCompleter(suggestions, editor)
@@ -101,12 +97,15 @@ class OrientationComboDelegate(QStyledItemDelegate):
         if not isinstance(editor, QLineEdit):
             return
         text = index.data(Qt.EditRole) or index.data(Qt.DisplayRole) or ""
-        editor.setText(str(text))
+        cleaned = str(text).replace("\N{DEGREE SIGN}", "").replace("\u00ba", "").strip()
+        editor.setText(cleaned)
+        editor.setCursorPosition(len(cleaned))
 
     def setModelData(self, editor: QWidget, model, index):  # noqa: N802
         if not isinstance(editor, QLineEdit):
             return
-        model.setData(index, editor.text(), Qt.EditRole)
+        text = editor.text().replace("\N{DEGREE SIGN}", "").replace("\u00ba", "").strip()
+        model.setData(index, text, Qt.EditRole)
 
 
 class PlyTypeComboDelegate(QStyledItemDelegate):

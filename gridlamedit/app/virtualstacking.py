@@ -59,8 +59,8 @@ class _InsertLayerCommand(QtGui.QUndoCommand):
 
     def redo(self) -> None:
         self._inserted = []
-        for offset, pos in enumerate(sorted(self._positions)):
-            target_pos = pos + offset
+        for pos in sorted(set(self._positions), reverse=True):
+            target_pos = max(0, min(pos, len(self._model.layers())))
             self._model.insert_layer(
                 target_pos,
                 Camada(
@@ -266,17 +266,28 @@ class VirtualStackingModel(QtCore.QAbstractTableModel):
 
         cell = self.cells[cell_index]
         laminate = cell.laminate
+        stacking_model = self._stacking_model_provider(laminate)
+        if stacking_model is None:
+            return False
         layers = getattr(laminate, "camadas", [])
         if row >= len(layers):
-            return False
+            # If the laminate has fewer layers, create placeholder rows up to the target.
+            missing = row - len(layers) + 1
+            for _ in range(missing):
+                stacking_model.insert_layer(len(layers), Camada(
+                    idx=0,
+                    material="",
+                    orientacao=None,
+                    ativo=True,
+                    simetria=False,
+                    ply_type=DEFAULT_PLY_TYPE,
+                ))
+                layers = stacking_model.layers()
 
         text = str(value).strip()
         if text.endswith("?"):
             text = text[:-1].strip()
 
-        stacking_model = self._stacking_model_provider(laminate)
-        if stacking_model is None:
-            return False
         target_index = stacking_model.index(row, StackingTableModel.COL_ORIENTATION)
         if not target_index.isValid():
             return False
@@ -856,7 +867,11 @@ class VirtualStackingWindow(QtWidgets.QDialog):
             )
             return
         current_index = stacking_model.index(row, StackingTableModel.COL_ORIENTATION)
-        current_text = stacking_model.data(current_index, QtCore.Qt.DisplayRole) or ""
+        current_layers = stacking_model.layers()
+        current_value = None
+        if 0 <= row < len(current_layers):
+            current_value = getattr(current_layers[row], "orientacao", None)
+        current_text = "" if current_value is None else f"{current_value:g}"
 
         dialog = QtWidgets.QInputDialog(self)
         dialog.setInputMode(QtWidgets.QInputDialog.TextInput)
@@ -865,15 +880,31 @@ class VirtualStackingWindow(QtWidgets.QDialog):
         dialog.setTextValue(str(current_text))
         editor = dialog.findChild(QtWidgets.QLineEdit)
         if editor is not None:
-            validator = QtGui.QRegularExpressionValidator(
-                OrientationComboDelegate._pattern, editor
-            )
-            editor.setValidator(validator)
+            editor.setValidator(None)  # Validation via normalize_angle below.
             editor.setPlaceholderText("Ex.: -45, 0, 12.5 ou deixe em branco")
         if dialog.exec() != QtWidgets.QDialog.Accepted:
             return
         new_value = dialog.textValue().strip()
-        if not self.model.setData(index, new_value, QtCore.Qt.EditRole):
+        normalized_value = ""
+        if new_value:
+            try:
+                normalized_value = f"{normalize_angle(new_value):g}"
+            except ValueError:
+                QtWidgets.QMessageBox.warning(
+                    self,
+                    "Orientacao invalida",
+                    "Use valores entre -100 e 100 graus ou deixe em branco.",
+                )
+                return
+        if not normalized_value and current_value is None:
+            return
+        if normalized_value and current_value is not None:
+            try:
+                if math.isclose(current_value, float(normalized_value), rel_tol=0.0, abs_tol=1e-9):
+                    return
+            except Exception:
+                pass
+        if not self.model.setData(index, normalized_value, QtCore.Qt.EditRole):
             QtWidgets.QMessageBox.warning(
                 self,
                 "Orientacao invalida",
@@ -907,7 +938,21 @@ class VirtualStackingWindow(QtWidgets.QDialog):
         self._after_laminate_changed(laminate)
         self._notify_changes([laminate.nome])
 
-    def _insert_layer(self, *, below: bool, index: Optional[QtCore.QModelIndex] = None) -> None:
+    def _insert_layer(self, index: Optional[QtCore.QModelIndex] = None) -> None:
+        # If a specific cell was clicked, handle that single insertion directly.
+        if index is not None and index.isValid() and index.column() >= 2:
+            entry = self._stacking_entry_for_index(index)
+            if entry is None:
+                return
+            laminate, stacking_model, row = entry
+            insert_at = max(0, min(row, stacking_model.rowCount()))
+            command = _InsertLayerCommand(stacking_model, laminate, [insert_at])
+            self._execute_command(command)
+            laminate.camadas = stacking_model.layers()
+            self._after_laminate_changed(laminate)
+            self._notify_changes([laminate.nome])
+            return
+
         targets = self._targets_for_insertion(index)
         if not targets:
             QtWidgets.QMessageBox.information(
@@ -917,27 +962,31 @@ class VirtualStackingWindow(QtWidgets.QDialog):
             )
             return
         affected: list[str] = []
+        touched: list[str] = []
         for laminate, rows in targets.items():
             model = self._stacking_model_for(laminate)
             if model is None:
                 continue
-            changed = False
-            ordered = sorted(rows, reverse=True)
-            positions: list[int] = []
-            for row in ordered:
-                insert_at = row + 1 if below else row
-                insert_at = min(max(insert_at, 0), model.rowCount())
-                positions.append(insert_at)
+            touched.append(laminate.nome)
+            requested_rows = sorted(rows)
+            if not requested_rows:
+                continue
+            max_row = max(requested_rows)
+            positions: list[int] = list(requested_rows)
+            if max_row >= model.rowCount():
+                positions.extend(range(model.rowCount(), max_row + 1))
+            positions = sorted(set(positions))
             if positions:
                 command = _InsertLayerCommand(model, laminate, positions)
                 self._execute_command(command)
-                changed = True
-            if changed:
                 laminate.camadas = model.layers()
                 self._after_laminate_changed(laminate)
                 affected.append(laminate.nome)
-        if affected:
-            self._notify_changes(affected)
+        if affected or touched:
+            self._notify_changes(affected or touched)
+        else:
+            # Ensure UI refresh even if nothing was recorded as affected.
+            self._rebuild_view()
 
     def _on_model_change(self, laminate_names: list[str]) -> None:
         self._notify_changes(laminate_names)
@@ -961,17 +1010,14 @@ class VirtualStackingWindow(QtWidgets.QDialog):
             return
         self.table.setCurrentIndex(index)
         menu = QtWidgets.QMenu(self)
-        above_action = menu.addAction("Adicionar camada acima")
-        below_action = menu.addAction("Adicionar camada abaixo")
+        above_action = menu.addAction("Adicionar camada")
         menu.addSeparator()
         edit_action = menu.addAction("Editar orientacao...")
         clear_action = menu.addAction("Limpar orientacao")
         remove_action = menu.addAction("Remover camada")
         chosen = menu.exec(self.table.viewport().mapToGlobal(pos))
         if chosen == above_action:
-            self._insert_layer(below=False, index=index)
-        elif chosen == below_action:
-            self._insert_layer(below=True, index=index)
+            self._insert_layer(index=index)
         elif chosen == edit_action:
             self._edit_orientation_at(index)
         elif chosen == clear_action:

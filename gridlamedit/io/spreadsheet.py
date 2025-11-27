@@ -1871,6 +1871,8 @@ class _GridUiBinding:
             self.stacking_model.toggle_check(index.row())
         elif column == StackingTableModel.COL_PLY_TYPE and isinstance(self._table_view, QTableView):
             self._table_view.edit(index)
+        elif column == StackingTableModel.COL_ORIENTATION and isinstance(self._table_view, QTableView):
+            self._table_view.edit(index)
 
     def _apply_laminate(self, laminate_name: str) -> None:
         if self._updating:
@@ -2031,6 +2033,9 @@ class _GridUiBinding:
             )
 
     def _on_layers_modified(self, _layers: list[Camada]) -> None:
+        if self._current_laminate and self._current_laminate in self.model.laminados:
+            laminado = self.model.laminados[self._current_laminate]
+            laminado.camadas = self.stacking_model.layers()
         if hasattr(self.ui, "_mark_dirty"):
             self.ui._mark_dirty()
         self._update_layers_count()
