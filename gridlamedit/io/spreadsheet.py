@@ -73,6 +73,7 @@ CELL_ID_PATTERN = re.compile(r"^C\d+$", re.IGNORECASE)
 NO_LAMINATE_LABEL = "(sem laminado)"
 PLY_TYPE_OPTIONS: tuple[str, str] = ("Considerar", "N\u00e3o Considerar")
 DEFAULT_PLY_TYPE = PLY_TYPE_OPTIONS[0]
+DEFAULT_ROSETTE_LABEL = "Rosette.1"
 DEFAULT_COLOR_INDEX = 1
 MIN_COLOR_INDEX = 1
 MAX_COLOR_INDEX = 150
@@ -310,6 +311,7 @@ class Camada:
     ply_type: str = DEFAULT_PLY_TYPE
     ply_label: str = ""
     sequence: str = ""
+    rosette: str = DEFAULT_ROSETTE_LABEL
 
 
 @dataclass
@@ -902,6 +904,8 @@ class StackingTableModel(QAbstractTableModel):
             normalized_label = PLY_TYPE_OPTIONS[1]
         camada.ply_type = normalized_label
         camada.ply_label = str(getattr(camada, "ply_label", "") or "")
+        rosette_value = str(getattr(camada, "rosette", "") or "").strip()
+        camada.rosette = rosette_value or DEFAULT_ROSETTE_LABEL
         if getattr(camada, "orientacao", None) is None:
             camada.material = ""
         if hasattr(camada, "nao_estrutural"):
@@ -1637,6 +1641,7 @@ def _parse_configuration_section(
                     ply_type=ply_type_value,
                     ply_label=f"Ply.{len(layers) + 1}",
                     sequence=f"Seq.{len(layers) + 1}",
+                    rosette=DEFAULT_ROSETTE_LABEL,
                 )
             )
             idx += 1

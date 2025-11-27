@@ -96,6 +96,7 @@ from gridlamedit.io.spreadsheet import (
     WordWrapHeader,
     bind_cells_to_ui,
     bind_model_to_ui,
+    _format_cell_label,
     format_orientation_value,
     load_grid_spreadsheet,
     normalize_angle,
@@ -371,12 +372,19 @@ class MainWindow(QMainWindow):
                 )
             except Exception:
                 logger.debug("Nao foi possivel conectar sinal do Virtual Stacking.", exc_info=True)
+            try:
+                self._virtual_stacking_window.closed.connect(
+                    self._on_virtual_stacking_closed
+                )
+            except Exception:
+                logger.debug("Nao foi possivel conectar fechamento do Virtual Stacking.", exc_info=True)
 
         project = self._grid_model
         self._virtual_stacking_window.populate_from_project(project)
         self._virtual_stacking_window.show()
         self._virtual_stacking_window.raise_()
         self._virtual_stacking_window.activateWindow()
+        self.hide()
 
     def _setup_central_widget(self) -> None:
         self.view_editor = self._build_editor_view()
@@ -613,6 +621,7 @@ class MainWindow(QMainWindow):
             for cell_id, mapped in self._grid_model.cell_to_laminate.items():
                 if mapped == new_name:
                     binding._refresh_cell_item_label(cell_id)  # type: ignore[attr-defined]
+        self._refresh_cells_list_labels()
         combo = getattr(self, "laminate_name_combo", None)
         if isinstance(combo, QComboBox):
             combo.blockSignals(True)
@@ -622,6 +631,23 @@ class MainWindow(QMainWindow):
                 combo.setCurrentIndex(idx)
             combo.blockSignals(False)
         self._update_window_title()
+
+    def _refresh_cells_list_labels(self) -> None:
+        """Atualiza os rótulos das células para refletir nomes atuais dos laminados."""
+        if self._grid_model is None:
+            return
+        list_widget = getattr(self, "lstCelulas", None)
+        if not isinstance(list_widget, QListWidget):
+            list_widget = getattr(self, "cells_list", None)
+        if not isinstance(list_widget, QListWidget):
+            return
+        list_widget.blockSignals(True)
+        for idx in range(list_widget.count()):
+            item = list_widget.item(idx)
+            cell_id = item.data(Qt.UserRole)
+            if cell_id:
+                item.setText(_format_cell_label(self._grid_model, cell_id))
+        list_widget.blockSignals(False)
 
     def _apply_auto_rename_if_needed(
         self, laminate: Optional[Laminado], *, force: bool = False
@@ -760,6 +786,18 @@ class MainWindow(QMainWindow):
                 self._apply_auto_rename_if_needed(laminate, force=True)
         self.update_stacking_summary_ui()
         self._mark_dirty()
+
+    def _on_virtual_stacking_closed(self) -> None:
+        if self._grid_model is not None:
+            try:
+                laminate_names = list(self._grid_model.laminados.keys())
+            except Exception:
+                laminate_names = []
+            if laminate_names:
+                self._on_virtual_stacking_changed(laminate_names)
+        self.show()
+        self.raise_()
+        self.activateWindow()
 
     def _sync_all_auto_renamed_laminates(self) -> None:
         if self._grid_model is None:
@@ -3233,7 +3271,7 @@ class MainWindow(QMainWindow):
 
     def _refresh_virtual_stacking_view(self) -> None:
         window = getattr(self, "_virtual_stacking_window", None)
-        if window is None:
+        if window is None or not window.isVisible():
             return
         try:
             window.populate_from_project(self._grid_model)

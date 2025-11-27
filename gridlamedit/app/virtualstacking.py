@@ -13,6 +13,7 @@ from PySide6 import QtCore, QtGui, QtWidgets
 from gridlamedit.io.spreadsheet import (
     Camada,
     DEFAULT_PLY_TYPE,
+    DEFAULT_ROSETTE_LABEL,
     GridModel,
     Laminado,
     StackingTableModel,
@@ -21,9 +22,12 @@ from gridlamedit.io.spreadsheet import (
     is_structural_ply_label,
     normalize_angle,
 )
-from gridlamedit.app.delegates import OrientationComboDelegate
+from gridlamedit.app.delegates import MaterialComboDelegate, OrientationComboDelegate
 from gridlamedit.services.laminate_service import auto_name_for_laminate
-from gridlamedit.services.project_query import project_distinct_orientations
+from gridlamedit.services.project_query import (
+    project_distinct_materials,
+    project_distinct_orientations,
+)
 
 
 @dataclass
@@ -31,7 +35,9 @@ class VirtualStackingLayer:
     """Represent a stacking layer sequence entry."""
 
     sequence_label: str
+    ply_label: str
     material: str
+    rosette: str
 
 
 @dataclass
@@ -120,6 +126,12 @@ class _RemoveLayerCommand(QtGui.QUndoCommand):
 class VirtualStackingModel(QtCore.QAbstractTableModel):
     """Qt model responsible for exposing Virtual Stacking data."""
 
+    COL_SEQUENCE = 0
+    COL_PLY = 1
+    COL_MATERIAL = 2
+    COL_ROSETTE = 3
+    LAMINATE_COLUMN_OFFSET = 4
+
     def __init__(
         self,
         parent: Optional[QtCore.QObject] = None,
@@ -128,6 +140,7 @@ class VirtualStackingModel(QtCore.QAbstractTableModel):
             Callable[[Laminado], Optional[StackingTableModel]]
         ] = None,
         post_edit_callback: Optional[Callable[[Laminado], None]] = None,
+        most_used_material_provider: Optional[Callable[[], Optional[str]]] = None,
     ) -> None:
         super().__init__(parent)
         self.layers: list[VirtualStackingLayer] = []
@@ -136,6 +149,7 @@ class VirtualStackingModel(QtCore.QAbstractTableModel):
         self._change_callback = change_callback
         self._stacking_model_provider = stacking_model_provider or (lambda _lam: None)
         self._post_edit_callback = post_edit_callback
+        self._most_used_material_provider = most_used_material_provider or (lambda: None)
         self._red_cells: set[tuple[int, int]] = set()
         self._green_cells: set[tuple[int, int]] = set()
 
@@ -148,7 +162,7 @@ class VirtualStackingModel(QtCore.QAbstractTableModel):
     def columnCount(self, parent: QtCore.QModelIndex = QtCore.QModelIndex()) -> int:  # noqa: N802
         if parent.isValid():
             return 0
-        return 2 + len(self.cells)
+        return self.LAMINATE_COLUMN_OFFSET + len(self.cells)
 
     # Header ----------------------------------------------------------
     def headerData(  # noqa: N802
@@ -161,11 +175,15 @@ class VirtualStackingModel(QtCore.QAbstractTableModel):
             return None
 
         if orientation == QtCore.Qt.Horizontal:
-            if section == 0:
-                return "Sequence\nVirtual Sequence"
-            if section == 1:
-                return "#\nMaterial"
-            cell_index = section - 2
+            if section == self.COL_SEQUENCE:
+                return "Sequence"
+            if section == self.COL_PLY:
+                return "Ply"
+            if section == self.COL_MATERIAL:
+                return "Material"
+            if section == self.COL_ROSETTE:
+                return "Rosette"
+            cell_index = section - self.LAMINATE_COLUMN_OFFSET
             if 0 <= cell_index < len(self.cells):
                 cell = self.cells[cell_index]
                 laminate = cell.laminate
@@ -200,12 +218,16 @@ class VirtualStackingModel(QtCore.QAbstractTableModel):
         layer = self.layers[row]
 
         if role in (QtCore.Qt.DisplayRole, QtCore.Qt.EditRole):
-            if column == 0:
+            if column == self.COL_SEQUENCE:
                 return layer.sequence_label or f"Seq.{row + 1}"
-            if column == 1:
+            if column == self.COL_PLY:
+                return layer.ply_label or f"Ply.{row + 1}"
+            if column == self.COL_MATERIAL:
                 return layer.material
+            if column == self.COL_ROSETTE:
+                return layer.rosette or DEFAULT_ROSETTE_LABEL
 
-            cell_index = column - 2
+            cell_index = column - self.LAMINATE_COLUMN_OFFSET
             if 0 <= cell_index < len(self.cells):
                 cell = self.cells[cell_index]
                 layers = getattr(cell.laminate, "camadas", [])
@@ -219,7 +241,7 @@ class VirtualStackingModel(QtCore.QAbstractTableModel):
                 return ""
 
         if role == QtCore.Qt.BackgroundRole:
-            if column in (0, 1):
+            if column < self.LAMINATE_COLUMN_OFFSET:
                 return QtGui.QBrush(QtGui.QColor(240, 240, 240))
             if (row, column) in self._red_cells:
                 return QtGui.QBrush(QtGui.QColor(220, 53, 69))
@@ -231,7 +253,7 @@ class VirtualStackingModel(QtCore.QAbstractTableModel):
             ):
                 return QtGui.QBrush(QtGui.QColor(220, 235, 255))
 
-        if role == QtCore.Qt.TextAlignmentRole and column >= 2:
+        if role == QtCore.Qt.TextAlignmentRole and column >= self.LAMINATE_COLUMN_OFFSET:
             return QtCore.Qt.AlignCenter
 
         return None
@@ -242,7 +264,7 @@ class VirtualStackingModel(QtCore.QAbstractTableModel):
             return QtCore.Qt.NoItemFlags
 
         base = QtCore.Qt.ItemIsSelectable | QtCore.Qt.ItemIsEnabled
-        if index.column() >= 2:
+        if index.column() in (self.COL_MATERIAL, self.COL_ROSETTE) or index.column() >= self.LAMINATE_COLUMN_OFFSET:
             return base | QtCore.Qt.ItemIsEditable
         return base
 
@@ -257,10 +279,17 @@ class VirtualStackingModel(QtCore.QAbstractTableModel):
 
         row = index.row()
         column = index.column()
-        if row < 0 or row >= len(self.layers) or column < 2:
+        if row < 0 or row >= len(self.layers):
             return False
 
-        cell_index = column - 2
+        if column == self.COL_MATERIAL:
+            return self._set_material_for_row(row, str(value))
+        if column == self.COL_ROSETTE:
+            return self._set_rosette_for_row(row, str(value))
+        if column < self.LAMINATE_COLUMN_OFFSET:
+            return False
+
+        cell_index = column - self.LAMINATE_COLUMN_OFFSET
         if cell_index < 0 or cell_index >= len(self.cells):
             return False
 
@@ -269,20 +298,7 @@ class VirtualStackingModel(QtCore.QAbstractTableModel):
         stacking_model = self._stacking_model_provider(laminate)
         if stacking_model is None:
             return False
-        layers = getattr(laminate, "camadas", [])
-        if row >= len(layers):
-            # If the laminate has fewer layers, create placeholder rows up to the target.
-            missing = row - len(layers) + 1
-            for _ in range(missing):
-                stacking_model.insert_layer(len(layers), Camada(
-                    idx=0,
-                    material="",
-                    orientacao=None,
-                    ativo=True,
-                    simetria=False,
-                    ply_type=DEFAULT_PLY_TYPE,
-                ))
-                layers = stacking_model.layers()
+        self._ensure_row_exists(stacking_model, row, laminate)
 
         text = str(value).strip()
         if text.endswith("?"):
@@ -295,18 +311,130 @@ class VirtualStackingModel(QtCore.QAbstractTableModel):
         if not stacking_model.setData(target_index, text, QtCore.Qt.EditRole):
             return False
         laminate.camadas = stacking_model.layers()
+        self._auto_fill_material_if_missing(laminate, stacking_model, row)
         self.dataChanged.emit(index, index, [QtCore.Qt.DisplayRole, QtCore.Qt.EditRole])
-        if self._change_callback:
-            try:
-                self._change_callback([laminate.nome])
-            except Exception:
-                pass
-        if self._post_edit_callback:
-            try:
-                self._post_edit_callback(laminate)
-            except Exception:
-                pass
+        self._emit_change_callbacks([laminate])
         return True
+
+
+    def _ensure_row_exists(
+        self,
+        stacking_model: StackingTableModel,
+        row: int,
+        laminate: Optional[Laminado] = None,
+    ) -> list[Camada]:
+        layers = stacking_model.layers()
+        if row >= len(layers):
+            missing = row - len(layers) + 1
+            for _ in range(missing):
+                stacking_model.insert_layer(
+                    len(layers),
+                    Camada(
+                        idx=0,
+                        material="",
+                        orientacao=None,
+                        ativo=True,
+                        simetria=False,
+                        ply_type=DEFAULT_PLY_TYPE,
+                    ),
+                )
+                layers = stacking_model.layers()
+        if laminate is not None:
+            laminate.camadas = stacking_model.layers()
+            layers = laminate.camadas
+        return layers
+
+    def _emit_change_callbacks(self, laminates: Iterable[Laminado]) -> None:
+        names: list[str] = []
+        seen: set[str] = set()
+        for lam in laminates:
+            if lam is None:
+                continue
+            if lam.nome not in seen:
+                names.append(lam.nome)
+                seen.add(lam.nome)
+            if self._post_edit_callback:
+                try:
+                    self._post_edit_callback(lam)
+                except Exception:
+                    pass
+        if names and self._change_callback:
+            try:
+                self._change_callback(names)
+            except Exception:
+                pass
+
+    def _auto_fill_material_if_missing(
+        self, laminate: Laminado, stacking_model: StackingTableModel, row: int
+    ) -> None:
+        layers = stacking_model.layers()
+        if not (0 <= row < len(layers)):
+            return
+        layer = layers[row]
+        if layer.orientacao is None or getattr(layer, "material", ""):
+            return
+        suggestion = self._most_used_material_provider() or ""
+        suggestion = str(suggestion or "").strip()
+        if not suggestion:
+            return
+        target_index = stacking_model.index(row, StackingTableModel.COL_MATERIAL)
+        if target_index.isValid():
+            stacking_model.setData(target_index, suggestion, QtCore.Qt.EditRole)
+
+    def _set_material_for_row(self, row: int, value: str) -> bool:
+        new_material = str(value or "").strip()
+        changed: list[Laminado] = []
+        for cell in self.cells:
+            laminate = cell.laminate
+            stacking_model = self._stacking_model_provider(laminate)
+            if stacking_model is None:
+                continue
+            layers = self._ensure_row_exists(stacking_model, row, laminate)
+            if row >= len(layers):
+                continue
+            target_layer = layers[row]
+            if target_layer.orientacao is None:
+                if target_layer.material:
+                    idx = stacking_model.index(row, StackingTableModel.COL_MATERIAL)
+                    if idx.isValid() and stacking_model.setData(idx, "", QtCore.Qt.EditRole):
+                        changed.append(laminate)
+                continue
+            idx = stacking_model.index(row, StackingTableModel.COL_MATERIAL)
+            if idx.isValid() and stacking_model.setData(idx, new_material, QtCore.Qt.EditRole):
+                changed.append(laminate)
+        if changed:
+            self.layers[row].material = new_material
+            model_index = self.index(row, self.COL_MATERIAL)
+            self.dataChanged.emit(model_index, model_index, [QtCore.Qt.DisplayRole, QtCore.Qt.EditRole])
+            self._emit_change_callbacks(changed)
+            return True
+        return False
+
+    def _set_rosette_for_row(self, row: int, value: str) -> bool:
+        rosette_value = str(value or "").strip() or DEFAULT_ROSETTE_LABEL
+        changed: list[Laminado] = []
+        for cell in self.cells:
+            laminate = cell.laminate
+            stacking_model = self._stacking_model_provider(laminate)
+            if stacking_model is None:
+                continue
+            layers = self._ensure_row_exists(stacking_model, row, laminate)
+            if row >= len(layers):
+                continue
+            target_layer = layers[row]
+            current_value = str(getattr(target_layer, "rosette", "") or "")
+            if current_value == rosette_value:
+                continue
+            target_layer.rosette = rosette_value
+            laminate.camadas = stacking_model.layers()
+            changed.append(laminate)
+        if changed:
+            self.layers[row].rosette = rosette_value
+            model_index = self.index(row, self.COL_ROSETTE)
+            self.dataChanged.emit(model_index, model_index, [QtCore.Qt.DisplayRole, QtCore.Qt.EditRole])
+            self._emit_change_callbacks(changed)
+            return True
+        return False
 
 
     # Public API ------------------------------------------------------
@@ -364,6 +492,7 @@ class VirtualStackingWindow(QtWidgets.QDialog):
     """Dialog that renders the Virtual Stacking spreadsheet-like view."""
 
     stacking_changed = QtCore.Signal(list)
+    closed = QtCore.Signal()
 
     def __init__(
         self,
@@ -384,6 +513,8 @@ class VirtualStackingWindow(QtWidgets.QDialog):
         self._cells: list[VirtualStackingCell] = []
         self._symmetry_row_index: int | None = None
         self._project: Optional[GridModel] = None
+        self._sorted_cell_ids: list[str] = []
+        self._initial_sort_done = False
         self._stacking_models: dict[int, StackingTableModel] = {}
         self.undo_stack = undo_stack or QtGui.QUndoStack(self)
 
@@ -398,6 +529,7 @@ class VirtualStackingWindow(QtWidgets.QDialog):
             change_callback=self._on_model_change,
             stacking_model_provider=self._stacking_model_for,
             post_edit_callback=self._after_laminate_changed,
+            most_used_material_provider=self._most_used_material,
         )
         self.table = QtWidgets.QTableView(self)
         self.table.setModel(self.model)
@@ -435,11 +567,18 @@ class VirtualStackingWindow(QtWidgets.QDialog):
         self.undo_stack.indexChanged.connect(lambda _idx: self._on_undo_stack_changed())
 
     def _apply_orientation_delegate(self) -> None:
+        material_delegate = MaterialComboDelegate(
+            self.table,
+            items_provider=lambda: project_distinct_materials(self._project),
+        )
+        self.table.setItemDelegateForColumn(
+            VirtualStackingModel.COL_MATERIAL, material_delegate
+        )
         delegate = OrientationComboDelegate(
             self.table,
             items_provider=lambda: project_distinct_orientations(self._project),
         )
-        for col in range(2, self.model.columnCount()):
+        for col in range(self.model.LAMINATE_COLUMN_OFFSET, self.model.columnCount()):
             self.table.setItemDelegateForColumn(col, delegate)
 
     def _build_summary_table(self) -> QtWidgets.QTableView:
@@ -518,7 +657,14 @@ class VirtualStackingWindow(QtWidgets.QDialog):
 
     def populate_from_project(self, project: Optional[GridModel]) -> None:
         """Populate labels and table using the provided project snapshot."""
+        previous_project = getattr(self, "_project", None)
         self._project = project
+        if project is None:
+            self._sorted_cell_ids = []
+            self._initial_sort_done = False
+        elif not self._initial_sort_done or project is not previous_project:
+            self._sorted_cell_ids = self._compute_sorted_cell_ids(project)
+            self._initial_sort_done = True
         self._rebuild_view()
 
     def _rebuild_view(self) -> None:
@@ -552,13 +698,26 @@ class VirtualStackingWindow(QtWidgets.QDialog):
             if laminate is None:
                 continue
             laminates.append(laminate)
-            cells.append(VirtualStackingCell(cell_id=cell_id, laminate=laminate))
+            cells.append(
+                VirtualStackingCell(
+                    cell_id=cell_id,
+                    laminate=laminate,
+                )
+            )
+
+        # Ordena apenas na abertura inicial; depois mantém a ordem já mostrada.
+        if self._sorted_cell_ids:
+            order = {cell_id: pos for pos, cell_id in enumerate(self._sorted_cell_ids)}
+            cells.sort(key=lambda c: order.get(c.cell_id, len(order)))
+        laminates = [cell.laminate for cell in cells]
 
         max_layers = max((len(lam.camadas) for lam in laminates), default=0)
         layers: list[VirtualStackingLayer] = []
         for idx in range(max_layers):
             material = ""
             sequence_label = ""
+            ply_label = ""
+            rosette = ""
             for lam in laminates:
                 if idx >= len(lam.camadas):
                     continue
@@ -567,14 +726,24 @@ class VirtualStackingWindow(QtWidgets.QDialog):
                     material = camada.material
                 if not sequence_label and getattr(camada, "sequence", ""):
                     sequence_label = camada.sequence
-                if material and sequence_label:
+                if not ply_label and getattr(camada, "ply_label", ""):
+                    ply_label = camada.ply_label
+                if not rosette and getattr(camada, "rosette", ""):
+                    rosette = camada.rosette
+                if material and sequence_label and ply_label and rosette:
                     break
             if not sequence_label:
                 sequence_label = f"Seq.{idx + 1}"
+            if not ply_label:
+                ply_label = f"Ply.{idx + 1}"
+            if not rosette:
+                rosette = DEFAULT_ROSETTE_LABEL
             layers.append(
                 VirtualStackingLayer(
                     sequence_label=sequence_label,
+                    ply_label=ply_label,
                     material=material,
+                    rosette=rosette,
                 )
             )
 
@@ -617,6 +786,23 @@ class VirtualStackingWindow(QtWidgets.QDialog):
                 self._project.mark_dirty(True)
             except Exception:
                 pass
+
+    def _most_used_material(self) -> Optional[str]:
+        """Retorna o material mais utilizado em todos os laminados carregados."""
+        if self._project is None:
+            return None
+        counts: Counter[str] = Counter()
+        for laminate in getattr(self._project, "laminados", {}).values():
+            for layer in getattr(laminate, "camadas", []):
+                if getattr(layer, "orientacao", None) is None:
+                    continue
+                material = str(getattr(layer, "material", "") or "").strip()
+                if material:
+                    counts[material] += 1
+        if not counts:
+            return None
+        most_common = counts.most_common(1)
+        return most_common[0][0] if most_common else None
 
     def _auto_rename_if_enabled(self, laminate: Laminado) -> None:
         if (
@@ -665,9 +851,9 @@ class VirtualStackingWindow(QtWidgets.QDialog):
             if not index.isValid():
                 continue
             selected_rows.add(index.row())
-            if index.column() < 2:
+            if index.column() < self.model.LAMINATE_COLUMN_OFFSET:
                 continue
-            cell_idx = index.column() - 2
+            cell_idx = index.column() - self.model.LAMINATE_COLUMN_OFFSET
             if 0 <= cell_idx < len(self._cells):
                 laminate = self._cells[cell_idx].laminate
                 targets.setdefault(laminate, set()).add(index.row())
@@ -675,8 +861,8 @@ class VirtualStackingWindow(QtWidgets.QDialog):
             current = self.table.currentIndex()
             if current.isValid():
                 selected_rows.add(current.row())
-                if current.column() >= 2:
-                    cell_idx = current.column() - 2
+                if current.column() >= self.model.LAMINATE_COLUMN_OFFSET:
+                    cell_idx = current.column() - self.model.LAMINATE_COLUMN_OFFSET
                     if 0 <= cell_idx < len(self._cells):
                         laminate = self._cells[cell_idx].laminate
                         targets.setdefault(laminate, set()).add(current.row())
@@ -730,15 +916,15 @@ class VirtualStackingWindow(QtWidgets.QDialog):
         metrics = self.fontMetrics()
         max_lines = 1
         for col in range(column_count):
-            if col < 2:
+            if col < self.model.LAMINATE_COLUMN_OFFSET:
                 text = ""
             else:
-                cell_idx = col - 2
+                cell_idx = col - self.model.LAMINATE_COLUMN_OFFSET
                 laminate = self._cells[cell_idx].laminate if 0 <= cell_idx < len(self._cells) else None
                 text = self._summary_for_laminate(laminate)
             item = QtGui.QStandardItem(text)
             item.setTextAlignment(QtCore.Qt.AlignCenter)
-            if col in (0, 1):
+            if col < self.model.LAMINATE_COLUMN_OFFSET:
                 item.setBackground(QtGui.QBrush(QtGui.QColor(240, 240, 240)))
             summary_model.setItem(0, col, item)
             max_lines = max(max_lines, max(1, text.count("\n") + 1))
@@ -770,10 +956,14 @@ class VirtualStackingWindow(QtWidgets.QDialog):
         if header is None:
             return
         if self.model.columnCount() >= 1:
-            header.resizeSection(0, 170)
+            header.resizeSection(VirtualStackingModel.COL_SEQUENCE, 150)
         if self.model.columnCount() >= 2:
-            header.resizeSection(1, 140)
-        for col in range(2, self.model.columnCount()):
+            header.resizeSection(VirtualStackingModel.COL_PLY, 90)
+        if self.model.columnCount() >= 3:
+            header.resizeSection(VirtualStackingModel.COL_MATERIAL, 160)
+        if self.model.columnCount() >= 4:
+            header.resizeSection(VirtualStackingModel.COL_ROSETTE, 140)
+        for col in range(self.model.LAMINATE_COLUMN_OFFSET, self.model.columnCount()):
             if header.sectionSize(col) < 110:
                 header.resizeSection(col, 110)
         self._resize_summary_columns()
@@ -798,7 +988,7 @@ class VirtualStackingWindow(QtWidgets.QDialog):
             if count_struct == 0:
                 continue
             if count_struct == 1:
-                green_cells.add((structural_rows[0], col + 2))
+                green_cells.add((structural_rows[0], col + self.model.LAMINATE_COLUMN_OFFSET))
                 continue
             i, j = 0, count_struct - 1
             broken = False
@@ -812,7 +1002,12 @@ class VirtualStackingWindow(QtWidgets.QDialog):
                 ori_top = self._orientation_token(getattr(camada_top, "orientacao", None))
                 ori_bot = self._orientation_token(getattr(camada_bot, "orientacao", None))
                 if not (mat_top == mat_bot and self._orientations_match(ori_top, ori_bot)):
-                    red_cells.update({(r_top, col + 2), (r_bot, col + 2)})
+                    red_cells.update(
+                        {
+                            (r_top, col + self.model.LAMINATE_COLUMN_OFFSET),
+                            (r_bot, col + self.model.LAMINATE_COLUMN_OFFSET),
+                        }
+                    )
                     broken = True
                     break
                 i += 1
@@ -820,12 +1015,20 @@ class VirtualStackingWindow(QtWidgets.QDialog):
             if broken:
                 continue
             if count_struct % 2 == 1:
-                green_cells.add((structural_rows[count_struct // 2], col + 2))
+                green_cells.add(
+                    (structural_rows[count_struct // 2], col + self.model.LAMINATE_COLUMN_OFFSET)
+                )
             else:
                 green_cells.update(
                     {
-                        (structural_rows[count_struct // 2 - 1], col + 2),
-                        (structural_rows[count_struct // 2], col + 2),
+                        (
+                            structural_rows[count_struct // 2 - 1],
+                            col + self.model.LAMINATE_COLUMN_OFFSET,
+                        ),
+                        (
+                            structural_rows[count_struct // 2],
+                            col + self.model.LAMINATE_COLUMN_OFFSET,
+                        ),
                     }
                 )
         self.model.set_highlights(red_cells, green_cells)
@@ -833,8 +1036,8 @@ class VirtualStackingWindow(QtWidgets.QDialog):
     def _targets_for_insertion(
         self, index: Optional[QtCore.QModelIndex] = None
     ) -> dict[Laminado, set[int]]:
-        if index is not None and index.isValid() and index.column() >= 2:
-            cell_idx = index.column() - 2
+        if index is not None and index.isValid() and index.column() >= self.model.LAMINATE_COLUMN_OFFSET:
+            cell_idx = index.column() - self.model.LAMINATE_COLUMN_OFFSET
             if 0 <= cell_idx < len(self._cells):
                 laminate = self._cells[cell_idx].laminate
                 return {laminate: {index.row()}}
@@ -843,9 +1046,9 @@ class VirtualStackingWindow(QtWidgets.QDialog):
     def _stacking_entry_for_index(
         self, index: QtCore.QModelIndex
     ) -> Optional[tuple[Laminado, StackingTableModel, int]]:
-        if not index.isValid() or index.column() < 2:
+        if not index.isValid() or index.column() < self.model.LAMINATE_COLUMN_OFFSET:
             return None
-        cell_idx = index.column() - 2
+        cell_idx = index.column() - self.model.LAMINATE_COLUMN_OFFSET
         if not (0 <= cell_idx < len(self._cells)):
             return None
         laminate = self._cells[cell_idx].laminate
@@ -940,7 +1143,7 @@ class VirtualStackingWindow(QtWidgets.QDialog):
 
     def _insert_layer(self, index: Optional[QtCore.QModelIndex] = None) -> None:
         # If a specific cell was clicked, handle that single insertion directly.
-        if index is not None and index.isValid() and index.column() >= 2:
+        if index is not None and index.isValid() and index.column() >= self.model.LAMINATE_COLUMN_OFFSET:
             entry = self._stacking_entry_for_index(index)
             if entry is None:
                 return
@@ -949,6 +1152,10 @@ class VirtualStackingWindow(QtWidgets.QDialog):
             command = _InsertLayerCommand(stacking_model, laminate, [insert_at])
             self._execute_command(command)
             laminate.camadas = stacking_model.layers()
+            try:
+                self.model._auto_fill_material_if_missing(laminate, stacking_model, insert_at)
+            except Exception:
+                pass
             self._after_laminate_changed(laminate)
             self._notify_changes([laminate.nome])
             return
@@ -980,6 +1187,11 @@ class VirtualStackingWindow(QtWidgets.QDialog):
                 command = _InsertLayerCommand(model, laminate, positions)
                 self._execute_command(command)
                 laminate.camadas = model.layers()
+                for pos in positions:
+                    try:
+                        self.model._auto_fill_material_if_missing(laminate, model, pos)
+                    except Exception:
+                        pass
                 self._after_laminate_changed(laminate)
                 affected.append(laminate.nome)
         if affected or touched:
@@ -1006,7 +1218,7 @@ class VirtualStackingWindow(QtWidgets.QDialog):
 
     def _show_context_menu(self, pos: QtCore.QPoint) -> None:
         index = self.table.indexAt(pos)
-        if not index.isValid() or index.column() < 2:
+        if not index.isValid() or index.column() < self.model.LAMINATE_COLUMN_OFFSET:
             return
         self.table.setCurrentIndex(index)
         menu = QtWidgets.QMenu(self)
@@ -1046,3 +1258,26 @@ class VirtualStackingWindow(QtWidgets.QDialog):
                 if idx < len(lam.camadas) and getattr(lam.camadas[idx], "simetria", False):
                     return idx
         return None
+
+    def _compute_sorted_cell_ids(self, project: Optional[GridModel]) -> list[str]:
+        """
+        Define a ordem inicial das colunas (decrescente por quantidade de camadas)
+        apenas quando a janela e populada. Edicoes posteriores preservam essa ordem.
+        """
+        if project is None:
+            return []
+        temp_cells: list[tuple[int, int, str]] = []
+        for idx, cell_id in enumerate(project.celulas_ordenadas):
+            laminate = self._laminate_for_cell(project, cell_id)
+            if laminate is None:
+                continue
+            temp_cells.append((len(getattr(laminate, "camadas", [])), idx, cell_id))
+        temp_cells.sort(key=lambda entry: (-entry[0], entry[1]))
+        return [cell_id for _, _, cell_id in temp_cells]
+
+    def closeEvent(self, event: QtGui.QCloseEvent) -> None:  # noqa: N802
+        super().closeEvent(event)
+        try:
+            self.closed.emit()
+        except Exception:
+            pass

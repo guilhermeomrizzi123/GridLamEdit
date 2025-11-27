@@ -12,6 +12,7 @@ from gridlamedit.io.spreadsheet import (
     Camada,
     DEFAULT_COLOR_INDEX,
     DEFAULT_PLY_TYPE,
+    DEFAULT_ROSETTE_LABEL,
     GridModel,
     Laminado,
     PLY_TYPE_OPTIONS,
@@ -61,6 +62,7 @@ def _serialize_model(model: GridModel) -> dict:
                         layer, "ply_label", f"Ply.{layer.idx + 1}"
                     ),
                     "sequence": getattr(layer, "sequence", f"Seq.{layer.idx + 1}"),
+                    "rosette": getattr(layer, "rosette", DEFAULT_ROSETTE_LABEL),
                 }
                 for layer in laminate.camadas
             ],
@@ -141,6 +143,7 @@ def _deserialize_model(data: dict) -> GridModel:
             ply_label_value = str(layer.get("ply_label", "") or "").strip()
             if not ply_label_value:
                 ply_label_value = f"Ply.{index + 1}"
+            rosette_value = str(layer.get("rosette", "") or "").strip() or DEFAULT_ROSETTE_LABEL
             layers.append(
                 Camada(
                     idx=int(layer.get("idx", index)),
@@ -151,6 +154,7 @@ def _deserialize_model(data: dict) -> GridModel:
                     ply_type=str(ply_type),
                     ply_label=ply_label_value,
                     sequence=sequence_value,
+                    rosette=rosette_value,
                 )
             )
         laminate = Laminado(
