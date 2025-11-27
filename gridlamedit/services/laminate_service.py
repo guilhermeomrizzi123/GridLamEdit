@@ -13,6 +13,7 @@ from gridlamedit.io.spreadsheet import (
     MAX_COLOR_INDEX,
     normalize_color_index,
     DEFAULT_COLOR_INDEX,
+    count_oriented_layers,
 )
 
 logger = logging.getLogger(__name__)
@@ -148,7 +149,7 @@ def auto_name_for_layers(
         same_count = [
             lam
             for lam in model.laminados.values()
-            if len(getattr(lam, "camadas", [])) == count
+            if count_oriented_layers(getattr(lam, "camadas", [])) == count
         ]
         if target in same_count:
             suffix_index = same_count.index(target)
@@ -170,7 +171,7 @@ def auto_name_for_laminate(
 
     return auto_name_for_layers(
         model,
-        layer_count=len(getattr(laminate, "camadas", [])),
+        layer_count=count_oriented_layers(getattr(laminate, "camadas", [])),
         tag=getattr(laminate, "tag", ""),
         target=laminate,
     )

@@ -7,7 +7,7 @@ import math
 import re
 import unicodedata
 import zipfile
-from collections import OrderedDict
+from collections import Counter, OrderedDict
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -57,6 +57,13 @@ ORIENTATION_MIN = -100.0
 ORIENTATION_MAX = 100.0
 _DEGREE_TOKENS = ("\N{DEGREE SIGN}", "\u00ba")
 _ORIENTATION_TEXT_PATTERN = re.compile(r"^[+-]?\d+(?:[.,]\d+)?$")
+ORIENTATION_HIGHLIGHT_COLORS: dict[float, QColor] = {
+    45.0: QColor(193, 174, 255),  # Lilás
+    90.0: QColor(160, 196, 255),  # Azul
+    -45.0: QColor(176, 230, 176),  # Verde claro
+    0.0: QColor(230, 230, 230),  # Cinza claro
+}
+DEFAULT_ORIENTATION_HIGHLIGHT = QColor(255, 236, 200)
 
 LAMINATE_ALIASES = ("Laminate", "Laminate Name", "Laminado", "Nome")
 COLOR_ALIASES = ("Color", "Colour", "Cor", "ColorIdx", "Color Index")
@@ -392,6 +399,38 @@ def normalize_angle(value: object) -> float:
     return number
 
 
+def _normalized_orientation_token(value: object) -> Optional[float]:
+    """Best-effort normalization without raising, returning None on failure."""
+    try:
+        return normalize_angle(value)
+    except Exception:
+        try:
+            return normalize_angle(str(value))
+        except Exception:
+            return None
+
+
+def layer_has_orientation(camada: Camada) -> bool:
+    """Retorna True se a camada possui orientacao preenchida."""
+    return getattr(camada, "orientacao", None) is not None
+
+
+def count_oriented_layers(layers: Iterable[Camada]) -> int:
+    """Conta apenas camadas com orientacao preenchida."""
+    return sum(1 for camada in layers if layer_has_orientation(camada))
+
+
+def orientation_highlight_color(value: object) -> Optional[QColor]:
+    """Retorna a cor de destaque para uma orientacao ou None se nao aplicavel."""
+    token = _normalized_orientation_token(value)
+    if token is None:
+        return None
+    for key, color in ORIENTATION_HIGHLIGHT_COLORS.items():
+        if math.isclose(token, key, abs_tol=1e-9):
+            return color
+    return DEFAULT_ORIENTATION_HIGHLIGHT
+
+
 def format_orientation_value(value: Optional[float]) -> str:
     """Retorna a orientacao formatada com simbolo de grau."""
     if value is None:
@@ -561,7 +600,9 @@ def load_grid_spreadsheet(path: str) -> GridModel:
         if cell_id not in laminado.celulas:
             laminado.celulas.append(cell_id)
 
-    total_camadas = sum(len(laminado.camadas) for laminado in laminados.values())
+    total_camadas = sum(
+        count_oriented_layers(laminado.camadas) for laminado in laminados.values()
+    )
     logger.info("Celulas importadas: %s", ", ".join(celulas_ordenadas))
     logger.info(
         "Planilha carregada com %d laminados, %d camadas e %d celulas.",
@@ -682,6 +723,7 @@ class StackingTableModel(QAbstractTableModel):
         change_callback: Optional[Callable[[list[Camada]], None]] = None,
         *,
         undo_stack: Optional[QUndoStack] = None,
+        most_used_material_provider: Optional[Callable[[], Optional[str]]] = None,
     ) -> None:
         super().__init__()
         self._camadas: list[Camada] = []
@@ -691,6 +733,7 @@ class StackingTableModel(QAbstractTableModel):
         self._rows_green: set[int] = set()
         self._undo_stack = undo_stack
         self._undo_suppressed = 0
+        self._most_used_material_provider = most_used_material_provider or (lambda: None)
         self.update_layers(camadas or [])
 
     def set_undo_stack(self, undo_stack: Optional[QUndoStack]) -> None:
@@ -762,11 +805,10 @@ class StackingTableModel(QAbstractTableModel):
     def _force_sequence_sync(self) -> None:
         if not self._camadas:
             return
+        prefix, separator = self._prefix_and_separator("sequence", "Seq")
         changed_rows: list[int] = []
         for idx, camada in enumerate(self._camadas):
-            current = getattr(camada, "sequence", "")
-            normalized = self._normalize_sequence_input(current, idx)
-            expected = normalized if normalized is not None else self._default_sequence_label(idx)
+            expected = f"{prefix}{separator}{idx + 1}"
             if camada.sequence != expected:
                 camada.sequence = expected
                 changed_rows.append(idx)
@@ -779,11 +821,10 @@ class StackingTableModel(QAbstractTableModel):
     def _force_ply_sync(self) -> None:
         if not self._camadas:
             return
+        prefix, separator = self._prefix_and_separator("ply_label", "Ply")
         changed_rows: list[int] = []
         for idx, camada in enumerate(self._camadas):
-            current = getattr(camada, "ply_label", "")
-            normalized = self._normalize_ply_input(current, idx)
-            expected = normalized if normalized is not None else self._default_ply_label(idx)
+            expected = f"{prefix}{separator}{idx + 1}"
             if camada.ply_label != expected:
                 camada.ply_label = expected
                 changed_rows.append(idx)
@@ -858,6 +899,15 @@ class StackingTableModel(QAbstractTableModel):
             if camada.orientacao is None and camada.material:
                 camada.material = ""
                 extra_columns.append(self.COL_MATERIAL)
+            elif (
+                camada.orientacao is not None
+                and not camada.material
+                and callable(self._most_used_material_provider)
+            ):
+                suggestion = str(self._most_used_material_provider() or "").strip()
+                if suggestion:
+                    camada.material = suggestion
+                    extra_columns.append(self.COL_MATERIAL)
         else:
             return False
 
@@ -1010,6 +1060,10 @@ class StackingTableModel(QAbstractTableModel):
                 return QColor(220, 53, 69)
             if row in self._rows_green:
                 return QColor(40, 167, 69)
+            if column == self.COL_ORIENTATION:
+                color = orientation_highlight_color(camada.orientacao)
+                if color is not None:
+                    return color
 
         return None
 
@@ -1231,11 +1285,21 @@ class StackingTableModel(QAbstractTableModel):
         self.beginInsertRows(QModelIndex(), position, position)
         self._camadas.insert(position, self._ensure_layer_defaults(camada))
         self._checked.insert(position, False)
+        inserted = self._camadas[position]
+        material_filled = False
+        if inserted.orientacao is not None and not inserted.material:
+            suggestion = str(self._most_used_material_provider() or "").strip()
+            if suggestion:
+                inserted.material = suggestion
+                material_filled = True
         self.endInsertRows()
         self._shift_highlights_on_insert(position)
         self._sync_indices()
         self._force_sequence_sync()
         self._force_ply_sync()
+        if material_filled:
+            material_index = self.index(position, self.COL_MATERIAL)
+            self.dataChanged.emit(material_index, material_index, [Qt.DisplayRole, Qt.EditRole])
         if self._change_callback:
             self._change_callback(self.layers())
 
@@ -1719,6 +1783,7 @@ class _GridUiBinding:
         self.stacking_model = StackingTableModel(
             change_callback=self._on_layers_modified,
             undo_stack=undo_stack,
+            most_used_material_provider=lambda: self._most_used_material(),
         )
         self._cells_widget: Optional[QListWidget] = None
         self._table_view: Optional[QTableView] = None
@@ -2033,6 +2098,20 @@ class _GridUiBinding:
             return []
         return [format_orientation_value(value) for value in orientations]
 
+    def _most_used_material(self) -> Optional[str]:
+        counts: Counter[str] = Counter()
+        for laminado in self.model.laminados.values():
+            for camada in laminado.camadas:
+                if camada.orientacao is None:
+                    continue
+                material = (camada.material or "").strip()
+                if material:
+                    counts[material] += 1
+        if not counts:
+            return None
+        most_common = counts.most_common(1)
+        return most_common[0][0] if most_common else None
+
     def _refresh_cell_item_label(self, cell_id: str) -> None:
         if self._cells_widget is None:
             return
@@ -2047,9 +2126,7 @@ class _GridUiBinding:
     def _update_layers_count(self, *args) -> None:
         label = getattr(self.ui, "layers_count_label", None)
         if label is not None and hasattr(label, "setText"):
-            oriented_layers = sum(
-                1 for camada in self.stacking_model.layers() if camada.orientacao is not None
-            )
+            oriented_layers = count_oriented_layers(self.stacking_model.layers())
             label.setText(
                 f"Quantidade Total de Camadas: {oriented_layers}"
             )

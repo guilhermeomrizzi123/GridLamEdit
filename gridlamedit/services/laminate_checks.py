@@ -104,7 +104,11 @@ def check_duplicates(laminates: Sequence[Laminado]) -> List[DuplicateGroup]:
 
 
 def _is_laminate_symmetric(laminado: Laminado) -> bool:
-    structural_layers = [layer for layer in laminado.camadas if _is_structural(layer)]
+    structural_layers = [
+        layer
+        for layer in laminado.camadas
+        if _is_structural(layer) and getattr(layer, "orientacao", None) is not None
+    ]
     count = len(structural_layers)
     if count <= 1:
         return True
@@ -194,11 +198,15 @@ def _stacking_signature(layers: Sequence[Camada]) -> str:
 
     tokens: list[str] = []
     for layer in layers:
+        if getattr(layer, "orientacao", None) is None:
+            continue
         material = _normalize_material(layer.material)
         orientation = _normalize_orientation(layer.orientacao)
         orientation_token = _orientation_token(orientation)
         ply_token = ply_type_signature_token(getattr(layer, "ply_type", ""))
         tokens.append(f"{material}@{orientation_token}@{ply_token}")
+    if not tokens:
+        return "stacking:empty"
     return ";".join(tokens)
 
 

@@ -20,6 +20,8 @@ from gridlamedit.io.spreadsheet import (
     StackingTableModel,
     WordWrapHeader,
     format_orientation_value,
+    orientation_highlight_color,
+    count_oriented_layers,
     is_structural_ply_label,
     normalize_angle,
 )
@@ -28,6 +30,7 @@ from gridlamedit.services.laminate_service import auto_name_for_laminate
 from gridlamedit.services.project_query import (
     project_distinct_materials,
     project_distinct_orientations,
+    project_most_used_material,
 )
 
 
@@ -255,6 +258,21 @@ class VirtualStackingModel(QtCore.QAbstractTableModel):
                 return QtGui.QBrush(QtGui.QColor(220, 53, 69))
             if (row, column) in self._green_cells:
                 return QtGui.QBrush(QtGui.QColor(40, 167, 69))
+            cell_index = column - self.LAMINATE_COLUMN_OFFSET
+            if 0 <= cell_index < len(self.cells):
+                laminate = self.cells[cell_index].laminate
+                layers = getattr(laminate, "camadas", [])
+                if 0 <= row < len(layers):
+                    color = orientation_highlight_color(
+                        getattr(layers[row], "orientacao", None)
+                    )
+                    if color is not None:
+                        if (
+                            self.symmetry_row_index is not None
+                            and row == self.symmetry_row_index
+                        ):
+                            return QtGui.QBrush(color.lighter(110))
+                        return QtGui.QBrush(color)
             if (
                 self.symmetry_row_index is not None
                 and row == self.symmetry_row_index
@@ -803,6 +821,7 @@ class VirtualStackingWindow(QtWidgets.QDialog):
                     lam, layers
                 ),
                 undo_stack=self.undo_stack,
+                most_used_material_provider=self._most_used_material,
             )
             self._stacking_models[key] = model
         else:
@@ -855,20 +874,7 @@ class VirtualStackingWindow(QtWidgets.QDialog):
 
     def _most_used_material(self) -> Optional[str]:
         """Retorna o material mais utilizado em todos os laminados carregados."""
-        if self._project is None:
-            return None
-        counts: Counter[str] = Counter()
-        for laminate in getattr(self._project, "laminados", {}).values():
-            for layer in getattr(laminate, "camadas", []):
-                if getattr(layer, "orientacao", None) is None:
-                    continue
-                material = str(getattr(layer, "material", "") or "").strip()
-                if material:
-                    counts[material] += 1
-        if not counts:
-            return None
-        most_common = counts.most_common(1)
-        return most_common[0][0] if most_common else None
+        return project_most_used_material(self._project)
 
     def _prompt_prefix_dialog(self, title: str, current_prefix: str) -> Optional[str]:
         dialog = QtWidgets.QDialog(self)
@@ -911,8 +917,8 @@ class VirtualStackingWindow(QtWidgets.QDialog):
             updated = False
             for idx, layer in enumerate(layers):
                 current_label = getattr(layer, target_attr, "")
-                number = self._extract_label_number(current_label, idx + 1)
-                target_label = f"{prefix}{number}"
+                separator = "." if "." in str(current_label) else ""
+                target_label = f"{prefix}{separator}{idx + 1}"
                 if str(current_label or "") == target_label:
                     continue
                 if model.apply_field_value(idx, column, target_label):
@@ -1038,13 +1044,15 @@ class VirtualStackingWindow(QtWidgets.QDialog):
             return ""
         layers = getattr(laminate, "camadas", [])
         orientations = Counter()
+        oriented_count = 0
         for camada in layers:
             token = self._orientation_token(getattr(camada, "orientacao", None))
             if token is None:
                 continue
+            oriented_count += 1
             label = format_orientation_value(token)
             orientations[label] += 1
-        parts = [f"Total: {len(layers)}"]
+        parts = [f"Total: {oriented_count}"]
         if orientations:
             ordered = sorted(
                 orientations.items(),
@@ -1133,7 +1141,10 @@ class VirtualStackingWindow(QtWidgets.QDialog):
             laminate = cell.laminate
             layers = getattr(laminate, "camadas", [])
             structural_rows = [
-                idx for idx, camada in enumerate(layers) if is_structural_ply_label(getattr(camada, "ply_type", DEFAULT_PLY_TYPE))
+                idx
+                for idx, camada in enumerate(layers)
+                if camada.orientacao is not None
+                and is_structural_ply_label(getattr(camada, "ply_type", DEFAULT_PLY_TYPE))
             ]
             count_struct = len(structural_rows)
             if count_struct == 0:
@@ -1418,7 +1429,11 @@ class VirtualStackingWindow(QtWidgets.QDialog):
     ) -> int | None:
         for idx in range(layer_count):
             for lam in laminates:
-                if idx < len(lam.camadas) and getattr(lam.camadas[idx], "simetria", False):
+                if (
+                    idx < len(lam.camadas)
+                    and getattr(lam.camadas[idx], "orientacao", None) is not None
+                    and getattr(lam.camadas[idx], "simetria", False)
+                ):
                     return idx
         return None
 
@@ -1434,7 +1449,7 @@ class VirtualStackingWindow(QtWidgets.QDialog):
             laminate = self._laminate_for_cell(project, cell_id)
             if laminate is None:
                 continue
-            temp_cells.append((len(getattr(laminate, "camadas", [])), idx, cell_id))
+            temp_cells.append((count_oriented_layers(getattr(laminate, "camadas", [])), idx, cell_id))
         temp_cells.sort(key=lambda entry: (-entry[0], entry[1]))
         return [cell_id for _, _, cell_id in temp_cells]
 

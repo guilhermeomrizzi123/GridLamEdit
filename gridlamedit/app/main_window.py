@@ -28,6 +28,7 @@ from PySide6.QtGui import (
     QCloseEvent,
     QIcon,
     QFont,
+    QColor,
     QGuiApplication,
     QKeySequence,
     QShortcut,
@@ -100,11 +101,14 @@ from gridlamedit.io.spreadsheet import (
     format_orientation_value,
     load_grid_spreadsheet,
     normalize_angle,
+    orientation_highlight_color,
+    count_oriented_layers,
 )
 from gridlamedit.services.excel_io import export_grid_xlsx
 from gridlamedit.services.project_query import (
     project_distinct_materials,
     project_distinct_orientations,
+    project_most_used_material,
 )
 from gridlamedit.services.laminate_checks import ChecksReport, run_all_checks
 from gridlamedit.services.laminate_service import (
@@ -170,7 +174,7 @@ def _build_auto_name_from_layers(
     target: Optional[Laminado] = None,
 ) -> str:
     """Return automatic name using the shared auto-name helper."""
-    layer_count = sum(1 for _ in layers)
+    layer_count = count_oriented_layers(layers)
     return auto_name_for_layers(
         model,
         layer_count=layer_count,
@@ -1591,10 +1595,11 @@ class MainWindow(QMainWindow):
         self, laminate: Optional[Laminado]
     ) -> str:
         layers = list(laminate.camadas) if laminate is not None else []
-        total_layers = len(layers)
+        oriented_layers = [camada for camada in layers if camada.orientacao is not None]
+        total_layers = len(oriented_layers)
         structural_layers = sum(
             1
-            for camada in layers
+            for camada in oriented_layers
             if is_structural_ply_label(getattr(camada, "ply_type", DEFAULT_PLY_TYPE))
         )
         non_structural_layers = total_layers - structural_layers
@@ -1602,7 +1607,7 @@ class MainWindow(QMainWindow):
         materials_counter: Counter[str] = Counter()
         orientations_counter: Counter[float] = Counter()
 
-        for camada in layers:
+        for camada in oriented_layers:
             material_text = (camada.material or "").strip()
             if material_text:
                 materials_counter[material_text] += 1
@@ -1794,7 +1799,7 @@ class MainWindow(QMainWindow):
             QTableWidget.SingleSelection
         )
         self.new_laminate_stacking_table.itemChanged.connect(
-            lambda *_: self._update_new_laminate_auto_name()
+            self._on_new_laminate_item_changed
         )
         layout.addWidget(self.new_laminate_stacking_table, stretch=1)
 
@@ -1920,6 +1925,15 @@ class MainWindow(QMainWindow):
         symmetry = self._checkbox_value(table, row, 3)
         return material, orientation, active, symmetry
 
+    def _apply_orientation_highlight_item(self, item: Optional[QTableWidgetItem]) -> None:
+        if item is None:
+            return
+        color = orientation_highlight_color(item.text())
+        if color is None:
+            item.setBackground(QColor())
+        else:
+            item.setBackground(color)
+
     def _apply_layer_row(
         self,
         table: QTableWidget,
@@ -1928,7 +1942,9 @@ class MainWindow(QMainWindow):
     ) -> None:
         material, orientation, active, symmetry = data
         table.setItem(row, 0, QTableWidgetItem(str(material)))
-        table.setItem(row, 1, QTableWidgetItem(str(orientation)))
+        orientation_item = QTableWidgetItem(str(orientation))
+        table.setItem(row, 1, orientation_item)
+        self._apply_orientation_highlight_item(orientation_item)
 
         active_checkbox = QCheckBox(table)
         active_checkbox.setChecked(active)
@@ -1937,6 +1953,36 @@ class MainWindow(QMainWindow):
         symmetry_checkbox = QCheckBox(table)
         symmetry_checkbox.setChecked(symmetry)
         table.setCellWidget(row, 3, self._wrap_checkbox(symmetry_checkbox))
+
+    def _on_new_laminate_item_changed(self, item: Optional[QTableWidgetItem]) -> None:
+        if item is None:
+            return
+        table = getattr(self, "new_laminate_stacking_table", None)
+        if not isinstance(table, QTableWidget):
+            return
+        row = item.row()
+        column = item.column()
+        if column == 1:
+            self._apply_orientation_highlight_item(item)
+            orientation_text = self._text(item)
+            material_item = table.item(row, 0)
+            if not orientation_text.strip():
+                if material_item is not None:
+                    material_item.setText("")
+            elif material_item is not None and not self._text(material_item):
+                suggestion = project_most_used_material(self._grid_model)
+                if suggestion:
+                    material_item.setText(suggestion)
+        if column == 0:
+            orientation_item = table.item(row, 1)
+            if self._text(item) and (orientation_item is None or not self._text(orientation_item)):
+                if orientation_item is None:
+                    orientation_item = QTableWidgetItem("0")
+                    table.setItem(row, 1, orientation_item)
+                else:
+                    orientation_item.setText("0")
+                self._apply_orientation_highlight_item(orientation_item)
+        self._update_new_laminate_auto_name()
 
     def _enter_creating_mode(self, checked: bool = False) -> None:  # noqa: ARG002
         if self.ui_state == UiState.CREATING:
@@ -2498,8 +2544,28 @@ class MainWindow(QMainWindow):
             return
         layers_snapshot = model.layers()
         changes: list[LayerFieldChange] = []
+        pattern = re.compile(r"^(?P<prefix>[A-Za-z][A-Za-z0-9_-]*)\.?(?P<number>\d+)$")
+        seed_prefix, seed_separator = "Seq", "."
+        for layer in layers_snapshot:
+            text = str(getattr(layer, "sequence", "") or "").strip()
+            match = pattern.fullmatch(text)
+            if match:
+                seed_prefix = match.group("prefix") or seed_prefix
+                seed_separator = "." if "." in text else seed_separator
+                break
+
+        def _label_parts(label: str) -> tuple[str, str]:
+            clean = str(label or "").strip()
+            match = pattern.fullmatch(clean)
+            if match:
+                prefix = match.group("prefix") or seed_prefix
+                separator = "." if "." in clean else seed_separator
+                return prefix, separator
+            return seed_prefix, seed_separator
+
         for row, layer in enumerate(layers_snapshot):
-            expected = f"Seq.{row + 1}"
+            prefix, separator = _label_parts(layer.sequence)
+            expected = f"{prefix}{separator}{row + 1}"
             stored_value = layer.sequence or ""
             display_value = stored_value or expected
             if display_value == expected:
