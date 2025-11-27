@@ -2,13 +2,24 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, Optional
+from typing import Callable, Iterable, Optional
 
 from PySide6 import QtCore, QtGui, QtWidgets
 
-from gridlamedit.io.spreadsheet import GridModel, Laminado, WordWrapHeader
+from gridlamedit.io.spreadsheet import (
+    Camada,
+    DEFAULT_PLY_TYPE,
+    GridModel,
+    Laminado,
+    StackingTableModel,
+    WordWrapHeader,
+    format_orientation_value,
+    normalize_angle,
+)
+from gridlamedit.app.dialogs.bulk_orientation_dialog import BulkOrientationDialog
+from gridlamedit.services.project_query import project_distinct_orientations
 
 
 @dataclass
@@ -24,18 +35,22 @@ class VirtualStackingCell:
     """Represent orientations of a laminado for each grid cell."""
 
     cell_id: str
-    laminate_name: str
-    orientations: list[Optional[float]] = field(default_factory=list)
+    laminate: Laminado
 
 
 class VirtualStackingModel(QtCore.QAbstractTableModel):
     """Qt model responsible for exposing Virtual Stacking data."""
 
-    def __init__(self, parent: Optional[QtCore.QObject] = None) -> None:
+    def __init__(
+        self,
+        parent: Optional[QtCore.QObject] = None,
+        change_callback: Optional[Callable[[list[str]], None]] = None,
+    ) -> None:
         super().__init__(parent)
         self.layers: list[VirtualStackingLayer] = []
         self.cells: list[VirtualStackingCell] = []
         self.symmetry_row_index: int | None = None
+        self._change_callback = change_callback
 
     # Basic structure -------------------------------------------------
     def rowCount(self, parent: QtCore.QModelIndex = QtCore.QModelIndex()) -> int:  # noqa: N802
@@ -66,7 +81,13 @@ class VirtualStackingModel(QtCore.QAbstractTableModel):
             cell_index = section - 2
             if 0 <= cell_index < len(self.cells):
                 cell = self.cells[cell_index]
-                return f"#\n{cell.cell_id} | {cell.laminate_name}"
+                laminate = cell.laminate
+                lam_name = getattr(laminate, "nome", "") or cell.cell_id
+                tag_text = (getattr(laminate, "tag", "") or "").strip()
+                label = f"#\n{cell.cell_id} | {lam_name}"
+                if tag_text:
+                    label = f"{label} ({tag_text})"
+                return label
         elif orientation == QtCore.Qt.Vertical:
             return str(section + 1)
         return None
@@ -97,12 +118,13 @@ class VirtualStackingModel(QtCore.QAbstractTableModel):
             cell_index = column - 2
             if 0 <= cell_index < len(self.cells):
                 cell = self.cells[cell_index]
-                if row < len(cell.orientations):
-                    value = cell.orientations[row]
+                layers = getattr(cell.laminate, "camadas", [])
+                if 0 <= row < len(layers):
+                    value = getattr(layers[row], "orientacao", None)
                     if value is None:
                         return ""
                     if role == QtCore.Qt.DisplayRole:
-                        return f"{value:g}°"
+                        return format_orientation_value(value)
                     return f"{value:g}"
                 return ""
 
@@ -147,27 +169,35 @@ class VirtualStackingModel(QtCore.QAbstractTableModel):
             return False
 
         cell = self.cells[cell_index]
-        if row >= len(cell.orientations):
+        laminate = cell.laminate
+        layers = getattr(laminate, "camadas", [])
+        if row >= len(layers):
             return False
 
         text = str(value).strip()
-        if text.endswith("°"):
+        if text.endswith("?"):
             text = text[:-1].strip()
 
         if not text:
             angle: Optional[float] = None
         else:
             try:
-                angle = float(text.replace(",", "."))
+                angle = normalize_angle(text.replace(",", "."))
             except ValueError:
                 return False
 
-            if angle < -100 or angle > 100:
-                return False
-
-        cell.orientations[row] = angle
+        model = StackingTableModel(camadas=layers)
+        if not model.apply_field_value(row, StackingTableModel.COL_ORIENTATION, angle):
+            return False
+        laminate.camadas = model.layers()
         self.dataChanged.emit(index, index, [QtCore.Qt.DisplayRole, QtCore.Qt.EditRole])
+        if self._change_callback:
+            try:
+                self._change_callback([laminate.nome])
+            except Exception:
+                pass
         return True
+
 
     # Public API ------------------------------------------------------
     def set_virtual_stacking(
@@ -178,22 +208,7 @@ class VirtualStackingModel(QtCore.QAbstractTableModel):
     ) -> None:
         self.beginResetModel()
         self.layers = list(layers)
-        layer_count = len(self.layers)
-        normalized_cells: list[VirtualStackingCell] = []
-        for cell in cells:
-            orientations = list(cell.orientations)
-            if len(orientations) < layer_count:
-                orientations.extend([None] * (layer_count - len(orientations)))
-            elif len(orientations) > layer_count:
-                orientations = orientations[:layer_count]
-            normalized_cells.append(
-                VirtualStackingCell(
-                    cell_id=cell.cell_id,
-                    laminate_name=cell.laminate_name,
-                    orientations=orientations,
-                )
-            )
-        self.cells = normalized_cells
+        self.cells = list(cells)
         self.symmetry_row_index = symmetry_row_index
         self.endResetModel()
 
@@ -210,21 +225,25 @@ class VirtualStackingModel(QtCore.QAbstractTableModel):
 class VirtualStackingWindow(QtWidgets.QDialog):
     """Dialog that renders the Virtual Stacking spreadsheet-like view."""
 
+    stacking_changed = QtCore.Signal(list)
+
     def __init__(self, parent: Optional[QtWidgets.QWidget] = None) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Virtual Stacking – View Mode: Cells")
+        self.setWindowTitle("Virtual Stacking - View Mode: Cells")
         self.resize(1200, 700)
 
         self._layers: list[VirtualStackingLayer] = []
         self._cells: list[VirtualStackingCell] = []
         self._symmetry_row_index: int | None = None
+        self._project: Optional[GridModel] = None
 
         self._build_ui()
 
+
     def _build_ui(self) -> None:
-        self.grid_label = QtWidgets.QLabel("Grid: [não definido]", self)
-        self.sheet_label = QtWidgets.QLabel("Folha: [não definida]", self)
-        self.range_label = QtWidgets.QLabel("Intervalo de células: [não definido]", self)
+        self.grid_label = QtWidgets.QLabel("Grid: [indefinido]", self)
+        self.sheet_label = QtWidgets.QLabel("Folha: [nao definida]", self)
+        self.range_label = QtWidgets.QLabel("Intervalo de celulas: [nao definido]", self)
 
         top_layout = QtWidgets.QHBoxLayout()
         top_layout.addWidget(self.grid_label)
@@ -232,7 +251,9 @@ class VirtualStackingWindow(QtWidgets.QDialog):
         top_layout.addWidget(self.range_label)
         top_layout.addStretch()
 
-        self.model = VirtualStackingModel(self)
+        toolbar_layout = self._build_toolbar()
+
+        self.model = VirtualStackingModel(self, change_callback=self._on_model_change)
         self.table = QtWidgets.QTableView(self)
         self.table.setModel(self.model)
         header = WordWrapHeader(QtCore.Qt.Horizontal, self.table)
@@ -242,7 +263,7 @@ class VirtualStackingWindow(QtWidgets.QDialog):
         self.table.verticalHeader().setVisible(False)
         self.table.setAlternatingRowColors(True)
         self.table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectItems)
-        self.table.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
+        self.table.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
         self.table.setEditTriggers(
             QtWidgets.QAbstractItemView.DoubleClicked
             | QtWidgets.QAbstractItemView.SelectedClicked
@@ -250,22 +271,79 @@ class VirtualStackingWindow(QtWidgets.QDialog):
 
         main_layout = QtWidgets.QVBoxLayout(self)
         main_layout.addLayout(top_layout)
+        if toolbar_layout is not None:
+            main_layout.addLayout(toolbar_layout)
         main_layout.addWidget(self.table)
         self.setLayout(main_layout)
 
+
+    def _build_toolbar(self) -> QtWidgets.QHBoxLayout:
+        layout = QtWidgets.QHBoxLayout()
+        layout.setSpacing(8)
+
+        self.btn_change_orientation = QtWidgets.QToolButton(self)
+        self.btn_change_orientation.setText("Trocar orientacao")
+        self.btn_change_orientation.setToolTip("Trocar orientacao das celulas selecionadas")
+        self.btn_change_orientation.clicked.connect(self._change_orientation)
+        layout.addWidget(self.btn_change_orientation)
+
+        self.btn_insert_above = QtWidgets.QToolButton(self)
+        self.btn_insert_above.setText("Inserir acima")
+        self.btn_insert_above.setToolTip("Inserir linha acima da selecao")
+        self.btn_insert_above.clicked.connect(lambda: self._insert_layer(below=False))
+        layout.addWidget(self.btn_insert_above)
+
+        self.btn_insert_below = QtWidgets.QToolButton(self)
+        self.btn_insert_below.setText("Inserir abaixo")
+        self.btn_insert_below.setToolTip("Inserir linha abaixo da selecao")
+        self.btn_insert_below.clicked.connect(lambda: self._insert_layer(below=True))
+        layout.addWidget(self.btn_insert_below)
+
+        self.btn_clear_layer = QtWidgets.QToolButton(self)
+        self.btn_clear_layer.setText("Limpar camada")
+        self.btn_clear_layer.setToolTip("Limpar material e orientacao das camadas selecionadas")
+        self.btn_clear_layer.clicked.connect(self._clear_selected_layers)
+        layout.addWidget(self.btn_clear_layer)
+
+        layout.addStretch()
+
+        self.btn_toggle_maximize = QtWidgets.QToolButton(self)
+        self.btn_toggle_maximize.setText("Maximizar")
+        self.btn_toggle_maximize.setToolTip("Alternar visualizacao maximizada")
+        self.btn_toggle_maximize.setCheckable(True)
+        self.btn_toggle_maximize.clicked.connect(self._toggle_maximize)
+        layout.addWidget(self.btn_toggle_maximize)
+
+        return layout
+
     # Data binding ----------------------------------------------------
+
     def populate_from_project(self, project: Optional[GridModel]) -> None:
         """Populate labels and table using the provided project snapshot."""
-        if project is None:
+        self._project = project
+        self._rebuild_view()
+
+    def _rebuild_view(self) -> None:
+        if self._project is None:
             self._layers = []
             self._cells = []
             self._symmetry_row_index = None
             self.model.set_virtual_stacking([], [], None)
             self.grid_label.setText("Grid: [indefinido]")
-            self.sheet_label.setText("Folha: [não definida]")
-            self.range_label.setText("Intervalo de células: [não definido]")
+            self.sheet_label.setText("Folha: [nao definida]")
+            self.range_label.setText("Intervalo de celulas: [indefinido]")
             return
 
+        layers, cells, symmetry_index = self._collect_virtual_data(self._project)
+        self._layers = layers
+        self._cells = cells
+        self._symmetry_row_index = symmetry_index
+        self.model.set_virtual_stacking(layers, cells, symmetry_index)
+        self._update_labels(cells)
+
+    def _collect_virtual_data(
+        self, project: GridModel
+    ) -> tuple[list[VirtualStackingLayer], list[VirtualStackingCell], int | None]:
         cells: list[VirtualStackingCell] = []
         laminates: list[Laminado] = []
         for cell_id in project.celulas_ordenadas:
@@ -273,14 +351,7 @@ class VirtualStackingWindow(QtWidgets.QDialog):
             if laminate is None:
                 continue
             laminates.append(laminate)
-            orientations = [layer.orientacao for layer in laminate.camadas]
-            cells.append(
-                VirtualStackingCell(
-                    cell_id=cell_id,
-                    laminate_name=laminate.nome or cell_id,
-                    orientations=orientations,
-                )
-            )
+            cells.append(VirtualStackingCell(cell_id=cell_id, laminate=laminate))
 
         max_layers = max((len(lam.camadas) for lam in laminates), default=0)
         layers: list[VirtualStackingLayer] = []
@@ -291,7 +362,7 @@ class VirtualStackingWindow(QtWidgets.QDialog):
                 if idx >= len(lam.camadas):
                     continue
                 camada = lam.camadas[idx]
-                if not material and camada.material:
+                if not material and getattr(camada, "material", ""):
                     material = camada.material
                 if not sequence_label and getattr(camada, "sequence", ""):
                     sequence_label = camada.sequence
@@ -307,25 +378,158 @@ class VirtualStackingWindow(QtWidgets.QDialog):
             )
 
         symmetry_index = self._detect_symmetry_row(laminates, max_layers)
+        return layers, cells, symmetry_index
 
-        self._layers = layers
-        self._cells = cells
-        self._symmetry_row_index = symmetry_index
-
-        self.model.set_virtual_stacking(layers, cells, symmetry_index)
-
-        grid_name = project.source_excel_path or "[indefinido]"
-        if grid_name not in ("[indefinido]", ""):
-            grid_name = Path(grid_name).name
-
-        self.grid_label.setText(f"Grid: {grid_name or '[indefinido]'}")
-        self.sheet_label.setText("Folha: [não definida]")
+    def _update_labels(self, cells: list[VirtualStackingCell]) -> None:
+        grid_name = self._project.source_excel_path if self._project is not None else None
+        display_name = grid_name or "[indefinido]"
+        if display_name not in ("[indefinido]", ""):
+            display_name = Path(display_name).name
+        self.grid_label.setText(f"Grid: {display_name or '[indefinido]'}")
+        self.sheet_label.setText("Folha: [nao definida]")
         if cells:
             self.range_label.setText(
-                f"Intervalo de células: {cells[0].cell_id} ... {cells[-1].cell_id}"
+                f"Intervalo de celulas: {cells[0].cell_id} ... {cells[-1].cell_id}"
             )
         else:
-            self.range_label.setText("Intervalo de células: [vazio]")
+            self.range_label.setText("Intervalo de celulas: [vazio]")
+
+
+    def _selected_targets(self) -> dict[Laminado, set[int]]:
+        if not hasattr(self, "table") or self.table.selectionModel() is None:
+            return {}
+        targets: dict[Laminado, set[int]] = {}
+        for index in self.table.selectionModel().selectedIndexes():
+            if not index.isValid() or index.column() < 2:
+                continue
+            cell_idx = index.column() - 2
+            if cell_idx < 0 or cell_idx >= len(self._cells):
+                continue
+            laminate = self._cells[cell_idx].laminate
+            targets.setdefault(laminate, set()).add(index.row())
+        return targets
+
+    def _change_orientation(self) -> None:
+        targets = self._selected_targets()
+        if not targets:
+            QtWidgets.QMessageBox.information(
+                self,
+                "Trocar orientacao",
+                "Selecione pelo menos uma celula para alterar a orientacao.",
+            )
+            return
+        project_orientations = project_distinct_orientations(self._project)
+        dialog = BulkOrientationDialog(
+            parent=self,
+            available_orientations=project_orientations,
+        )
+        if dialog.exec() != QtWidgets.QDialog.Accepted:
+            return
+        new_orientation = dialog.new_orientation
+        if new_orientation is None:
+            return
+        affected: list[str] = []
+        for laminate, rows in targets.items():
+            model = StackingTableModel(camadas=list(laminate.camadas))
+            changed = False
+            for row in sorted(rows):
+                if row >= model.rowCount():
+                    continue
+                if model.apply_field_value(
+                    row, StackingTableModel.COL_ORIENTATION, new_orientation
+                ):
+                    changed = True
+            if changed:
+                laminate.camadas = model.layers()
+                affected.append(laminate.nome)
+        if affected:
+            self._notify_changes(affected)
+
+    def _insert_layer(self, *, below: bool) -> None:
+        targets = self._selected_targets()
+        if not targets:
+            QtWidgets.QMessageBox.information(
+                self,
+                "Inserir camada",
+                "Selecione pelo menos uma linha para inserir uma nova camada.",
+            )
+            return
+        affected: list[str] = []
+        for laminate, rows in targets.items():
+            model = StackingTableModel(camadas=list(laminate.camadas))
+            changed = False
+            ordered = sorted(rows, reverse=below)
+            for row in ordered:
+                insert_at = row + 1 if below else row
+                insert_at = min(max(insert_at, 0), model.rowCount())
+                model.insert_layer(
+                    insert_at,
+                    Camada(
+                        idx=0,
+                        material="",
+                        orientacao=0,
+                        ativo=True,
+                        simetria=False,
+                        ply_type=DEFAULT_PLY_TYPE,
+                    ),
+                )
+                changed = True
+            if changed:
+                laminate.camadas = model.layers()
+                affected.append(laminate.nome)
+        if affected:
+            self._notify_changes(affected)
+
+    def _clear_selected_layers(self) -> None:
+        targets = self._selected_targets()
+        if not targets:
+            QtWidgets.QMessageBox.information(
+                self,
+                "Limpar camada",
+                "Selecione pelo menos uma celula para limpar.",
+            )
+            return
+        affected: list[str] = []
+        for laminate, rows in targets.items():
+            model = StackingTableModel(camadas=list(laminate.camadas))
+            changed = False
+            for row in sorted(rows):
+                if row >= model.rowCount():
+                    continue
+                if model.apply_field_value(row, StackingTableModel.COL_MATERIAL, ""):
+                    changed = True
+                if model.apply_field_value(row, StackingTableModel.COL_ORIENTATION, None):
+                    changed = True
+            if changed:
+                laminate.camadas = model.layers()
+                affected.append(laminate.nome)
+        if affected:
+            self._notify_changes(affected)
+
+    def _toggle_maximize(self) -> None:
+        if self.isMaximized():
+            self.showNormal()
+            self.btn_toggle_maximize.setText("Maximizar")
+            self.btn_toggle_maximize.setChecked(False)
+        else:
+            self.showMaximized()
+            self.btn_toggle_maximize.setText("Restaurar")
+            self.btn_toggle_maximize.setChecked(True)
+
+    def _on_model_change(self, laminate_names: list[str]) -> None:
+        self._notify_changes(laminate_names)
+
+    def _notify_changes(self, laminate_names: list[str]) -> None:
+        if self._project is not None:
+            try:
+                self._project.mark_dirty(True)
+            except Exception:
+                pass
+        self._rebuild_view()
+        try:
+            self.stacking_changed.emit(laminate_names)
+        except Exception:
+            pass
 
     def _laminate_for_cell(
         self, model: GridModel, cell_id: str

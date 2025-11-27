@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
 from gridlamedit.io.spreadsheet import GridModel
 from gridlamedit.services.laminate_service import (
     LaminateCreationError,
+    auto_name_for_layers,
     create_laminate_with_association,
 )
 
@@ -83,6 +84,11 @@ class NewLaminateDialog(QDialog):
         self.edt_nome.setPlaceholderText("Ex.: WEB-RIB-26")
         self.edt_nome.setClearButtonEnabled(True)
         form_layout.addRow("Nome:", self.edt_nome)
+
+        self.edt_tag = QLineEdit(self)
+        self.edt_tag.setPlaceholderText("Opcional")
+        self.edt_tag.textChanged.connect(self._update_auto_name)
+        form_layout.addRow("Tag:", self.edt_tag)
 
         self.chk_auto_rename = QCheckBox("Automatic Rename", self)
         self.chk_auto_rename.setObjectName("chkAutomaticRenameNewLaminate")
@@ -149,6 +155,7 @@ class NewLaminateDialog(QDialog):
     def reset_fields(self) -> None:
         """Reset user inputs to defaults."""
         self.edt_nome.clear()
+        self.edt_tag.clear()
         if self.cmb_cor.count():
             self.cmb_cor.setCurrentIndex(0)
         if self.cmb_tipo.count():
@@ -200,6 +207,7 @@ class NewLaminateDialog(QDialog):
         if not celula:
             QMessageBox.warning(self, "Campos obrigatórios", "Selecione uma célula para associar.")
             return
+        tag_value = self.edt_tag.text()
         try:
             laminado = create_laminate_with_association(
                 self._grid_model,
@@ -207,6 +215,7 @@ class NewLaminateDialog(QDialog):
                 cor or self.cmb_cor.currentText(),
                 tipo,
                 celula,
+                tag=tag_value,
             )
         except LaminateCreationError as exc:
             QMessageBox.warning(self, "Não foi possível criar", str(exc))
@@ -227,5 +236,16 @@ class NewLaminateDialog(QDialog):
     def _handle_auto_rename_toggle(self, checked: bool) -> None:
         self.edt_nome.setReadOnly(checked)
         self.cmb_cor.setEnabled(not checked)
-        if checked and not self.edt_nome.text().strip():
-            self.edt_nome.setText("L0")
+        if checked:
+            self._update_auto_name()
+
+    def _update_auto_name(self) -> None:
+        if not self.chk_auto_rename.isChecked():
+            return
+        auto_name = auto_name_for_layers(
+            self._grid_model,
+            layer_count=0,
+            tag=self.edt_tag.text(),
+        )
+        if auto_name:
+            self.edt_nome.setText(auto_name)

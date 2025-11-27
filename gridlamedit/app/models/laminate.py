@@ -15,6 +15,7 @@ class Laminate:
     name: str
     color: str
     type: str
+    tag: str = ""
     layers: list[Layer] = field(default_factory=list)
     associated_cells: list[str] = field(default_factory=list)
     symmetry_index: Optional[int] = None

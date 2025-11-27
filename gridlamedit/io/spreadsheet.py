@@ -30,6 +30,7 @@ from PySide6.QtWidgets import (
     QStyle,
     QStyleOptionHeader,
     QStyleOptionButton,
+    QLineEdit,
     QListWidget,
     QListWidgetItem,
     QSizePolicy,
@@ -60,6 +61,7 @@ _ORIENTATION_TEXT_PATTERN = re.compile(r"^[+-]?\d+(?:[.,]\d+)?$")
 LAMINATE_ALIASES = ("Laminate", "Laminate Name", "Laminado", "Nome")
 COLOR_ALIASES = ("Color", "Colour", "Cor", "ColorIdx", "Color Index")
 TYPE_ALIASES = ("Type", "Tipo")
+TAG_ALIASES = ("Tag",)
 MATERIAL_ALIASES = ("Material",)
 ORIENTATION_ALIASES = ("Orientation", "Orientacao", "Orientacao", "Angle", "Angulo", "Angulo")
 ACTIVE_ALIASES = ("Active", "Ativo", "Status")
@@ -317,6 +319,7 @@ class Laminado:
     nome: str
     tipo: str
     color_index: int | str = DEFAULT_COLOR_INDEX
+    tag: str = ""
     celulas: list[str] = field(default_factory=list)
     camadas: list[Camada] = field(default_factory=list)
     auto_rename_enabled: bool = False
@@ -1493,6 +1496,7 @@ def _parse_configuration_section(
 
     normalized_color_aliases = {_normalize_header(alias) for alias in COLOR_ALIASES}
     normalized_type_aliases = {_normalize_header(alias) for alias in TYPE_ALIASES}
+    normalized_tag_aliases = {_normalize_header(alias) for alias in TAG_ALIASES}
 
     idx = 0
     while idx < len(df):
@@ -1520,6 +1524,7 @@ def _parse_configuration_section(
 
         color_index = DEFAULT_COLOR_INDEX
         laminate_type = ""
+        laminate_tag = ""
 
         while idx < len(df):
             row = df.iloc[idx]
@@ -1548,6 +1553,11 @@ def _parse_configuration_section(
 
             if normalized in normalized_type_aliases:
                 laminate_type = _string_or_empty(row.iloc[1] if len(row) > 1 else "")
+                idx += 1
+                continue
+
+            if normalized in normalized_tag_aliases:
+                laminate_tag = _string_or_empty(row.iloc[1] if len(row) > 1 else "")
                 idx += 1
                 continue
 
@@ -1634,6 +1644,7 @@ def _parse_configuration_section(
             nome=laminate_name,
             tipo=laminate_type,
             color_index=color_index,
+            tag=laminate_tag,
             celulas=[],
             camadas=layers,
         )
@@ -1879,6 +1890,12 @@ class _GridUiBinding:
             type_combo = getattr(self.ui, "laminate_type_combo", None)
             if isinstance(type_combo, QComboBox):
                 type_combo.setEditText(laminado.tipo)
+
+            tag_edit = getattr(self.ui, "laminate_tag_edit", None)
+            if isinstance(tag_edit, QLineEdit):
+                tag_edit.blockSignals(True)
+                tag_edit.setText(getattr(laminado, "tag", ""))
+                tag_edit.blockSignals(False)
 
             self._update_associated_cells_widget(
                 self._cells_for_laminate(laminado.nome)

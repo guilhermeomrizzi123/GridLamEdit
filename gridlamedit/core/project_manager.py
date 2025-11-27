@@ -47,6 +47,7 @@ def _serialize_model(model: GridModel) -> dict:
             "nome": laminate.nome,
             "color_index": color_index,
             "tipo": laminate.tipo,
+            "tag": getattr(laminate, "tag", ""),
             "celulas": list(laminate.celulas),
             "camadas": [
                 {
@@ -156,6 +157,7 @@ def _deserialize_model(data: dict) -> GridModel:
             nome=lam_name,
             tipo=str(lam_data.get("tipo", "")),
             color_index=color_value,
+            tag=str(lam_data.get("tag", "") or ""),
             celulas=list(lam_data.get("celulas", [])),
             camadas=layers,
             auto_rename_enabled=bool(

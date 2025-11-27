@@ -106,6 +106,10 @@ from gridlamedit.services.project_query import (
     project_distinct_orientations,
 )
 from gridlamedit.services.laminate_checks import ChecksReport, run_all_checks
+from gridlamedit.services.laminate_service import (
+    auto_name_for_laminate,
+    auto_name_for_layers,
+)
 from gridlamedit.ui.dialogs.duplicate_removal_dialog import DuplicateRemovalDialog
 from gridlamedit.ui.dialogs.new_laminate_dialog import NewLaminateDialog
 from gridlamedit.ui.dialogs.verification_report_dialog import VerificationReportDialog
@@ -157,36 +161,21 @@ def _normalize_orientation_for_summary(value: object) -> Optional[float]:
             return None
 
 
-def _count_oriented_layers(layers: Iterable[Camada]) -> tuple[int, Counter[float]]:
-    """Return total oriented layers and counts by angle."""
-    counts: Counter[float] = Counter()
-    total = 0
-    for camada in layers:
-        normalized = _normalize_orientation_for_summary(
-            getattr(camada, "orientacao", None)
-        )
-        if normalized is None:
-            continue
-        total += 1
-        counts[normalized] += 1
-    return total, counts
-
-
-def _format_auto_name(total_layers: int, counts: Counter[float]) -> str:
-    base = f"L{total_layers}"
-    if not counts:
-        return base
-    ordered = sorted(counts.keys())
-    suffix = "".join(
-        f"(P{counts[angle]}|{format_orientation_value(angle)})"
-        for angle in ordered
+def _build_auto_name_from_layers(
+    layers: Iterable[Camada],
+    *,
+    model: Optional[GridModel] = None,
+    tag: str = "",
+    target: Optional[Laminado] = None,
+) -> str:
+    """Return automatic name using the shared auto-name helper."""
+    layer_count = sum(1 for _ in layers)
+    return auto_name_for_layers(
+        model,
+        layer_count=layer_count,
+        tag=tag,
+        target=target,
     )
-    return f"{base}{suffix}"
-
-
-def _build_auto_name_from_layers(layers: Iterable[Camada]) -> str:
-    total, counts = _count_oriented_layers(layers)
-    return _format_auto_name(total, counts)
 
 
 def _load_icon_from_resources(
@@ -374,6 +363,12 @@ class MainWindow(QMainWindow):
         """Open the Virtual Stacking dialog populated with the current project."""
         if self._virtual_stacking_window is None:
             self._virtual_stacking_window = VirtualStackingWindow(self)
+            try:
+                self._virtual_stacking_window.stacking_changed.connect(
+                    self._on_virtual_stacking_changed
+                )
+            except Exception:
+                logger.debug("Nao foi possivel conectar sinal do Virtual Stacking.", exc_info=True)
 
         project = self._grid_model
         self._virtual_stacking_window.populate_from_project(project)
@@ -476,6 +471,11 @@ class MainWindow(QMainWindow):
         name_row.addWidget(self.auto_rename_checkbox)
         name_row.addLayout(name_combo_layout)
         layout.addLayout(name_row)
+        name_combo = getattr(self, "laminate_name_combo", None)
+        if isinstance(name_combo, QComboBox):
+            line_edit = name_combo.lineEdit()
+            if line_edit is not None:
+                line_edit.editingFinished.connect(self._on_manual_name_edited)
         layout.addLayout(
             self._combo_with_label(
                 "Cor:", (str(i) for i in range(1, 151)), "color", editable=False
@@ -485,6 +485,17 @@ class MainWindow(QMainWindow):
             "Tipo:", ["Core", "Skin", "Custom"], "type"
         )
         layout.addLayout(type_layout)
+        tag_layout = QHBoxLayout()
+        tag_layout.setSpacing(6)
+        tag_layout.setContentsMargins(0, 0, 0, 0)
+        tag_label = QLabel("Tag:", self)
+        self.laminate_tag_edit = QLineEdit(self)
+        self.laminate_tag_edit.setPlaceholderText("Opcional")
+        self.laminate_tag_edit.setMinimumWidth(140)
+        self.laminate_tag_edit.editingFinished.connect(self._on_tag_changed)
+        tag_layout.addWidget(tag_label)
+        tag_layout.addWidget(self.laminate_tag_edit)
+        layout.addLayout(tag_layout)
         self._attach_new_laminate_button(type_layout)
         layout.addStretch()
         return layout
@@ -568,22 +579,6 @@ class MainWindow(QMainWindow):
             laminate.nome,
         )
 
-    def _generate_unique_laminate_name(
-        self, base_name: str, laminate: Laminado
-    ) -> str:
-        if self._grid_model is None:
-            return base_name
-        laminados = self._grid_model.laminados
-        candidate = base_name or laminate.nome
-        suffix = 1
-        while (
-            candidate in laminados
-            and laminados[candidate] is not laminate
-        ):
-            candidate = f"{base_name}_{suffix}"
-            suffix += 1
-        return candidate
-
     def _rename_laminate(self, laminate: Laminado, new_name: str) -> None:
         if self._grid_model is None:
             return
@@ -639,8 +634,7 @@ class MainWindow(QMainWindow):
             return
         self._auto_rename_guard = True
         try:
-            auto_name = _build_auto_name_from_layers(laminate.camadas)
-            auto_name = self._generate_unique_laminate_name(auto_name, laminate)
+            auto_name = auto_name_for_laminate(self._grid_model, laminate)
             changed = False
             if force or auto_name != laminate.nome:
                 before = laminate.nome
@@ -686,6 +680,49 @@ class MainWindow(QMainWindow):
             self._apply_auto_rename_if_needed(laminate, force=True)
         self._mark_dirty()
 
+    def _on_manual_name_edited(self) -> None:
+        laminate = self._current_laminate_instance()
+        combo = getattr(self, "laminate_name_combo", None)
+        if laminate is None or not isinstance(combo, QComboBox):
+            return
+        line_edit = combo.lineEdit()
+        if line_edit is None:
+            return
+        if getattr(laminate, "auto_rename_enabled", False):
+            line_edit.setText(laminate.nome)
+            return
+        new_name = line_edit.text().strip()
+        if not new_name or new_name == laminate.nome:
+            line_edit.setText(laminate.nome)
+            return
+        if self._grid_model is None:
+            return
+        existing = self._grid_model.laminados.get(new_name)
+        if existing is not None and existing is not laminate:
+            QMessageBox.warning(
+                self,
+                "Nome indisponivel",
+                "Ja existe um laminado com esse nome.",
+            )
+            line_edit.setText(laminate.nome)
+            return
+        self._rename_laminate(laminate, new_name)
+        self._refresh_main_laminate_dropdown(select_name=new_name)
+        self._on_binding_laminate_changed(new_name)
+        self._mark_dirty()
+
+    def _on_tag_changed(self) -> None:
+        laminate = self._current_laminate_instance()
+        edit = getattr(self, "laminate_tag_edit", None)
+        if laminate is None or not isinstance(edit, QLineEdit):
+            return
+        new_tag = edit.text().strip()
+        if getattr(laminate, "tag", "") == new_tag:
+            return
+        laminate.tag = new_tag
+        self._mark_dirty()
+        self._apply_auto_rename_if_needed(laminate, force=True)
+
     def _on_binding_laminate_changed(
         self, laminate_name: Optional[str]
     ) -> None:
@@ -706,6 +743,21 @@ class MainWindow(QMainWindow):
         else:
             laminate = self._current_laminate_instance()
         self._apply_auto_rename_if_needed(laminate)
+        self._refresh_virtual_stacking_view()
+
+    def _on_virtual_stacking_changed(self, laminate_names: list[str]) -> None:
+        if self._grid_model is None:
+            return
+        binding, model, current_laminate = self._stacking_binding_context()
+        if model is not None and current_laminate is not None:
+            if current_laminate.nome in laminate_names:
+                model.update_layers(current_laminate.camadas)
+        for name in laminate_names:
+            laminate = self._grid_model.laminados.get(name)
+            if laminate is not None:
+                self._apply_auto_rename_if_needed(laminate, force=True)
+        self.update_stacking_summary_ui()
+        self._mark_dirty()
 
     def _sync_all_auto_renamed_laminates(self) -> None:
         if self._grid_model is None:
@@ -763,7 +815,16 @@ class MainWindow(QMainWindow):
         if self._setting_new_laminate_name:
             return
         layers = self._collect_new_laminate_layers_for_auto_name()
-        auto_name = _build_auto_name_from_layers(layers)
+        tag_text = ""
+        tag_edit = getattr(self, "new_laminate_tag_edit", None)
+        if hasattr(tag_edit, "text"):
+            tag_text = tag_edit.text()
+        auto_name = _build_auto_name_from_layers(
+            layers,
+            model=self._grid_model,
+            tag=tag_text,
+            target=None,
+        )
         self._setting_new_laminate_name = True
         try:
             name_edit.setText(auto_name)
@@ -1661,6 +1722,15 @@ class MainWindow(QMainWindow):
         form_row.addWidget(type_label)
         form_row.addWidget(self.new_laminate_type_combo)
 
+        tag_label = QLabel("Tag:", view)
+        self.new_laminate_tag_edit = QLineEdit(view)
+        self.new_laminate_tag_edit.setPlaceholderText("Opcional")
+        self.new_laminate_tag_edit.textChanged.connect(
+            lambda *_: self._update_new_laminate_auto_name()
+        )
+        form_row.addWidget(tag_label)
+        form_row.addWidget(self.new_laminate_tag_edit)
+
         form_row.addStretch()
         layout.addLayout(form_row)
 
@@ -1746,6 +1816,8 @@ class MainWindow(QMainWindow):
 
     def _reset_new_laminate_form(self) -> None:
         self.new_laminate_name_edit.clear()
+        if hasattr(self, "new_laminate_tag_edit"):
+            self.new_laminate_tag_edit.clear()
         if hasattr(self, "new_laminate_color_combo"):
             default_idx = self.new_laminate_color_combo.findText(
                 str(DEFAULT_COLOR_INDEX)
@@ -1908,10 +1980,15 @@ class MainWindow(QMainWindow):
             )
             return
 
+        tag_text = ""
+        tag_edit = getattr(self, "new_laminate_tag_edit", None)
+        if isinstance(tag_edit, QLineEdit):
+            tag_text = tag_edit.text().strip()
         laminado = Laminado(
             nome=name,
             tipo=tipo,
             color_index=color_index,
+            tag=tag_text,
             celulas=[],
             camadas=camadas,
         )
@@ -2726,6 +2803,7 @@ class MainWindow(QMainWindow):
         bind_cells_to_ui(self._grid_model, self)
         current_name = getattr(binding, "_current_laminate", None) if binding else None
         self._on_binding_laminate_changed(current_name)
+        self._refresh_virtual_stacking_view()
         self._apply_ui_state(self.project_manager.get_ui_state())
         self.project_manager.capture_from_model(
             self._grid_model, self._collect_ui_state()
@@ -2770,6 +2848,7 @@ class MainWindow(QMainWindow):
         bind_cells_to_ui(self._grid_model, self)
         current_name = getattr(binding, "_current_laminate", None) if binding else None
         self._on_binding_laminate_changed(current_name)
+        self._refresh_virtual_stacking_view()
         self._apply_ui_state(self.project_manager.get_ui_state())
         self.project_manager.capture_from_model(
             self._grid_model, self._collect_ui_state()
@@ -3148,6 +3227,16 @@ class MainWindow(QMainWindow):
             return
         self._grid_model.dirty = True
         self.project_manager.mark_dirty(True)
+        self._refresh_virtual_stacking_view()
+
+    def _refresh_virtual_stacking_view(self) -> None:
+        window = getattr(self, "_virtual_stacking_window", None)
+        if window is None:
+            return
+        try:
+            window.populate_from_project(self._grid_model)
+        except Exception:  # pragma: no cover - defensive
+            logger.debug("Falha ao atualizar Virtual Stacking.", exc_info=True)
 
     def _update_save_actions_enabled(self) -> None:
         has_model = self._grid_model is not None

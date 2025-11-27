@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from collections import OrderedDict
-from typing import Union
+from typing import Optional, Union
 
 from gridlamedit.io.spreadsheet import (
     GridModel,
@@ -35,6 +35,8 @@ def create_laminate_with_association(
     cor: Union[str, int],
     tipo: str,
     celula_id: Union[str, int],
+    *,
+    tag: str = "",
 ) -> Laminado:
     """
     Create a Laminate with empty stacking, persist it on ``model`` and bind it to ``celula_id``.
@@ -95,6 +97,7 @@ def create_laminate_with_association(
         color_index=color_index,
         celulas=[cell],
         camadas=[],
+        tag=str(tag or "").strip(),
     )
 
     target_map[name] = laminado
@@ -112,3 +115,62 @@ def create_laminate_with_association(
         logger.debug("GridModel missing mark_dirty; skipping dirty mark.")
 
     return laminado
+
+
+def _build_auto_name(base: str, suffix_index: int, tag: str) -> str:
+    suffix = f".{suffix_index}" if suffix_index > 0 else ""
+    tag_text = str(tag or "").strip()
+    tag_suffix = f"({tag_text})" if tag_text else ""
+    return f"{base}{suffix}{tag_suffix}"
+
+
+def auto_name_for_layers(
+    model: Optional[GridModel],
+    *,
+    layer_count: int,
+    tag: str = "",
+    target: Optional[Laminado] = None,
+) -> str:
+    """
+    Generate an automatic name following the L<N>[.k][(Tag)] pattern.
+
+    The suffix ``.k`` is assigned based on the number of laminates with the same
+    ``layer_count`` already present in ``model`` (in insertion order). The Tag
+    text is appended in parentheses when provided.
+    """
+
+    count = max(0, int(layer_count))
+    base = f"L{count}"
+    suffix_index = 0
+    used_names: set[str] = set()
+
+    if model is not None:
+        same_count = [
+            lam
+            for lam in model.laminados.values()
+            if len(getattr(lam, "camadas", [])) == count
+        ]
+        if target in same_count:
+            suffix_index = same_count.index(target)
+        else:
+            suffix_index = len(same_count)
+        used_names = {name for name, lam in model.laminados.items() if lam is not target}
+
+    candidate = _build_auto_name(base, suffix_index, tag)
+    while candidate in used_names:
+        suffix_index += 1
+        candidate = _build_auto_name(base, suffix_index, tag)
+    return candidate
+
+
+def auto_name_for_laminate(
+    model: Optional[GridModel], laminate: Laminado
+) -> str:
+    """Convenience wrapper around :func:`auto_name_for_layers` for a laminate."""
+
+    return auto_name_for_layers(
+        model,
+        layer_count=len(getattr(laminate, "camadas", [])),
+        tag=getattr(laminate, "tag", ""),
+        target=laminate,
+    )
