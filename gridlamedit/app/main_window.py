@@ -362,7 +362,9 @@ class MainWindow(QMainWindow):
     def open_virtual_stacking(self) -> None:
         """Open the Virtual Stacking dialog populated with the current project."""
         if self._virtual_stacking_window is None:
-            self._virtual_stacking_window = VirtualStackingWindow(self)
+            self._virtual_stacking_window = VirtualStackingWindow(
+                self, undo_stack=self.undo_stack
+            )
             try:
                 self._virtual_stacking_window.stacking_changed.connect(
                     self._on_virtual_stacking_changed
