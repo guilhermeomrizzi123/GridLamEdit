@@ -1265,7 +1265,9 @@ class MainWindow(QMainWindow):
             self._on_select_all_layers_clicked,
             "Selecionar todos",
             QStyle.SP_DialogYesButton,
+            tool_button_style=Qt.ToolButtonTextBesideIcon,
         )
+        self.select_all_layers_button.setIconSize(QSize(20, 20))
 
         self.clear_selection_button = make_button(
             None,
@@ -1273,10 +1275,12 @@ class MainWindow(QMainWindow):
             self._on_clear_selection_clicked,
             "Limpar seleção",
             QStyle.SP_DialogResetButton,
+            tool_button_style=Qt.ToolButtonTextBesideIcon,
         )
+        self.clear_selection_button.setIconSize(QSize(20, 20))
 
         self.btn_undo = make_button(
-            "undo.svg",
+            ":/icons/undo.svg",
             "Desfazer (Ctrl+Z)",
             self.undo_stack.undo,
             "Desfazer (Ctrl+Z)",
@@ -1285,7 +1289,7 @@ class MainWindow(QMainWindow):
         self.btn_undo.setEnabled(False)
 
         self.btn_redo = make_button(
-            "redo.svg",
+            ":/icons/redo.svg",
             "Refazer (Ctrl+Y)",
             self.undo_stack.redo,
             "Refazer (Ctrl+Y)",
@@ -1294,7 +1298,7 @@ class MainWindow(QMainWindow):
         self.btn_redo.setEnabled(False)
 
         self.btn_show_stacking_summary = make_button(
-            "stacking_summary.svg",
+            ":/icons/stacking_summary.svg",
             "Abrir Resumo do Stacking",
             self._show_stacking_summary,
             "Abrir Resumo do Stacking",
@@ -3050,6 +3054,11 @@ class MainWindow(QMainWindow):
     def _snapshot_from_model(self) -> None:
         if self._grid_model is None:
             return
+        if self._virtual_stacking_window is not None:
+            try:
+                self._virtual_stacking_window.persist_column_order()
+            except Exception:
+                pass
         ui_state = self._collect_ui_state()
         self.project_manager.capture_from_model(self._grid_model, ui_state)
 

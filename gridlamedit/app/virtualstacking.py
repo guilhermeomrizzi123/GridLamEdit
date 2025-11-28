@@ -186,6 +186,7 @@ class VirtualStackingModel(QtCore.QAbstractTableModel):
         self._unbalanced_columns: set[int] = set()
         self._warning_icon = QtGui.QIcon()
         self._selected_columns: set[int] = set()
+        self._column_summaries: list[str] = []
 
     # Basic structure -------------------------------------------------
     def rowCount(self, parent: QtCore.QModelIndex = QtCore.QModelIndex()) -> int:  # noqa: N802
@@ -240,6 +241,10 @@ class VirtualStackingModel(QtCore.QAbstractTableModel):
                     if tag_suffix not in display_name:
                         display_name = f"{display_name}{tag_suffix}"
                 label = f"#\n{cell.cell_id} | {display_name}"
+                if 0 <= cell_index < len(self._column_summaries):
+                    summary = self._column_summaries[cell_index].strip()
+                    if summary:
+                        label = f"{label}\n{summary}"
                 return label
         elif orientation == QtCore.Qt.Vertical:
             return str(section + 1)
@@ -403,7 +408,12 @@ class VirtualStackingModel(QtCore.QAbstractTableModel):
         if not target_index.isValid():
             return False
         # Permit blank values; delegate validation to StackingTableModel.
-        if not stacking_model.setData(target_index, normalized_value, QtCore.Qt.EditRole):
+        success = stacking_model.setData(target_index, normalized_value, QtCore.Qt.EditRole)
+        if not success:
+            success = stacking_model.apply_field_value(
+                row, StackingTableModel.COL_ORIENTATION, normalized_value
+            )
+        if not success:
             return False
         laminate.camadas = stacking_model.layers()
         self._auto_fill_material_if_missing(laminate, stacking_model, row)
@@ -636,6 +646,14 @@ class VirtualStackingModel(QtCore.QAbstractTableModel):
             bottom_right = self.createIndex(len(self.layers) - 1, self.columnCount() - 1)
             self.dataChanged.emit(top_left, bottom_right, [QtCore.Qt.BackgroundRole])
 
+    def set_column_summaries(self, summaries: list[str]) -> None:
+        """Store summaries per laminate column for display in headers."""
+        self._column_summaries = summaries
+        if self.columnCount() > self.LAMINATE_COLUMN_OFFSET:
+            first = self.LAMINATE_COLUMN_OFFSET
+            last = self.columnCount() - 1
+            self.headerDataChanged.emit(QtCore.Qt.Horizontal, first, last)
+
 
 class VirtualStackingWindow(QtWidgets.QDialog):
     """Dialog that renders the Virtual Stacking spreadsheet-like view."""
@@ -660,6 +678,7 @@ class VirtualStackingWindow(QtWidgets.QDialog):
         self._apply_window_icon()
         self.resize(1200, 700)
 
+        self._settings = QtCore.QSettings("GridLamEdit", "GridLamEdit")
         self._layers: list[VirtualStackingLayer] = []
         self._cells: list[VirtualStackingCell] = []
         self._symmetry_row_index: int | None = None
@@ -668,6 +687,9 @@ class VirtualStackingWindow(QtWidgets.QDialog):
         self._initial_sort_done = False
         self._stacking_models: dict[int, StackingTableModel] = {}
         self._selected_cell_ids: set[str] = set()
+        self._restoring_column_order = False
+        self._column_order_key = "virtual_stacking/column_order"
+        self._warning_banner_icon = QtGui.QIcon()
         self.undo_stack = undo_stack or QtGui.QUndoStack(self)
 
         self._build_ui()
@@ -714,8 +736,12 @@ class VirtualStackingWindow(QtWidgets.QDialog):
         header.setDefaultAlignment(QtCore.Qt.AlignCenter)
         self.table.setHorizontalHeader(header)
         header.setSectionResizeMode(QtWidgets.QHeaderView.Interactive)
+        header.setSectionsMovable(True)
         header.setStretchLastSection(False)
+        # Aumenta a altura do cabeçalho para acomodar nome + resumo multilinha.
+        header.setFixedHeight(max(header.sizeHint().height(), 150))
         header.sectionResized.connect(lambda *_: self._resize_summary_columns())
+        header.sectionMoved.connect(self._on_header_section_moved)
         header.sectionClicked.connect(self._on_header_section_clicked)
         self.table.verticalHeader().setVisible(False)
         self.table.setAlternatingRowColors(True)
@@ -730,17 +756,17 @@ class VirtualStackingWindow(QtWidgets.QDialog):
         self.table.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self._show_context_menu)
         self._apply_orientation_delegate()
-        self.summary_table = self._build_summary_table()
-        self._sync_scrollbars()
-
+        # Removemos a tabela de resumo flutuante que criava um bloco branco no topo.
+        self.summary_table = None
         main_layout = QtWidgets.QVBoxLayout(self)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(0)
         if toolbar_layout is not None:
             main_layout.addLayout(toolbar_layout)
         if prefix_layout is not None:
             main_layout.addLayout(prefix_layout)
+        main_layout.setContentsMargins(4, 4, 4, 4)
         main_layout.addWidget(self.table)
-        if self.summary_table is not None:
-            main_layout.addWidget(self.summary_table)
         self.setLayout(main_layout)
         self.undo_stack.canUndoChanged.connect(self._update_undo_buttons)
         self.undo_stack.canRedoChanged.connect(self._update_undo_buttons)
@@ -790,6 +816,8 @@ class VirtualStackingWindow(QtWidgets.QDialog):
         summary.setModel(QtGui.QStandardItemModel(1, 0, summary))
         summary.verticalHeader().setVisible(False)
         summary.horizontalHeader().setVisible(False)
+        summary.horizontalHeader().setSectionsMovable(True)
+        summary.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.Fixed)
         summary.setWordWrap(True)
         summary.setTextElideMode(QtCore.Qt.ElideNone)
         summary.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
@@ -799,6 +827,8 @@ class VirtualStackingWindow(QtWidgets.QDialog):
         summary.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
         summary.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
         summary.setStyleSheet("QTableView { gridline-color: transparent; }")
+        summary.setFrameShape(QtWidgets.QFrame.NoFrame)
+        summary.setShowGrid(False)
         font = summary.font()
         if font.pointSize() > 0:
             font.setPointSize(max(font.pointSize() - 1, 8))
@@ -806,26 +836,96 @@ class VirtualStackingWindow(QtWidgets.QDialog):
         return summary
 
     def _sync_scrollbars(self) -> None:
-        table_scroll = self.table.horizontalScrollBar()
-        summary_scroll = self.summary_table.horizontalScrollBar()
-        if table_scroll is None or summary_scroll is None:
+        # Rolagem horizontal unificada via QScrollArea; nada a sincronizar manualmente.
+        pass
+
+    def _current_header_order(self) -> list[int]:
+        header = self.table.horizontalHeader()
+        if header is None:
+            return []
+        return [header.logicalIndex(i) for i in range(header.count())]
+
+    def _apply_header_order_to_summary(self) -> None:
+        header = self.table.horizontalHeader()
+        summary_header = (
+            self.summary_table.horizontalHeader()
+            if getattr(self, "summary_table", None)
+            else None
+        )
+        if (
+            header is None
+            or summary_header is None
+            or summary_header.count() != header.count()
+        ):
             return
+        order = self._current_header_order()
+        for visual_pos, logical in enumerate(order):
+            current_visual = summary_header.visualIndex(logical)
+            if current_visual != visual_pos:
+                summary_header.blockSignals(True)
+                try:
+                    summary_header.moveSection(current_visual, visual_pos)
+                finally:
+                    summary_header.blockSignals(False)
 
-        def mirror(value: int, target: QtWidgets.QScrollBar) -> None:
-            target.blockSignals(True)
-            target.setValue(value)
-            target.blockSignals(False)
+    def _mirror_summary_section_move(self, old_visual: int, new_visual: int) -> None:
+        summary_header = (
+            self.summary_table.horizontalHeader()
+            if hasattr(self, "summary_table")
+            else None
+        )
+        if summary_header is None:
+            return
+        summary_header.blockSignals(True)
+        try:
+            summary_header.moveSection(old_visual, new_visual)
+        finally:
+            summary_header.blockSignals(False)
 
-        def mirror_range(minimum: int, maximum: int, target: QtWidgets.QScrollBar) -> None:
-            target.blockSignals(True)
-            target.setRange(minimum, maximum)
-            target.setPageStep(table_scroll.pageStep())
-            target.blockSignals(False)
+    def _persist_column_order(self) -> None:
+        order = self._current_header_order()
+        try:
+            self._settings.setValue(self._column_order_key, order)
+        except Exception:
+            pass
 
-        table_scroll.valueChanged.connect(lambda v: mirror(v, summary_scroll))
-        summary_scroll.valueChanged.connect(lambda v: mirror(v, table_scroll))
-        table_scroll.rangeChanged.connect(lambda mn, mx: mirror_range(mn, mx, summary_scroll))
-        mirror(table_scroll.value(), summary_scroll)
+    def persist_column_order(self) -> None:
+        """Public wrapper to persist the current visual order of the columns."""
+        self._persist_column_order()
+
+    def _restore_column_order(self) -> None:
+        header = self.table.horizontalHeader()
+        if header is None or header.count() == 0:
+            return
+        raw_value = None
+        try:
+            raw_value = self._settings.value(self._column_order_key, [])
+        except Exception:
+            raw_value = []
+        if raw_value in (None, ""):
+            return
+        try:
+            saved_order = [int(val) for val in raw_value]
+        except Exception:
+            return
+        current_count = header.count()
+        valid = [idx for idx in saved_order if 0 <= idx < current_count]
+        remaining = [idx for idx in range(current_count) if idx not in valid]
+        target_order = valid + remaining
+        self._restoring_column_order = True
+        try:
+            for visual_pos, logical in enumerate(target_order):
+                current_visual = header.visualIndex(logical)
+                if current_visual != visual_pos:
+                    header.moveSection(current_visual, visual_pos)
+            self._apply_header_order_to_summary()
+        finally:
+            self._restoring_column_order = False
+
+    def _on_header_section_moved(self, logical_index: int, old_visual: int, new_visual: int) -> None:  # noqa: ARG002
+        self._mirror_summary_section_move(old_visual, new_visual)
+        if not self._restoring_column_order:
+            self._persist_column_order()
 
     def _on_header_section_clicked(self, logical_index: int) -> None:
         if logical_index < self.model.LAMINATE_COLUMN_OFFSET:
@@ -945,42 +1045,83 @@ class VirtualStackingWindow(QtWidgets.QDialog):
         self._mark_project_dirty()
 
 
+    def _warning_icon_for_banner(self) -> QtGui.QIcon:
+        if self._warning_banner_icon and not self._warning_banner_icon.isNull():
+            return self._warning_banner_icon
+        icon = QtGui.QIcon(":/icons/warning.png")
+        if icon.isNull():
+            candidate = package_path("resources", "icons", "warning.png")
+            if candidate.is_file():
+                icon = QtGui.QIcon(str(candidate))
+        if icon.isNull():
+            icon = self.style().standardIcon(QtWidgets.QStyle.SP_MessageBoxWarning)
+        self._warning_banner_icon = icon
+        return icon
+
     def _build_toolbar(self) -> QtWidgets.QHBoxLayout:
-        layout = QtWidgets.QHBoxLayout()
-        layout.setSpacing(8)
+        toolbar = QtWidgets.QHBoxLayout()
+        toolbar.setSpacing(10)
+        toolbar.setContentsMargins(6, 4, 6, 4)
 
-        layout.addStretch()
+        # Indicador de salvamento.
+        self.lbl_auto_saving = QtWidgets.QLabel("Automatic Saving Active", self)
+        self.lbl_auto_saving.setSizePolicy(
+            QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Fixed
+        )
+        self.lbl_auto_saving.setStyleSheet("background: transparent; margin: 0; padding: 0;")
+        toolbar.addWidget(self.lbl_auto_saving)
 
-        self.lbl_auto_saving = QtWidgets.QLabel("Automatic Saving", self)
-        layout.addWidget(self.lbl_auto_saving)
+        # Aviso de desbalanceamento inline.
+        warning_container = QtWidgets.QHBoxLayout()
+        warning_container.setSpacing(4)
+        warning_container.setContentsMargins(0, 0, 0, 0)
+        warning_icon_label = QtWidgets.QLabel(self)
+        warning_icon = self._warning_icon_for_banner()
+        if warning_icon is not None and not warning_icon.isNull():
+            warning_icon_label.setPixmap(warning_icon.pixmap(18, 18))
+        else:
+            warning_icon_label.setVisible(False)
+        warning_container.addWidget(warning_icon_label)
+        warning_container.addWidget(QtWidgets.QLabel("Laminado Desbalanceado", self))
+        warning_widget = QtWidgets.QWidget(self)
+        warning_widget.setLayout(warning_container)
+        warning_widget.setAttribute(QtCore.Qt.WA_TranslucentBackground, True)
+        warning_widget.setStyleSheet("background: transparent; margin: 0; padding: 0;")
+        toolbar.addWidget(warning_widget)
 
+        toolbar.addStretch()
+
+        # Controles de movimentação.
         self.btn_move_left = QtWidgets.QToolButton(self)
         self.btn_move_left.setIcon(self.style().standardIcon(QtWidgets.QStyle.SP_ArrowLeft))
         self.btn_move_left.setToolTip("Mover coluna selecionada para a esquerda")
         self.btn_move_left.clicked.connect(lambda: self._move_selected_column(-1))
-        layout.addWidget(self.btn_move_left)
+        toolbar.addWidget(self.btn_move_left)
 
         self.btn_move_right = QtWidgets.QToolButton(self)
         self.btn_move_right.setIcon(self.style().standardIcon(QtWidgets.QStyle.SP_ArrowRight))
         self.btn_move_right.setToolTip("Mover coluna selecionada para a direita")
         self.btn_move_right.clicked.connect(lambda: self._move_selected_column(1))
-        layout.addWidget(self.btn_move_right)
+        toolbar.addWidget(self.btn_move_right)
 
+        toolbar.addSpacing(6)
+
+        # Controles de desfazer/refazer.
         self.btn_undo = QtWidgets.QToolButton(self)
         self.btn_undo.setText("Desfazer")
         self.btn_undo.setToolTip("Desfazer alteracao (Ctrl+Z)")
         self.btn_undo.clicked.connect(self.undo_stack.undo)
         self.btn_undo.setEnabled(self.undo_stack.canUndo())
-        layout.addWidget(self.btn_undo)
+        toolbar.addWidget(self.btn_undo)
 
         self.btn_redo = QtWidgets.QToolButton(self)
         self.btn_redo.setText("Refazer")
         self.btn_redo.setToolTip("Refazer alteracao (Ctrl+Y)")
         self.btn_redo.clicked.connect(self.undo_stack.redo)
         self.btn_redo.setEnabled(self.undo_stack.canRedo())
-        layout.addWidget(self.btn_redo)
+        toolbar.addWidget(self.btn_redo)
 
-        return layout
+        return toolbar
 
     # Data binding ----------------------------------------------------
 
@@ -1017,6 +1158,7 @@ class VirtualStackingWindow(QtWidgets.QDialog):
         self._refresh_stacking_models(cells)
         self.model.set_virtual_stacking(layers, cells, symmetry_index)
         self._apply_orientation_delegate()
+        self._restore_column_order()
         self._resize_columns()
         self._apply_column_selection()
         self._update_summary_row()
@@ -1369,41 +1511,17 @@ class VirtualStackingWindow(QtWidgets.QDialog):
         return "\n".join(parts)
 
     def _update_summary_row(self) -> None:
-        summary_model = (
-            self.summary_table.model()
-            if hasattr(self, "summary_table")
-            else None
-        )
-        if not isinstance(summary_model, QtGui.QStandardItemModel):
-            return
+        # Gera resumos e injeta no cabeçalho das colunas de laminados.
         column_count = self.model.columnCount()
-        summary_model.setColumnCount(column_count)
-        metrics = (
-            self.summary_table.fontMetrics()
-            if hasattr(self, "summary_table")
-            else self.fontMetrics()
-        )
-        max_lines = 1
-        for col in range(column_count):
-            if col < self.model.LAMINATE_COLUMN_OFFSET:
-                text = ""
-            else:
-                cell_idx = col - self.model.LAMINATE_COLUMN_OFFSET
-                laminate = self._cells[cell_idx].laminate if 0 <= cell_idx < len(self._cells) else None
-                text = self._summary_for_laminate(laminate)
-            item = QtGui.QStandardItem(text)
-            if col < self.model.LAMINATE_COLUMN_OFFSET:
-                alignment = QtCore.Qt.AlignCenter
-            else:
-                alignment = QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter
-            item.setTextAlignment(alignment)
-            summary_model.setItem(0, col, item)
-            max_lines = max(max_lines, max(1, text.count("\n") + 1))
-        self._update_summary_height(max_lines, metrics)
-        self._resize_summary_columns()
+        summaries: list[str] = []
+        for col in range(column_count - self.model.LAMINATE_COLUMN_OFFSET):
+            cell_idx = col
+            laminate = self._cells[cell_idx].laminate if 0 <= cell_idx < len(self._cells) else None
+            summaries.append(self._summary_for_laminate(laminate))
+        self.model.set_column_summaries(summaries)
 
     def _update_summary_height(self, lines: int, metrics: QtGui.QFontMetrics) -> None:
-        if not hasattr(self, "summary_table"):
+        if not getattr(self, "summary_table", None):
             return
         line_height = metrics.lineSpacing() + 2
         padding = 10
@@ -1419,7 +1537,7 @@ class VirtualStackingWindow(QtWidgets.QDialog):
         header = self.table.horizontalHeader()
         summary_header = (
             self.summary_table.horizontalHeader()
-            if hasattr(self, "summary_table")
+            if getattr(self, "summary_table", None)
             else None
         )
         if header is None or summary_header is None:
@@ -1431,16 +1549,23 @@ class VirtualStackingWindow(QtWidgets.QDialog):
         header = self.table.horizontalHeader()
         if header is None:
             return
+        metrics = header.fontMetrics()
+        padding = 18
         if self.model.columnCount() >= 1:
-            header.resizeSection(VirtualStackingModel.COL_SEQUENCE, 150)
+            seq_width = max(metrics.horizontalAdvance("Sequence") + padding, 70)
+            header.resizeSection(VirtualStackingModel.COL_SEQUENCE, seq_width)
         if self.model.columnCount() >= 2:
-            header.resizeSection(VirtualStackingModel.COL_PLY, 90)
+            ply_width = max(metrics.horizontalAdvance("Ply") + padding, 55)
+            header.resizeSection(VirtualStackingModel.COL_PLY, ply_width)
         if self.model.columnCount() >= 3:
-            header.resizeSection(VirtualStackingModel.COL_PLY_TYPE, 150)
+            ply_type_width = max(metrics.horizontalAdvance("Simetria") + padding, 90)
+            header.resizeSection(VirtualStackingModel.COL_PLY_TYPE, ply_type_width)
         if self.model.columnCount() >= 4:
-            header.resizeSection(VirtualStackingModel.COL_MATERIAL, 160)
+            material_width = max(metrics.horizontalAdvance("Material") + padding * 2, 140)
+            header.resizeSection(VirtualStackingModel.COL_MATERIAL, material_width)
         if self.model.columnCount() >= 5:
-            header.resizeSection(VirtualStackingModel.COL_ROSETTE, 140)
+            rosette_width = max(metrics.horizontalAdvance("Rosette") + padding, 80)
+            header.resizeSection(VirtualStackingModel.COL_ROSETTE, rosette_width)
         for col in range(self.model.LAMINATE_COLUMN_OFFSET, self.model.columnCount()):
             if header.sectionSize(col) < 110:
                 header.resizeSection(col, 110)
@@ -1811,6 +1936,10 @@ class VirtualStackingWindow(QtWidgets.QDialog):
 
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:  # noqa: N802
         super().closeEvent(event)
+        try:
+            self.persist_column_order()
+        except Exception:
+            pass
         try:
             self.closed.emit()
         except Exception:
