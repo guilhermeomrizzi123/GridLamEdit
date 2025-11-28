@@ -33,7 +33,7 @@ from gridlamedit.app.delegates import (
     OrientationComboDelegate,
     PlyTypeComboDelegate,
 )
-from gridlamedit.services.laminate_service import auto_name_for_laminate
+from gridlamedit.services.laminate_service import auto_name_for_laminate, sync_material_by_sequence
 from gridlamedit.core.paths import package_path
 from gridlamedit.services.project_query import (
     project_distinct_materials,
@@ -162,6 +162,7 @@ class VirtualStackingModel(QtCore.QAbstractTableModel):
         ] = None,
         post_edit_callback: Optional[Callable[[Laminado], None]] = None,
         most_used_material_provider: Optional[Callable[[], Optional[str]]] = None,
+        material_sync_handler: Optional[Callable[[int, str], list[Laminado]]] = None,
     ) -> None:
         super().__init__(parent)
         self.layers: list[VirtualStackingLayer] = []
@@ -171,10 +172,12 @@ class VirtualStackingModel(QtCore.QAbstractTableModel):
         self._stacking_model_provider = stacking_model_provider or (lambda _lam: None)
         self._post_edit_callback = post_edit_callback
         self._most_used_material_provider = most_used_material_provider or (lambda: None)
+        self._material_sync_handler = material_sync_handler
         self._red_cells: set[tuple[int, int]] = set()
         self._green_cells: set[tuple[int, int]] = set()
         self._unbalanced_columns: set[int] = set()
         self._warning_icon = QtGui.QIcon()
+        self._selected_columns: set[int] = set()
 
     # Basic structure -------------------------------------------------
     def rowCount(self, parent: QtCore.QModelIndex = QtCore.QModelIndex()) -> int:  # noqa: N802
@@ -197,6 +200,10 @@ class VirtualStackingModel(QtCore.QAbstractTableModel):
         if role == QtCore.Qt.DecorationRole and orientation == QtCore.Qt.Horizontal:
             if section in self._unbalanced_columns:
                 return self._warning_icon or self._default_warning_icon()
+            return None
+        if role == QtCore.Qt.BackgroundRole and orientation == QtCore.Qt.Horizontal:
+            if section in self._selected_columns:
+                return QtGui.QBrush(QtGui.QColor(200, 230, 255))
             return None
 
         if role != QtCore.Qt.DisplayRole:
@@ -493,25 +500,28 @@ class VirtualStackingModel(QtCore.QAbstractTableModel):
 
     def _set_material_for_row(self, row: int, value: str) -> bool:
         new_material = str(value or "").strip()
-        changed: list[Laminado] = []
-        for cell in self.cells:
-            laminate = cell.laminate
-            stacking_model = self._stacking_model_provider(laminate)
-            if stacking_model is None:
-                continue
-            layers = self._ensure_row_exists(stacking_model, row, laminate)
-            if row >= len(layers):
-                continue
-            target_layer = layers[row]
-            if target_layer.orientacao is None:
-                if target_layer.material:
-                    idx = stacking_model.index(row, StackingTableModel.COL_MATERIAL)
-                    if idx.isValid() and stacking_model.setData(idx, "", QtCore.Qt.EditRole):
-                        changed.append(laminate)
-                continue
-            idx = stacking_model.index(row, StackingTableModel.COL_MATERIAL)
-            if idx.isValid() and stacking_model.setData(idx, new_material, QtCore.Qt.EditRole):
-                changed.append(laminate)
+        if self._material_sync_handler is not None:
+            changed = list(self._material_sync_handler(row, new_material) or [])
+        else:
+            changed = []
+            for cell in self.cells:
+                laminate = cell.laminate
+                stacking_model = self._stacking_model_provider(laminate)
+                if stacking_model is None:
+                    continue
+                layers = self._ensure_row_exists(stacking_model, row, laminate)
+                if row >= len(layers):
+                    continue
+                target_layer = layers[row]
+                if target_layer.orientacao is None:
+                    if target_layer.material:
+                        idx = stacking_model.index(row, StackingTableModel.COL_MATERIAL)
+                        if idx.isValid() and stacking_model.setData(idx, "", QtCore.Qt.EditRole):
+                            changed.append(laminate)
+                    continue
+                idx = stacking_model.index(row, StackingTableModel.COL_MATERIAL)
+                if idx.isValid() and stacking_model.setData(idx, new_material, QtCore.Qt.EditRole):
+                    changed.append(laminate)
         if changed:
             self.layers[row].material = new_material
             model_index = self.index(row, self.COL_MATERIAL)
@@ -582,6 +592,16 @@ class VirtualStackingModel(QtCore.QAbstractTableModel):
             last = self.columnCount() - 1
             self.headerDataChanged.emit(QtCore.Qt.Horizontal, first, last)
 
+    def set_selected_columns(self, columns: Iterable[int]) -> None:
+        new_columns = {col for col in columns if col >= self.LAMINATE_COLUMN_OFFSET}
+        if new_columns == self._selected_columns:
+            return
+        self._selected_columns = new_columns
+        if self.columnCount() > self.LAMINATE_COLUMN_OFFSET:
+            first = min(new_columns) if new_columns else self.LAMINATE_COLUMN_OFFSET
+            last = max(new_columns) if new_columns else self.columnCount() - 1
+            self.headerDataChanged.emit(QtCore.Qt.Horizontal, first, last)
+
     def clear_highlights(self) -> None:
         if not (self._red_cells or self._green_cells):
             return
@@ -639,6 +659,7 @@ class VirtualStackingWindow(QtWidgets.QDialog):
         self._sorted_cell_ids: list[str] = []
         self._initial_sort_done = False
         self._stacking_models: dict[int, StackingTableModel] = {}
+        self._selected_cell_ids: set[str] = set()
         self.undo_stack = undo_stack or QtGui.QUndoStack(self)
 
         self._build_ui()
@@ -677,6 +698,7 @@ class VirtualStackingWindow(QtWidgets.QDialog):
             stacking_model_provider=self._stacking_model_for,
             post_edit_callback=self._after_laminate_changed,
             most_used_material_provider=self._most_used_material,
+            material_sync_handler=self._sync_material_for_row,
         )
         self.table = QtWidgets.QTableView(self)
         self.table.setModel(self.model)
@@ -686,6 +708,7 @@ class VirtualStackingWindow(QtWidgets.QDialog):
         header.setSectionResizeMode(QtWidgets.QHeaderView.Interactive)
         header.setStretchLastSection(False)
         header.sectionResized.connect(lambda *_: self._resize_summary_columns())
+        header.sectionClicked.connect(self._on_header_section_clicked)
         self.table.verticalHeader().setVisible(False)
         self.table.setAlternatingRowColors(True)
         self.table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectItems)
@@ -785,8 +808,67 @@ class VirtualStackingWindow(QtWidgets.QDialog):
             target.setValue(value)
             target.blockSignals(False)
 
+        def mirror_range(minimum: int, maximum: int, target: QtWidgets.QScrollBar) -> None:
+            target.blockSignals(True)
+            target.setRange(minimum, maximum)
+            target.setPageStep(table_scroll.pageStep())
+            target.blockSignals(False)
+
         table_scroll.valueChanged.connect(lambda v: mirror(v, summary_scroll))
         summary_scroll.valueChanged.connect(lambda v: mirror(v, table_scroll))
+        table_scroll.rangeChanged.connect(lambda mn, mx: mirror_range(mn, mx, summary_scroll))
+        mirror(table_scroll.value(), summary_scroll)
+
+    def _on_header_section_clicked(self, logical_index: int) -> None:
+        if logical_index < self.model.LAMINATE_COLUMN_OFFSET:
+            self._selected_cell_ids.clear()
+            self._apply_column_selection()
+            return
+        cell_idx = logical_index - self.model.LAMINATE_COLUMN_OFFSET
+        if not (0 <= cell_idx < len(self._cells)):
+            return
+        cell_id = self._cells[cell_idx].cell_id
+        modifiers = QtWidgets.QApplication.keyboardModifiers()
+        multi_select = bool(modifiers & (QtCore.Qt.ControlModifier | QtCore.Qt.ShiftModifier))
+        if multi_select:
+            if cell_id in self._selected_cell_ids:
+                self._selected_cell_ids.remove(cell_id)
+            else:
+                self._selected_cell_ids.add(cell_id)
+        else:
+            self._selected_cell_ids = {cell_id}
+        self._apply_column_selection()
+
+    def _selected_column_indexes(self) -> list[int]:
+        columns: list[int] = []
+        for idx, cell in enumerate(self._cells):
+            if cell.cell_id in self._selected_cell_ids:
+                columns.append(idx + self.model.LAMINATE_COLUMN_OFFSET)
+        return columns
+
+    def _apply_column_selection(self) -> None:
+        if not hasattr(self, "table") or self.table.model() is None:
+            return
+        valid_ids = {cell.cell_id for cell in self._cells}
+        self._selected_cell_ids = {cid for cid in self._selected_cell_ids if cid in valid_ids}
+        selected_columns = self._selected_column_indexes()
+        self.model.set_selected_columns(selected_columns)
+        selection_model = self.table.selectionModel()
+        if selection_model is None:
+            return
+        selection_model.blockSignals(True)
+        selection_model.clearSelection()
+        if selected_columns and self.model.rowCount() > 0:
+            flags = (
+                QtCore.QItemSelectionModel.Select
+                | QtCore.QItemSelectionModel.Columns
+            )
+            for col in selected_columns:
+                top_index = self.model.index(0, col)
+                bottom_index = self.model.index(self.model.rowCount() - 1, col)
+                selection = QtCore.QItemSelection(top_index, bottom_index)
+                selection_model.select(selection, flags)
+        selection_model.blockSignals(False)
 
     def _update_undo_buttons(self) -> None:
         if hasattr(self, "btn_undo"):
@@ -800,6 +882,52 @@ class VirtualStackingWindow(QtWidgets.QDialog):
         else:
             command.redo()
         self._update_undo_buttons()
+
+    def _move_selected_column(self, direction: int) -> None:
+        if not self._cells:
+            return
+        selected_columns = self._selected_column_indexes()
+        if not selected_columns:
+            QtWidgets.QMessageBox.information(
+                self,
+                "Mover laminado",
+                "Selecione uma unica coluna para mover.",
+            )
+            return
+        if len(selected_columns) > 1:
+            QtWidgets.QMessageBox.information(
+                self,
+                "Mover laminado",
+                "Selecione apenas uma coluna para mover.",
+            )
+            return
+        column = selected_columns[0]
+        cell_idx = column - self.model.LAMINATE_COLUMN_OFFSET
+        if direction < 0 and cell_idx <= 0:
+            QtWidgets.QMessageBox.information(
+                self,
+                "Mover laminado",
+                "Esta coluna ja esta na extremidade esquerda.",
+            )
+            return
+        if direction > 0 and cell_idx >= len(self._cells) - 1:
+            QtWidgets.QMessageBox.information(
+                self,
+                "Mover laminado",
+                "Esta coluna ja esta na extremidade direita.",
+            )
+            return
+        new_pos = cell_idx + direction
+        current_ids = [cell.cell_id for cell in self._cells]
+        current_ids[cell_idx], current_ids[new_pos] = current_ids[new_pos], current_ids[cell_idx]
+        self._sorted_cell_ids = current_ids
+        self._initial_sort_done = True
+        if self._project is not None:
+            remaining = [cid for cid in self._project.celulas_ordenadas if cid not in current_ids]
+            self._project.celulas_ordenadas = current_ids + remaining
+        self._rebuild_view()
+        self._mark_project_dirty()
+        self._apply_column_selection()
 
     def _on_undo_stack_changed(self) -> None:
         for cell in getattr(self, "_cells", []):
@@ -817,6 +945,18 @@ class VirtualStackingWindow(QtWidgets.QDialog):
 
         self.lbl_auto_saving = QtWidgets.QLabel("Automatic Saving", self)
         layout.addWidget(self.lbl_auto_saving)
+
+        self.btn_move_left = QtWidgets.QToolButton(self)
+        self.btn_move_left.setIcon(self.style().standardIcon(QtWidgets.QStyle.SP_ArrowLeft))
+        self.btn_move_left.setToolTip("Mover coluna selecionada para a esquerda")
+        self.btn_move_left.clicked.connect(lambda: self._move_selected_column(-1))
+        layout.addWidget(self.btn_move_left)
+
+        self.btn_move_right = QtWidgets.QToolButton(self)
+        self.btn_move_right.setIcon(self.style().standardIcon(QtWidgets.QStyle.SP_ArrowRight))
+        self.btn_move_right.setToolTip("Mover coluna selecionada para a direita")
+        self.btn_move_right.clicked.connect(lambda: self._move_selected_column(1))
+        layout.addWidget(self.btn_move_right)
 
         self.btn_undo = QtWidgets.QToolButton(self)
         self.btn_undo.setText("Desfazer")
@@ -853,7 +993,9 @@ class VirtualStackingWindow(QtWidgets.QDialog):
             self._layers = []
             self._cells = []
             self._symmetry_row_index = None
+            self._selected_cell_ids.clear()
             self.model.set_virtual_stacking([], [], None)
+            self.model.set_selected_columns([])
             self._stacking_models.clear()
             self._update_summary_row()
             return
@@ -862,10 +1004,13 @@ class VirtualStackingWindow(QtWidgets.QDialog):
         self._layers = layers
         self._cells = cells
         self._symmetry_row_index = symmetry_index
+        valid_ids = {cell.cell_id for cell in cells}
+        self._selected_cell_ids = {cid for cid in self._selected_cell_ids if cid in valid_ids}
         self._refresh_stacking_models(cells)
         self.model.set_virtual_stacking(layers, cells, symmetry_index)
         self._apply_orientation_delegate()
         self._resize_columns()
+        self._apply_column_selection()
         self._update_summary_row()
         self._check_symmetry()
 
@@ -1014,6 +1159,16 @@ class VirtualStackingWindow(QtWidgets.QDialog):
     def _most_used_material(self) -> Optional[str]:
         """Retorna o material mais utilizado em todos os laminados carregados."""
         return project_most_used_material(self._project)
+
+    def _sync_material_for_row(self, row: int, material: str) -> list[Laminado]:
+        if self._project is None:
+            return []
+        return sync_material_by_sequence(
+            self._project,
+            row,
+            material,
+            stacking_model_provider=self._stacking_model_for,
+        )
 
     def _prompt_prefix_dialog(self, title: str, current_prefix: str) -> Optional[str]:
         dialog = QtWidgets.QDialog(self)
@@ -1189,11 +1344,6 @@ class VirtualStackingWindow(QtWidgets.QDialog):
         orientations = Counter()
         oriented_count = 0
         for camada in layers:
-            row_idx = getattr(camada, "idx", None)
-            if row_idx is not None and not self._row_considered(row_idx):
-                continue
-            if not is_structural_ply_label(getattr(camada, "ply_type", DEFAULT_PLY_TYPE)):
-                continue
             token = self._orientation_token(getattr(camada, "orientacao", None))
             if token is None:
                 continue

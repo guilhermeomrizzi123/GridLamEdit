@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from collections import OrderedDict
-from typing import Optional, Union
+from typing import Callable, Optional, Union
 
 from gridlamedit.io.spreadsheet import (
     GridModel,
@@ -14,6 +14,7 @@ from gridlamedit.io.spreadsheet import (
     normalize_color_index,
     DEFAULT_COLOR_INDEX,
     count_oriented_layers,
+    StackingTableModel,
 )
 
 logger = logging.getLogger(__name__)
@@ -175,3 +176,46 @@ def auto_name_for_laminate(
         tag=getattr(laminate, "tag", ""),
         target=laminate,
     )
+
+
+def sync_material_by_sequence(
+    model: Optional[GridModel],
+    row: int,
+    material: str,
+    *,
+    stacking_model_provider: Optional[
+        Callable[[Laminado], Optional[StackingTableModel]]
+    ] = None,
+) -> list[Laminado]:
+    """
+    Apply ``material`` to the same ``row`` across all laminates that have orientation.
+
+    Laminates with empty orientation on that row keep the material empty. Returns the
+    list of laminates that were changed.
+    """
+
+    if model is None or row < 0:
+        return []
+
+    updated: list[Laminado] = []
+    new_material = str(material or "").strip()
+    for laminate in model.laminados.values():
+        layers = getattr(laminate, "camadas", [])
+        if row >= len(layers):
+            continue
+        target_layer = layers[row]
+        orientation = getattr(target_layer, "orientacao", None)
+        target_value = new_material if orientation is not None else ""
+        if getattr(target_layer, "material", "") == target_value:
+            continue
+
+        stacking_model = stacking_model_provider(laminate) if stacking_model_provider else None
+        if stacking_model is not None:
+            if stacking_model.apply_field_value(row, StackingTableModel.COL_MATERIAL, target_value):
+                laminate.camadas = stacking_model.layers()
+                updated.append(laminate)
+                continue
+
+        target_layer.material = target_value
+        updated.append(laminate)
+    return updated

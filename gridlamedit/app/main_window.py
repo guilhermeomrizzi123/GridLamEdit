@@ -115,6 +115,7 @@ from gridlamedit.services.laminate_checks import ChecksReport, run_all_checks
 from gridlamedit.services.laminate_service import (
     auto_name_for_laminate,
     auto_name_for_layers,
+    sync_material_by_sequence,
 )
 from gridlamedit.ui.dialogs.duplicate_removal_dialog import DuplicateRemovalDialog
 from gridlamedit.ui.dialogs.new_laminate_dialog import NewLaminateDialog
@@ -240,6 +241,8 @@ class MainWindow(QMainWindow):
         self._band_frame_margin = 0
         self._header_band_scroll_connected = False
         self._stacking_summary_model: Optional[StackingTableModel] = None
+        self._material_sync_guard = False
+        self._material_sync_models: set[int] = set()
         self._export_checks_thread: Optional[QThread] = None
         self._export_checks_worker: Optional[_LaminateChecksWorker] = None
         self._last_checks_report: Optional[ChecksReport] = None
@@ -1323,6 +1326,7 @@ class MainWindow(QMainWindow):
         view.setModel(model)
 
         if isinstance(model, StackingTableModel):
+            self._connect_material_sync(model)
             self._connect_header_band_model_signals(model)
             self._set_stacking_summary_model(model)
         else:
@@ -1386,6 +1390,51 @@ class MainWindow(QMainWindow):
         view.setColumnWidth(StackingTableModel.COL_PLY_TYPE, 160)
         view.verticalHeader().setVisible(False)
         self._sync_header_band()
+
+    def _connect_material_sync(self, model: StackingTableModel) -> None:
+        key = id(model)
+        if key in self._material_sync_models:
+            return
+        model.dataChanged.connect(self._on_stacking_material_changed)
+        self._material_sync_models.add(key)
+
+    def _on_stacking_material_changed(self, top_left, bottom_right, roles=None) -> None:  # noqa: ARG002
+        if self._material_sync_guard or self._grid_model is None:
+            return
+        if bottom_right.column() < StackingTableModel.COL_MATERIAL or top_left.column() > StackingTableModel.COL_MATERIAL:
+            return
+        binding, model, current_laminate = self._stacking_binding_context()
+        if model is None or current_laminate is None:
+            return
+
+        def provider(lam: Laminado) -> Optional[StackingTableModel]:
+            if getattr(lam, "nome", None) == getattr(current_laminate, "nome", None):
+                return model
+            return None
+
+        changed_any = False
+        self._material_sync_guard = True
+        try:
+            for row in range(top_left.row(), bottom_right.row() + 1):
+                idx = model.index(row, StackingTableModel.COL_MATERIAL)
+                if not idx.isValid():
+                    continue
+                material = str(model.data(idx, Qt.EditRole) or "").strip()
+                updated = sync_material_by_sequence(
+                    self._grid_model,
+                    row,
+                    material,
+                    stacking_model_provider=provider,
+                )
+                if updated:
+                    changed_any = True
+        finally:
+            self._material_sync_guard = False
+
+        if changed_any:
+            self._refresh_virtual_stacking_view()
+            self.update_stacking_summary_ui()
+            self._mark_dirty()
 
     def _sync_header_band(self, *args) -> None:  # noqa: ARG002
         table = getattr(self, "layers_table", None)
