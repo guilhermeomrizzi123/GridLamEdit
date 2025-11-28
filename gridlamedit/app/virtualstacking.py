@@ -165,6 +165,8 @@ class VirtualStackingModel(QtCore.QAbstractTableModel):
         self._most_used_material_provider = most_used_material_provider or (lambda: None)
         self._red_cells: set[tuple[int, int]] = set()
         self._green_cells: set[tuple[int, int]] = set()
+        self._unbalanced_columns: set[int] = set()
+        self._warning_icon = QtGui.QIcon()
 
     # Basic structure -------------------------------------------------
     def rowCount(self, parent: QtCore.QModelIndex = QtCore.QModelIndex()) -> int:  # noqa: N802
@@ -184,6 +186,11 @@ class VirtualStackingModel(QtCore.QAbstractTableModel):
         orientation: QtCore.Qt.Orientation,
         role: int = QtCore.Qt.DisplayRole,
     ):
+        if role == QtCore.Qt.DecorationRole and orientation == QtCore.Qt.Horizontal:
+            if section in self._unbalanced_columns:
+                return self._warning_icon or self._default_warning_icon()
+            return None
+
         if role != QtCore.Qt.DisplayRole:
             return None
 
@@ -212,6 +219,13 @@ class VirtualStackingModel(QtCore.QAbstractTableModel):
         elif orientation == QtCore.Qt.Vertical:
             return str(section + 1)
         return None
+
+    def _default_warning_icon(self) -> QtGui.QIcon:
+        if self._warning_icon and not self._warning_icon.isNull():
+            return self._warning_icon
+        icon = QtWidgets.QApplication.style().standardIcon(QtWidgets.QStyle.SP_MessageBoxWarning)
+        self._warning_icon = icon
+        return icon
 
     # Data roles ------------------------------------------------------
     def data(  # noqa: N802
@@ -496,6 +510,7 @@ class VirtualStackingModel(QtCore.QAbstractTableModel):
         self.symmetry_row_index = symmetry_row_index
         self._red_cells.clear()
         self._green_cells.clear()
+        self._unbalanced_columns.clear()
         self.endResetModel()
 
     def set_symmetry_row_index(self, index: int | None) -> None:
@@ -506,6 +521,16 @@ class VirtualStackingModel(QtCore.QAbstractTableModel):
             top_left = self.createIndex(0, 0)
             bottom_right = self.createIndex(len(self.layers) - 1, self.columnCount() - 1)
             self.dataChanged.emit(top_left, bottom_right, [QtCore.Qt.BackgroundRole])
+
+    def set_unbalanced_columns(self, columns: Iterable[int]) -> None:
+        new_columns = {col for col in columns}
+        if new_columns == self._unbalanced_columns:
+            return
+        self._unbalanced_columns = new_columns
+        if self.columnCount() > self.LAMINATE_COLUMN_OFFSET:
+            first = self.LAMINATE_COLUMN_OFFSET
+            last = self.columnCount() - 1
+            self.headerDataChanged.emit(QtCore.Qt.Horizontal, first, last)
 
     def clear_highlights(self) -> None:
         if not (self._red_cells or self._green_cells):
@@ -554,9 +579,7 @@ class VirtualStackingWindow(QtWidgets.QDialog):
             | QtCore.Qt.WindowSystemMenuHint
         )
         self.setWindowFlag(QtCore.Qt.Window, True)
-        icon_candidate = package_path("resources", "icons", "stacking_summary.svg")
-        if icon_candidate.is_file():
-            self.setWindowIcon(QtGui.QIcon(str(icon_candidate)))
+        self._apply_window_icon()
         self.resize(1200, 700)
 
         self._layers: list[VirtualStackingLayer] = []
@@ -569,6 +592,21 @@ class VirtualStackingWindow(QtWidgets.QDialog):
         self.undo_stack = undo_stack or QtGui.QUndoStack(self)
 
         self._build_ui()
+
+    def _apply_window_icon(self) -> None:
+        icon = QtGui.QIcon(":/icons/stacking_summary.svg")
+        if icon.isNull():
+            candidate = package_path("resources", "icons", "stacking_summary.svg")
+            if candidate.is_file():
+                icon = QtGui.QIcon(str(candidate))
+        if icon.isNull():
+            app_icon = QtWidgets.QApplication.windowIcon()
+            if app_icon is not None and not app_icon.isNull():
+                icon = app_icon
+        if icon.isNull():
+            icon = self.style().standardIcon(QtWidgets.QStyle.SP_FileDialogInfoView)
+        if not icon.isNull():
+            self.setWindowIcon(icon)
 
 
     def _build_ui(self) -> None:
@@ -660,6 +698,7 @@ class VirtualStackingWindow(QtWidgets.QDialog):
         summary.verticalHeader().setVisible(False)
         summary.horizontalHeader().setVisible(False)
         summary.setWordWrap(True)
+        summary.setTextElideMode(QtCore.Qt.ElideNone)
         summary.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
         summary.setSelectionMode(QtWidgets.QAbstractItemView.NoSelection)
         summary.setFocusPolicy(QtCore.Qt.NoFocus)
@@ -667,6 +706,10 @@ class VirtualStackingWindow(QtWidgets.QDialog):
         summary.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
         summary.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
         summary.setStyleSheet("QTableView { gridline-color: transparent; }")
+        font = summary.font()
+        if font.pointSize() > 0:
+            font.setPointSize(max(font.pointSize() - 1, 8))
+            summary.setFont(font)
         return summary
 
     def _sync_scrollbars(self) -> None:
@@ -709,6 +752,9 @@ class VirtualStackingWindow(QtWidgets.QDialog):
         layout.setSpacing(8)
 
         layout.addStretch()
+
+        self.lbl_auto_saving = QtWidgets.QLabel("Automatic Saving", self)
+        layout.addWidget(self.lbl_auto_saving)
 
         self.btn_undo = QtWidgets.QToolButton(self)
         self.btn_undo.setText("Desfazer")
@@ -1079,7 +1125,7 @@ class VirtualStackingWindow(QtWidgets.QDialog):
                 orientations.items(),
                 key=lambda pair: self._orientation_token(pair[0]) or 0.0,
             )
-            ori_parts = [f"{label}: {count}" for label, count in ordered]
+            ori_parts = [f"{label} [{count}]" for label, count in ordered]
             parts.extend(ori_parts)
         return "\n".join(parts)
 
@@ -1093,7 +1139,11 @@ class VirtualStackingWindow(QtWidgets.QDialog):
             return
         column_count = self.model.columnCount()
         summary_model.setColumnCount(column_count)
-        metrics = self.fontMetrics()
+        metrics = (
+            self.summary_table.fontMetrics()
+            if hasattr(self, "summary_table")
+            else self.fontMetrics()
+        )
         max_lines = 1
         for col in range(column_count):
             if col < self.model.LAMINATE_COLUMN_OFFSET:
@@ -1104,8 +1154,6 @@ class VirtualStackingWindow(QtWidgets.QDialog):
                 text = self._summary_for_laminate(laminate)
             item = QtGui.QStandardItem(text)
             item.setTextAlignment(QtCore.Qt.AlignCenter)
-            if col < self.model.LAMINATE_COLUMN_OFFSET:
-                item.setBackground(QtGui.QBrush(QtGui.QColor(240, 240, 240)))
             summary_model.setItem(0, col, item)
             max_lines = max(max_lines, max(1, text.count("\n") + 1))
         self._update_summary_height(max_lines, metrics)
@@ -1158,6 +1206,7 @@ class VirtualStackingWindow(QtWidgets.QDialog):
     def _check_symmetry(self) -> None:
         red_cells: set[tuple[int, int]] = set()
         green_cells: set[tuple[int, int]] = set()
+        unbalanced_columns: set[int] = set()
         for col, cell in enumerate(self._cells):
             laminate = cell.laminate
             layers = getattr(laminate, "camadas", [])
@@ -1170,51 +1219,89 @@ class VirtualStackingWindow(QtWidgets.QDialog):
             count_struct = len(structural_rows)
             if count_struct == 0:
                 continue
+            center_rows: list[int] = []
+            is_symmetrical = False
             if count_struct == 1:
+                center_rows = [structural_rows[0]]
                 green_cells.add((structural_rows[0], col + self.model.LAMINATE_COLUMN_OFFSET))
-                continue
-            i, j = 0, count_struct - 1
-            broken = False
-            while i < j:
-                r_top = structural_rows[i]
-                r_bot = structural_rows[j]
-                camada_top = layers[r_top]
-                camada_bot = layers[r_bot]
-                mat_top = (getattr(camada_top, "material", "") or "").strip().lower()
-                mat_bot = (getattr(camada_bot, "material", "") or "").strip().lower()
-                ori_top = self._orientation_token(getattr(camada_top, "orientacao", None))
-                ori_bot = self._orientation_token(getattr(camada_bot, "orientacao", None))
-                if not (mat_top == mat_bot and self._orientations_match(ori_top, ori_bot)):
-                    red_cells.update(
-                        {
-                            (r_top, col + self.model.LAMINATE_COLUMN_OFFSET),
-                            (r_bot, col + self.model.LAMINATE_COLUMN_OFFSET),
-                        }
-                    )
-                    broken = True
-                    break
-                i += 1
-                j -= 1
-            if broken:
-                continue
-            if count_struct % 2 == 1:
-                green_cells.add(
-                    (structural_rows[count_struct // 2], col + self.model.LAMINATE_COLUMN_OFFSET)
-                )
+                is_symmetrical = True
             else:
-                green_cells.update(
-                    {
-                        (
+                i, j = 0, count_struct - 1
+                broken = False
+                while i < j:
+                    r_top = structural_rows[i]
+                    r_bot = structural_rows[j]
+                    camada_top = layers[r_top]
+                    camada_bot = layers[r_bot]
+                    mat_top = (getattr(camada_top, "material", "") or "").strip().lower()
+                    mat_bot = (getattr(camada_bot, "material", "") or "").strip().lower()
+                    ori_top = self._orientation_token(getattr(camada_top, "orientacao", None))
+                    ori_bot = self._orientation_token(getattr(camada_bot, "orientacao", None))
+                    if not (mat_top == mat_bot and self._orientations_match(ori_top, ori_bot)):
+                        red_cells.update(
+                            {
+                                (r_top, col + self.model.LAMINATE_COLUMN_OFFSET),
+                                (r_bot, col + self.model.LAMINATE_COLUMN_OFFSET),
+                            }
+                        )
+                        broken = True
+                        break
+                    i += 1
+                    j -= 1
+                if not broken:
+                    is_symmetrical = True
+                    if count_struct % 2 == 1:
+                        center = structural_rows[count_struct // 2]
+                        center_rows = [center]
+                        green_cells.add((center, col + self.model.LAMINATE_COLUMN_OFFSET))
+                    else:
+                        center_rows = [
                             structural_rows[count_struct // 2 - 1],
-                            col + self.model.LAMINATE_COLUMN_OFFSET,
-                        ),
-                        (
                             structural_rows[count_struct // 2],
-                            col + self.model.LAMINATE_COLUMN_OFFSET,
-                        ),
-                    }
-                )
+                        ]
+                        green_cells.update(
+                            {
+                                (
+                                    structural_rows[count_struct // 2 - 1],
+                                    col + self.model.LAMINATE_COLUMN_OFFSET,
+                                ),
+                                (
+                                    structural_rows[count_struct // 2],
+                                    col + self.model.LAMINATE_COLUMN_OFFSET,
+                                ),
+                            }
+                        )
+            if is_symmetrical and center_rows and self._is_unbalanced(layers, structural_rows, center_rows):
+                unbalanced_columns.add(col + self.model.LAMINATE_COLUMN_OFFSET)
         self.model.set_highlights(red_cells, green_cells)
+        self.model.set_unbalanced_columns(unbalanced_columns)
+
+    def _is_unbalanced(
+        self,
+        layers: list[Camada],
+        structural_rows: list[int],
+        center_rows: list[int],
+    ) -> bool:
+        if not structural_rows or not center_rows:
+            return False
+        center_min = min(center_rows)
+        center_set = set(center_rows)
+        pos45 = 0
+        neg45 = 0
+        for row in structural_rows:
+            if row in center_set:
+                continue
+            if row > center_min:
+                # Only consider layers above the symmetry plane.
+                continue
+            orientation = self._orientation_token(getattr(layers[row], "orientacao", None))
+            if orientation is None:
+                continue
+            if math.isclose(orientation, 45.0, abs_tol=1e-6):
+                pos45 += 1
+            elif math.isclose(orientation, -45.0, abs_tol=1e-6):
+                neg45 += 1
+        return pos45 != neg45
 
     def _targets_for_insertion(
         self, index: Optional[QtCore.QModelIndex] = None
@@ -1239,6 +1326,20 @@ class VirtualStackingWindow(QtWidgets.QDialog):
         if model is None:
             return None
         return laminate, model, index.row()
+
+    def _prompt_custom_orientation(self, parent: QtWidgets.QWidget) -> float | None:
+        dialog = QtWidgets.QInputDialog(parent)
+        dialog.setInputMode(QtWidgets.QInputDialog.DoubleInput)
+        dialog.setWindowTitle("Outro valor")
+        dialog.setLabelText("Informe a orientacao (-100 a 100 graus):")
+        dialog.setDoubleRange(-100.0, 100.0)
+        dialog.setDoubleDecimals(1)
+        dialog.setDoubleStep(1.0)
+        dialog.setDoubleValue(0.0)
+        dialog.setTextValue("")
+        if dialog.exec() != dialog.Accepted:
+            return None
+        return dialog.doubleValue()
 
     def _edit_orientation_at(self, index: QtCore.QModelIndex) -> None:
         entry = self._stacking_entry_for_index(index)
@@ -1265,16 +1366,8 @@ class VirtualStackingWindow(QtWidgets.QDialog):
             return
         selected = selected.strip()
         if selected == "Outro valor...":
-            custom_value, ok_value = QtWidgets.QInputDialog.getDouble(
-                self,
-                "Outro valor",
-                "Informe a orientacao (-100 a 100 graus):",
-                0.0,
-                -100.0,
-                100.0,
-                1,
-            )
-            if not ok_value:
+            custom_value = self._prompt_custom_orientation(self)
+            if custom_value is None:
                 return
             payload = f"{custom_value:g}"
         elif selected.lower() == "empty":

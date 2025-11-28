@@ -22,7 +22,7 @@ from PySide6.QtCore import (
     QRect,
     Qt,
 )
-from PySide6.QtGui import QColor, QPalette, QUndoCommand, QUndoStack
+from PySide6.QtGui import QColor, QPalette, QUndoCommand, QUndoStack, QIcon
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QComboBox,
@@ -223,12 +223,32 @@ class WordWrapHeader(QHeaderView):
 
         model = self.model()
         header_text = ""
+        decoration = None
         if model is not None:
             text = model.headerData(logicalIndex, self.orientation(), Qt.DisplayRole)
             if text:
                 header_text = str(text)
+            decoration = model.headerData(logicalIndex, self.orientation(), Qt.DecorationRole)
+
+        decoration_pixmap = None
+        if isinstance(decoration, QIcon):
+            decoration_pixmap = decoration.pixmap(18, 18)
+        elif hasattr(decoration, "isNull"):
+            try:
+                if not decoration.isNull():
+                    decoration_pixmap = decoration
+            except Exception:
+                decoration_pixmap = None
 
         painter.setPen(option.palette.color(QPalette.ButtonText))
+        icon_bottom = rect.top()
+        if decoration_pixmap is not None and not decoration_pixmap.isNull():
+            icon_rect = QRect(decoration_pixmap.rect())
+            icon_rect.moveCenter(
+                QPoint(rect.center().x(), rect.top() + icon_rect.height() // 2 + 2)
+            )
+            painter.drawPixmap(icon_rect, decoration_pixmap)
+            icon_bottom = icon_rect.bottom()
 
         if (
             self.orientation() == Qt.Horizontal
@@ -261,7 +281,7 @@ class WordWrapHeader(QHeaderView):
 
             text_rect = QRect(
                 rect.left() + 4,
-                checkbox_rect.bottom() + 4,
+                max(checkbox_rect.bottom(), icon_bottom) + 4,
                 rect.width() - 8,
                 rect.bottom() - checkbox_rect.bottom() - 8,
             )
@@ -272,7 +292,10 @@ class WordWrapHeader(QHeaderView):
                     header_text,
                 )
         else:
-            text_rect = rect.adjusted(4, 4, -4, -4)
+            top_padding = 4
+            if decoration_pixmap is not None and not decoration_pixmap.isNull():
+                top_padding = max(top_padding, decoration_pixmap.height() + 6)
+            text_rect = rect.adjusted(4, top_padding, -4, -4)
             if header_text:
                 painter.drawText(
                     text_rect,
@@ -735,6 +758,7 @@ class StackingTableModel(QAbstractTableModel):
         self._undo_stack = undo_stack
         self._undo_suppressed = 0
         self._most_used_material_provider = most_used_material_provider or (lambda: None)
+        self._unbalanced_warning = False
         self.update_layers(camadas or [])
 
     def set_undo_stack(self, undo_stack: Optional[QUndoStack]) -> None:
@@ -971,6 +995,13 @@ class StackingTableModel(QAbstractTableModel):
         self._force_ply_sync()
         self.endResetModel()
 
+    def set_unbalanced_warning(self, enabled: bool) -> None:
+        enabled = bool(enabled)
+        if self._unbalanced_warning == enabled:
+            return
+        self._unbalanced_warning = enabled
+        self.headerDataChanged.emit(Qt.Horizontal, self.COL_ORIENTATION, self.COL_ORIENTATION)
+
     @staticmethod
     def _ensure_layer_defaults(camada: Camada) -> Camada:
         legacy_flag = getattr(camada, "nao_estrutural", False)
@@ -1008,6 +1039,10 @@ class StackingTableModel(QAbstractTableModel):
         role: int = Qt.DisplayRole,
     ) -> Optional[str]:
         if orientation == Qt.Horizontal:
+            if role == Qt.DecorationRole and section == self.COL_ORIENTATION:
+                if self._unbalanced_warning:
+                    return QApplication.style().standardIcon(QStyle.SP_MessageBoxWarning)
+                return None
             if role == Qt.DisplayRole and 0 <= section < len(self.HEADERS):
                 return self.HEADERS[section]
             if role == Qt.TextAlignmentRole:
@@ -2157,6 +2192,7 @@ class _GridUiBinding:
             label.setText(
                 f"Quantidade Total de Camadas: {oriented_layers}"
             )
+        self._update_balance_warning()
 
     def _on_layers_modified(self, _layers: list[Camada]) -> None:
         if self._current_laminate and self._current_laminate in self.model.laminados:
@@ -2173,6 +2209,97 @@ class _GridUiBinding:
                 logger.debug(
                     "Falha ao notificar modificacao de camadas.", exc_info=True
                 )
+
+    def _orientation_token(self, value: object) -> Optional[float]:
+        if value is None:
+            return None
+        try:
+            return normalize_angle(value)
+        except Exception:
+            try:
+                return normalize_angle(str(value))
+            except Exception:
+                return None
+
+    def _orientations_match(self, left: Optional[float], right: Optional[float]) -> bool:
+        if left is None and right is None:
+            return True
+        if left is None or right is None:
+            return False
+        return math.isclose(left, right, abs_tol=1e-6)
+
+    def _structural_rows(self, layers: list[Camada]) -> list[int]:
+        return [
+            idx
+            for idx, camada in enumerate(layers)
+            if getattr(camada, "orientacao", None) is not None
+            and is_structural_ply_label(getattr(camada, "ply_type", DEFAULT_PLY_TYPE))
+        ]
+
+    def _detect_symmetry_centers(self, layers: list[Camada]) -> tuple[bool, list[int]]:
+        structural_rows = self._structural_rows(layers)
+        count_struct = len(structural_rows)
+        if count_struct == 0:
+            return False, []
+        if count_struct == 1:
+            return True, [structural_rows[0]]
+
+        i, j = 0, count_struct - 1
+        while i < j:
+            r_top = structural_rows[i]
+            r_bot = structural_rows[j]
+            camada_top = layers[r_top]
+            camada_bot = layers[r_bot]
+            mat_top = (getattr(camada_top, "material", "") or "").strip().lower()
+            mat_bot = (getattr(camada_bot, "material", "") or "").strip().lower()
+            ori_top = self._orientation_token(getattr(camada_top, "orientacao", None))
+            ori_bot = self._orientation_token(getattr(camada_bot, "orientacao", None))
+            if not (mat_top == mat_bot and self._orientations_match(ori_top, ori_bot)):
+                return False, []
+            i += 1
+            j -= 1
+
+        if count_struct % 2 == 1:
+            centers = [structural_rows[count_struct // 2]]
+        else:
+            centers = [
+                structural_rows[count_struct // 2 - 1],
+                structural_rows[count_struct // 2],
+            ]
+        return True, centers
+
+    def _is_unbalanced(self, layers: list[Camada]) -> bool:
+        symmetric, centers = self._detect_symmetry_centers(layers)
+        if not symmetric or not centers:
+            return False
+        structural_rows = self._structural_rows(layers)
+        center_min = min(centers)
+        center_set = set(centers)
+        pos45 = 0
+        neg45 = 0
+        for row in structural_rows:
+            if row in center_set:
+                continue
+            if row > center_min:
+                continue
+            orientation = self._orientation_token(getattr(layers[row], "orientacao", None))
+            if orientation is None:
+                continue
+            if math.isclose(orientation, 45.0, abs_tol=1e-6):
+                pos45 += 1
+            elif math.isclose(orientation, -45.0, abs_tol=1e-6):
+                neg45 += 1
+        return pos45 != neg45
+
+    def _update_balance_warning(self) -> None:
+        if not hasattr(self, "stacking_model"):
+            return
+        layers = self.stacking_model.layers()
+        warning = self._is_unbalanced(layers)
+        try:
+            self.stacking_model.set_unbalanced_warning(warning)
+        except Exception:
+            pass
 
     def add_layer(self, after_row: Optional[int] = None) -> bool:
         if not self._current_laminate:

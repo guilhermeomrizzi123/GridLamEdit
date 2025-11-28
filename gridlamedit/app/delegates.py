@@ -96,6 +96,20 @@ class OrientationComboDelegate(QStyledItemDelegate):
             ("Outro valor...", self.CUSTOM_TOKEN),
         ]
 
+    def _prompt_custom_orientation(self, parent: QWidget) -> Optional[float]:
+        dialog = QInputDialog(parent)
+        dialog.setInputMode(QInputDialog.DoubleInput)
+        dialog.setWindowTitle("Outro valor")
+        dialog.setLabelText("Informe a orientacao (-100 a 100 graus):")
+        dialog.setDoubleRange(-100.0, 100.0)
+        dialog.setDoubleDecimals(1)
+        dialog.setDoubleStep(1.0)
+        dialog.setDoubleValue(0.0)
+        dialog.setTextValue("")
+        if dialog.exec() != dialog.Accepted:
+            return None
+        return dialog.doubleValue()
+
     def _coerce_orientation(self, value: object) -> Optional[float]:
         if value is None:
             return None
@@ -130,6 +144,11 @@ class OrientationComboDelegate(QStyledItemDelegate):
         editor.setEditable(False)
         for text, data in self._option_items():
             editor.addItem(text, data)
+        editor.setProperty("allowCustomPrompt", False)
+        editor.setProperty("pendingCustomOrientation", None)
+        editor.currentIndexChanged.connect(
+            lambda _idx, ed=editor: self._on_index_changed(ed)
+        )
         return editor
 
     def setEditorData(self, editor: QWidget, index):  # noqa: N802
@@ -139,25 +158,21 @@ class OrientationComboDelegate(QStyledItemDelegate):
         value = self._coerce_orientation(current)
         editor.setProperty("currentOrientation", value)
         editor.setCurrentIndex(self._find_index_for_value(editor, value))
+        editor.setProperty("allowCustomPrompt", True)
 
     def setModelData(self, editor: QWidget, model, index):  # noqa: N802
         if not isinstance(editor, QComboBox):
             return
         data = editor.currentData()
         if data == self.CUSTOM_TOKEN:
-            default_value = editor.property("currentOrientation")
-            if not isinstance(default_value, (int, float)):
-                default_value = 0.0
-            value, ok = QInputDialog.getDouble(
-                editor,
-                "Outro valor",
-                "Informe a orientacao (-100 a 100 graus):",
-                float(default_value),
-                -100.0,
-                100.0,
-                1,
+            pending_value = editor.property("pendingCustomOrientation")
+            value = (
+                float(pending_value)
+                if isinstance(pending_value, (int, float))
+                else self._prompt_custom_orientation(editor)
             )
-            if not ok:
+            editor.setProperty("pendingCustomOrientation", None)
+            if value is None:
                 return
             model.setData(index, value, Qt.EditRole)
             return
@@ -165,6 +180,26 @@ class OrientationComboDelegate(QStyledItemDelegate):
             model.setData(index, "", Qt.EditRole)
         else:
             model.setData(index, float(data), Qt.EditRole)
+
+    def _restore_previous_selection(self, editor: QComboBox) -> None:
+        previous_value = self._coerce_orientation(editor.property("currentOrientation"))
+        editor.setProperty("allowCustomPrompt", False)
+        editor.setCurrentIndex(self._find_index_for_value(editor, previous_value))
+        editor.setProperty("allowCustomPrompt", True)
+
+    def _on_index_changed(self, editor: QComboBox) -> None:
+        if not editor.property("allowCustomPrompt"):
+            return
+        if editor.currentData() != self.CUSTOM_TOKEN:
+            editor.setProperty("pendingCustomOrientation", None)
+            return
+        value = self._prompt_custom_orientation(editor)
+        if value is None:
+            self._restore_previous_selection(editor)
+            return
+        editor.setProperty("pendingCustomOrientation", value)
+        self.commitData.emit(editor)
+        self.closeEditor.emit(editor)
 
     def paint(self, painter: QPainter, option, index):  # noqa: N802
         super().paint(painter, option, index)
