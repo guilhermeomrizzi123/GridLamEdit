@@ -21,12 +21,14 @@ from gridlamedit.io.spreadsheet import (
     WordWrapHeader,
     format_orientation_value,
     orientation_highlight_color,
+    ORIENTATION_SYMMETRY_ROLE,
     count_oriented_layers,
     is_structural_ply_label,
     normalize_angle,
 )
 from gridlamedit.app.delegates import MaterialComboDelegate, OrientationComboDelegate
 from gridlamedit.services.laminate_service import auto_name_for_laminate
+from gridlamedit.core.paths import package_path
 from gridlamedit.services.project_query import (
     project_distinct_materials,
     project_distinct_orientations,
@@ -245,10 +247,16 @@ class VirtualStackingModel(QtCore.QAbstractTableModel):
                 if 0 <= row < len(layers):
                     value = getattr(layers[row], "orientacao", None)
                     if value is None:
-                        return ""
+                        return "Empty" if role == QtCore.Qt.DisplayRole else ""
+                    try:
+                        numeric_value = float(value)
+                    except Exception:
+                        numeric_value = None
                     if role == QtCore.Qt.DisplayRole:
                         return format_orientation_value(value)
-                    return f"{value:g}"
+                    if numeric_value is not None:
+                        return f"{numeric_value:g}"
+                    return str(value)
                 return ""
 
         if role == QtCore.Qt.BackgroundRole:
@@ -279,8 +287,19 @@ class VirtualStackingModel(QtCore.QAbstractTableModel):
             ):
                 return QtGui.QBrush(QtGui.QColor(220, 235, 255))
 
+        if role == QtCore.Qt.ForegroundRole and column >= self.LAMINATE_COLUMN_OFFSET:
+            cell_index = column - self.LAMINATE_COLUMN_OFFSET
+            if 0 <= cell_index < len(self.cells):
+                layers = getattr(self.cells[cell_index].laminate, "camadas", [])
+                if 0 <= row < len(layers) and getattr(layers[row], "orientacao", None) is None:
+                    return QtGui.QBrush(QtGui.QColor(160, 160, 160))
+
         if role == QtCore.Qt.TextAlignmentRole and column >= self.LAMINATE_COLUMN_OFFSET:
             return QtCore.Qt.AlignCenter
+
+        if role == ORIENTATION_SYMMETRY_ROLE and column >= self.LAMINATE_COLUMN_OFFSET:
+            if (row, column) in self._green_cells:
+                return True
 
         return None
 
@@ -534,6 +553,10 @@ class VirtualStackingWindow(QtWidgets.QDialog):
             | QtCore.Qt.WindowMinMaxButtonsHint
             | QtCore.Qt.WindowSystemMenuHint
         )
+        self.setWindowFlag(QtCore.Qt.Window, True)
+        icon_candidate = package_path("resources", "icons", "stacking_summary.svg")
+        if icon_candidate.is_file():
+            self.setWindowIcon(QtGui.QIcon(str(icon_candidate)))
         self.resize(1200, 700)
 
         self._layers: list[VirtualStackingLayer] = []
@@ -962,11 +985,9 @@ class VirtualStackingWindow(QtWidgets.QDialog):
         )
 
     def _auto_rename_if_enabled(self, laminate: Laminado) -> None:
-        if (
-            self._project is None
-            or not getattr(laminate, "auto_rename_enabled", False)
-        ):
+        if self._project is None:
             return
+        laminate.auto_rename_enabled = True
         new_name = auto_name_for_laminate(self._project, laminate)
         if not new_name or new_name == laminate.nome:
             return
@@ -1231,45 +1252,36 @@ class VirtualStackingWindow(QtWidgets.QDialog):
                 "A linha selecionada nao existe para este laminado.",
             )
             return
-        current_index = stacking_model.index(row, StackingTableModel.COL_ORIENTATION)
-        current_layers = stacking_model.layers()
-        current_value = None
-        if 0 <= row < len(current_layers):
-            current_value = getattr(current_layers[row], "orientacao", None)
-        current_text = "" if current_value is None else f"{current_value:g}"
-
-        dialog = QtWidgets.QInputDialog(self)
-        dialog.setInputMode(QtWidgets.QInputDialog.TextInput)
-        dialog.setWindowTitle("Editar orientacao")
-        dialog.setLabelText("Defina a orientacao (-100 a 100 graus ou vazio):")
-        dialog.setTextValue(str(current_text))
-        editor = dialog.findChild(QtWidgets.QLineEdit)
-        if editor is not None:
-            editor.setValidator(None)  # Validation via normalize_angle below.
-            editor.setPlaceholderText("Ex.: -45, 0, 12.5 ou deixe em branco")
-        if dialog.exec() != QtWidgets.QDialog.Accepted:
+        options = ["Empty", "0", "45", "-45", "90", "Outro valor..."]
+        selected, ok = QtWidgets.QInputDialog.getItem(
+            self,
+            "Editar orientacao",
+            "Selecione a orientacao:",
+            options,
+            0,
+            False,
+        )
+        if not ok:
             return
-        new_value = dialog.textValue().strip()
-        normalized_value = ""
-        if new_value:
-            try:
-                normalized_value = f"{normalize_angle(new_value):g}"
-            except ValueError:
-                QtWidgets.QMessageBox.warning(
-                    self,
-                    "Orientacao invalida",
-                    "Use valores entre -100 e 100 graus ou deixe em branco.",
-                )
+        selected = selected.strip()
+        if selected == "Outro valor...":
+            custom_value, ok_value = QtWidgets.QInputDialog.getDouble(
+                self,
+                "Outro valor",
+                "Informe a orientacao (-100 a 100 graus):",
+                0.0,
+                -100.0,
+                100.0,
+                1,
+            )
+            if not ok_value:
                 return
-        if not normalized_value and current_value is None:
-            return
-        if normalized_value and current_value is not None:
-            try:
-                if math.isclose(current_value, float(normalized_value), rel_tol=0.0, abs_tol=1e-9):
-                    return
-            except Exception:
-                pass
-        if not self.model.setData(index, normalized_value, QtCore.Qt.EditRole):
+            payload = f"{custom_value:g}"
+        elif selected.lower() == "empty":
+            payload = ""
+        else:
+            payload = selected
+        if not self.model.setData(index, payload, QtCore.Qt.EditRole):
             QtWidgets.QMessageBox.warning(
                 self,
                 "Orientacao invalida",

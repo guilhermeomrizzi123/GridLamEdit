@@ -229,7 +229,7 @@ class NewLaminateDialog(QDialog):
             )
             return
 
-        laminado.auto_rename_enabled = bool(self.chk_auto_rename.isChecked())
+        laminado.auto_rename_enabled = True
         self.created_laminate = laminado
         self.accept()
 

@@ -5,12 +5,11 @@ from __future__ import annotations
 from typing import Callable, Iterable, Optional
 
 from PySide6.QtCore import Qt, QRect, QRegularExpression
-from PySide6.QtGui import QRegularExpressionValidator
+from PySide6.QtGui import QRegularExpressionValidator, QPainter, QPen, QColor
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
-    QCompleter,
-    QLineEdit,
+    QInputDialog,
     QStyledItemDelegate,
     QWidget,
     QStyle,
@@ -20,6 +19,8 @@ from PySide6.QtWidgets import (
 from gridlamedit.io.spreadsheet import (
     DEFAULT_PLY_TYPE,
     PLY_TYPE_OPTIONS,
+    ORIENTATION_SYMMETRY_ROLE,
+    normalize_angle,
     normalize_ply_type_label,
 )
 
@@ -70,7 +71,10 @@ class MaterialComboDelegate(_BaseComboDelegate):
 
 
 class OrientationComboDelegate(QStyledItemDelegate):
-    """Delegate que aceita orientacoes livres no intervalo permitido."""
+    """Delegate que restringe a edicao de orientacao a um combo controlado."""
+
+    EMPTY_LABEL = "Empty"
+    CUSTOM_TOKEN = "__custom__"
 
     def __init__(
         self,
@@ -79,33 +83,100 @@ class OrientationComboDelegate(QStyledItemDelegate):
         items_provider: Optional[Callable[[], Iterable[str]]] = None,
     ) -> None:
         super().__init__(parent)
+        # items_provider is kept for API compatibility, even though options are fixed.
         self._items_provider = items_provider or (lambda: [])
 
+    def _option_items(self) -> list[tuple[str, object]]:
+        return [
+            (self.EMPTY_LABEL, None),
+            ("0", 0.0),
+            ("45", 45.0),
+            ("-45", -45.0),
+            ("90", 90.0),
+            ("Outro valor...", self.CUSTOM_TOKEN),
+        ]
+
+    def _coerce_orientation(self, value: object) -> Optional[float]:
+        if value is None:
+            return None
+        text = str(value).strip()
+        if not text:
+            return None
+        if text.lower() == self.EMPTY_LABEL.lower():
+            return None
+        try:
+            return normalize_angle(value)
+        except Exception:
+            try:
+                return normalize_angle(text)
+            except Exception:
+                return None
+
+    def _find_index_for_value(self, editor: QComboBox, value: Optional[float]) -> int:
+        for idx in range(editor.count()):
+            data = editor.itemData(idx)
+            if value is None and data is None:
+                return idx
+            if isinstance(data, float) and value is not None:
+                try:
+                    if abs(data - value) <= 1e-9:
+                        return idx
+                except Exception:
+                    continue
+        return editor.count() - 1  # Custom option.
+
     def createEditor(self, parent: QWidget, option, index):  # noqa: D401, N802
-        editor = QLineEdit(parent)
-        editor.setValidator(None)  # Validation handled by model (normalize_angle).
-        suggestions = [str(item) for item in self._items_provider() if str(item).strip()]
-        if suggestions:
-            completer = QCompleter(suggestions, editor)
-            completer.setCaseSensitivity(Qt.CaseInsensitive)
-            completer.setFilterMode(Qt.MatchContains)
-            editor.setCompleter(completer)
-        editor.setPlaceholderText("Ex.: -10\N{DEGREE SIGN}, 8.5\N{DEGREE SIGN}")
+        editor = QComboBox(parent)
+        editor.setEditable(False)
+        for text, data in self._option_items():
+            editor.addItem(text, data)
         return editor
 
     def setEditorData(self, editor: QWidget, index):  # noqa: N802
-        if not isinstance(editor, QLineEdit):
+        if not isinstance(editor, QComboBox):
             return
-        text = index.data(Qt.EditRole) or index.data(Qt.DisplayRole) or ""
-        cleaned = str(text).replace("\N{DEGREE SIGN}", "").replace("\u00ba", "").strip()
-        editor.setText(cleaned)
-        editor.setCursorPosition(len(cleaned))
+        current = index.data(Qt.EditRole) or index.data(Qt.DisplayRole)
+        value = self._coerce_orientation(current)
+        editor.setProperty("currentOrientation", value)
+        editor.setCurrentIndex(self._find_index_for_value(editor, value))
 
     def setModelData(self, editor: QWidget, model, index):  # noqa: N802
-        if not isinstance(editor, QLineEdit):
+        if not isinstance(editor, QComboBox):
             return
-        text = editor.text().replace("\N{DEGREE SIGN}", "").replace("\u00ba", "").strip()
-        model.setData(index, text, Qt.EditRole)
+        data = editor.currentData()
+        if data == self.CUSTOM_TOKEN:
+            default_value = editor.property("currentOrientation")
+            if not isinstance(default_value, (int, float)):
+                default_value = 0.0
+            value, ok = QInputDialog.getDouble(
+                editor,
+                "Outro valor",
+                "Informe a orientacao (-100 a 100 graus):",
+                float(default_value),
+                -100.0,
+                100.0,
+                1,
+            )
+            if not ok:
+                return
+            model.setData(index, value, Qt.EditRole)
+            return
+        if data is None:
+            model.setData(index, "", Qt.EditRole)
+        else:
+            model.setData(index, float(data), Qt.EditRole)
+
+    def paint(self, painter: QPainter, option, index):  # noqa: N802
+        super().paint(painter, option, index)
+        if not bool(index.data(ORIENTATION_SYMMETRY_ROLE)):
+            return
+        pen = QPen(QColor("orange"))
+        pen.setStyle(Qt.DashLine)
+        painter.save()
+        painter.setPen(pen)
+        rect = option.rect.adjusted(1, 1, -1, -1)
+        painter.drawRect(rect)
+        painter.restore()
 
 
 class PlyTypeComboDelegate(QStyledItemDelegate):

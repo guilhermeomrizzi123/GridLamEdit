@@ -1,4 +1,4 @@
-"""Spreadsheet import pipeline and UI binding for GridLamEdit."""
+﻿"""Spreadsheet import pipeline and UI binding for GridLamEdit."""
 
 from __future__ import annotations
 
@@ -58,7 +58,7 @@ ORIENTATION_MAX = 100.0
 _DEGREE_TOKENS = ("\N{DEGREE SIGN}", "\u00ba")
 _ORIENTATION_TEXT_PATTERN = re.compile(r"^[+-]?\d+(?:[.,]\d+)?$")
 ORIENTATION_HIGHLIGHT_COLORS: dict[float, QColor] = {
-    45.0: QColor(193, 174, 255),  # Lilás
+    45.0: QColor(193, 174, 255),  # Lil├ís
     90.0: QColor(160, 196, 255),  # Azul
     -45.0: QColor(176, 230, 176),  # Verde claro
     0.0: QColor(230, 230, 230),  # Cinza claro
@@ -85,6 +85,7 @@ DEFAULT_COLOR_INDEX = 1
 MIN_COLOR_INDEX = 1
 MAX_COLOR_INDEX = 150
 _HEX_COLOR_PATTERN = re.compile(r"#?[0-9a-fA-F]{6}")
+ORIENTATION_SYMMETRY_ROLE = Qt.UserRole + 50  # Custom role to signal symmetric pairing.
 
 
 def _normalize_ply_type_token(value: object) -> str:
@@ -331,7 +332,7 @@ class Laminado:
     tag: str = ""
     celulas: list[str] = field(default_factory=list)
     camadas: list[Camada] = field(default_factory=list)
-    auto_rename_enabled: bool = False
+    auto_rename_enabled: bool = True
 
 
 @dataclass
@@ -539,7 +540,7 @@ def normalize_color_index(value: object, default: int = DEFAULT_COLOR_INDEX) -> 
 
 
 def normalize_hex_color(value: object) -> Optional[str]:
-    """Retorna cor hexadecimal no formato #RRGGBB se aplicável."""
+    """Retorna cor hexadecimal no formato #RRGGBB se aplic├ível."""
     if value is None:
         return None
     if isinstance(value, bool):
@@ -882,6 +883,7 @@ class StackingTableModel(QAbstractTableModel):
                     except AttributeError:
                         pass
         elif column == self.COL_ORIENTATION:
+            old_orientation = getattr(camada, "orientacao", None)
             if value is None:
                 camada.orientacao = None
             else:
@@ -899,6 +901,9 @@ class StackingTableModel(QAbstractTableModel):
             if camada.orientacao is None and camada.material:
                 camada.material = ""
                 extra_columns.append(self.COL_MATERIAL)
+                if camada.ply_type != PLY_TYPE_OPTIONS[1]:
+                    camada.ply_type = PLY_TYPE_OPTIONS[1]
+                    extra_columns.append(self.COL_PLY_TYPE)
             elif (
                 camada.orientacao is not None
                 and not camada.material
@@ -908,6 +913,9 @@ class StackingTableModel(QAbstractTableModel):
                 if suggestion:
                     camada.material = suggestion
                     extra_columns.append(self.COL_MATERIAL)
+                if old_orientation is None and camada.ply_type == PLY_TYPE_OPTIONS[1]:
+                    camada.ply_type = PLY_TYPE_OPTIONS[0]
+                    extra_columns.append(self.COL_PLY_TYPE)
         else:
             return False
 
@@ -975,6 +983,7 @@ class StackingTableModel(QAbstractTableModel):
         camada.rosette = rosette_value or DEFAULT_ROSETTE_LABEL
         if getattr(camada, "orientacao", None) is None:
             camada.material = ""
+            camada.ply_type = PLY_TYPE_OPTIONS[1]
         if hasattr(camada, "nao_estrutural"):
             try:
                 delattr(camada, "nao_estrutural")
@@ -1028,6 +1037,8 @@ class StackingTableModel(QAbstractTableModel):
             if column == self.COL_MATERIAL:
                 return camada.material
             if column == self.COL_ORIENTATION:
+                if camada.orientacao is None:
+                    return "Empty"
                 return format_orientation_value(camada.orientacao)
         elif role == Qt.EditRole:
             if column == self.COL_SEQUENCE:
@@ -1039,7 +1050,12 @@ class StackingTableModel(QAbstractTableModel):
             if column == self.COL_MATERIAL:
                 return camada.material
             if column == self.COL_ORIENTATION:
-                return format_orientation_value(camada.orientacao)
+                if camada.orientacao is None:
+                    return ""
+                try:
+                    return f"{float(camada.orientacao):g}"
+                except Exception:
+                    return str(camada.orientacao)
         elif role == Qt.CheckStateRole:
             if column == self.COL_SELECT:
                 return Qt.Checked if self._checked[index.row()] else Qt.Unchecked
@@ -1054,6 +1070,9 @@ class StackingTableModel(QAbstractTableModel):
             ):
                 return int(Qt.AlignVCenter | Qt.AlignCenter)
             return int(Qt.AlignVCenter | Qt.AlignLeft)
+        elif role == Qt.ForegroundRole:
+            if column == self.COL_ORIENTATION and camada.orientacao is None:
+                return QColor(160, 160, 160)
         elif role == Qt.BackgroundRole:
             row = index.row()
             if row in self._rows_red:
@@ -1064,6 +1083,9 @@ class StackingTableModel(QAbstractTableModel):
                 color = orientation_highlight_color(camada.orientacao)
                 if color is not None:
                     return color
+        elif role == ORIENTATION_SYMMETRY_ROLE:
+            if column == self.COL_ORIENTATION and index.row() in self._rows_green:
+                return True
 
         return None
 
@@ -1261,11 +1283,16 @@ class StackingTableModel(QAbstractTableModel):
             return self._apply_or_record_change(row, column, camada.material, new_value)
 
         if column == self.COL_ORIENTATION and role in (Qt.EditRole, Qt.DisplayRole):
-            text = str(value).strip()
-            if not text or text.lower() == "x":
-                if camada.orientacao is None:
+            previous_orientation = getattr(camada, "orientacao", None)
+            if value is None:
+                if previous_orientation is None:
                     return False
-                return self._apply_or_record_change(row, column, camada.orientacao, None)
+                return self._apply_or_record_change(row, column, previous_orientation, None)
+            text = str(value).strip()
+            if not text or text.lower() in {"x", "empty"}:
+                if previous_orientation is None:
+                    return False
+                return self._apply_or_record_change(row, column, previous_orientation, None)
             try:
                 angle = normalize_angle(value)
             except ValueError:
@@ -1273,9 +1300,9 @@ class StackingTableModel(QAbstractTableModel):
                     angle = normalize_angle(text)
                 except ValueError:
                     return False
-            if camada.orientacao is not None and math.isclose(camada.orientacao, angle, rel_tol=0.0, abs_tol=1e-9):
+            if previous_orientation is not None and math.isclose(previous_orientation, angle, rel_tol=0.0, abs_tol=1e-9):
                 return False
-            return self._apply_or_record_change(row, column, camada.orientacao, angle)
+            return self._apply_or_record_change(row, column, previous_orientation, angle)
 
         return False
     # Helpers for controller ------------------------------------------------- #
@@ -2334,4 +2361,5 @@ def parse_cells_from_planilha1(df: pd.DataFrame) -> list[str]:
     sanitized = df.dropna(how="all").reset_index(drop=True)
     section = _extract_cells_section(sanitized)
     return section.cells
+
 

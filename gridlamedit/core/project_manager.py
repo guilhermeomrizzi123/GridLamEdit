@@ -67,7 +67,7 @@ def _serialize_model(model: GridModel) -> dict:
                 for layer in laminate.camadas
             ],
             "auto_rename_enabled": bool(
-                getattr(laminate, "auto_rename_enabled", False)
+                getattr(laminate, "auto_rename_enabled", True)
             ),
         }
         if color_hex:
@@ -165,7 +165,7 @@ def _deserialize_model(data: dict) -> GridModel:
             celulas=list(lam_data.get("celulas", [])),
             camadas=layers,
             auto_rename_enabled=bool(
-                lam_data.get("auto_rename_enabled", False)
+                lam_data.get("auto_rename_enabled", True)
             ),
         )
         laminates[laminate.nome] = laminate
