@@ -6,10 +6,18 @@ import copy
 from collections import Counter, OrderedDict
 import math
 import re
+import sys
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Callable, Iterable, Optional
 
 from PySide6 import QtCore, QtGui, QtWidgets
+
+# Allow running as a script without installing the package.
+if __package__ in (None, ""):
+    project_root = Path(__file__).resolve().parents[2]
+    if str(project_root) not in sys.path:
+        sys.path.insert(0, str(project_root))
 
 from gridlamedit.io.spreadsheet import (
     Camada,
