@@ -25,8 +25,14 @@ from gridlamedit.io.spreadsheet import (
     count_oriented_layers,
     is_structural_ply_label,
     normalize_angle,
+    normalize_ply_type_label,
+    PLY_TYPE_OPTIONS,
 )
-from gridlamedit.app.delegates import MaterialComboDelegate, OrientationComboDelegate
+from gridlamedit.app.delegates import (
+    MaterialComboDelegate,
+    OrientationComboDelegate,
+    PlyTypeComboDelegate,
+)
 from gridlamedit.services.laminate_service import auto_name_for_laminate
 from gridlamedit.core.paths import package_path
 from gridlamedit.services.project_query import (
@@ -42,8 +48,9 @@ class VirtualStackingLayer:
 
     sequence_label: str
     ply_label: str
-    material: str
-    rosette: str
+    ply_type: str = DEFAULT_PLY_TYPE
+    material: str = ""
+    rosette: str = DEFAULT_ROSETTE_LABEL
 
 
 @dataclass
@@ -141,9 +148,10 @@ class VirtualStackingModel(QtCore.QAbstractTableModel):
 
     COL_SEQUENCE = 0
     COL_PLY = 1
-    COL_MATERIAL = 2
-    COL_ROSETTE = 3
-    LAMINATE_COLUMN_OFFSET = 4
+    COL_PLY_TYPE = 2
+    COL_MATERIAL = 3
+    COL_ROSETTE = 4
+    LAMINATE_COLUMN_OFFSET = 5
 
     def __init__(
         self,
@@ -199,6 +207,8 @@ class VirtualStackingModel(QtCore.QAbstractTableModel):
                 return "Sequence"
             if section == self.COL_PLY:
                 return "Ply"
+            if section == self.COL_PLY_TYPE:
+                return "Simetria"
             if section == self.COL_MATERIAL:
                 return "Material"
             if section == self.COL_ROSETTE:
@@ -249,6 +259,8 @@ class VirtualStackingModel(QtCore.QAbstractTableModel):
                 return layer.sequence_label or f"Seq.{row + 1}"
             if column == self.COL_PLY:
                 return layer.ply_label or f"Ply.{row + 1}"
+            if column == self.COL_PLY_TYPE:
+                return layer.ply_type or DEFAULT_PLY_TYPE
             if column == self.COL_MATERIAL:
                 return layer.material
             if column == self.COL_ROSETTE:
@@ -323,7 +335,7 @@ class VirtualStackingModel(QtCore.QAbstractTableModel):
             return QtCore.Qt.NoItemFlags
 
         base = QtCore.Qt.ItemIsSelectable | QtCore.Qt.ItemIsEnabled
-        if index.column() in (self.COL_MATERIAL, self.COL_ROSETTE) or index.column() >= self.LAMINATE_COLUMN_OFFSET:
+        if index.column() in (self.COL_PLY_TYPE, self.COL_MATERIAL, self.COL_ROSETTE) or index.column() >= self.LAMINATE_COLUMN_OFFSET:
             return base | QtCore.Qt.ItemIsEditable
         return base
 
@@ -341,6 +353,8 @@ class VirtualStackingModel(QtCore.QAbstractTableModel):
         if row < 0 or row >= len(self.layers):
             return False
 
+        if column == self.COL_PLY_TYPE:
+            return self._set_ply_type_for_row(row, value)
         if column == self.COL_MATERIAL:
             return self._set_material_for_row(row, str(value))
         if column == self.COL_ROSETTE:
@@ -359,15 +373,22 @@ class VirtualStackingModel(QtCore.QAbstractTableModel):
             return False
         self._ensure_row_exists(stacking_model, row, laminate)
 
-        text = str(value).strip()
+        text = "" if value is None else str(value).strip()
         if text.endswith("?"):
             text = text[:-1].strip()
+        if text.lower() in {"", "empty"}:
+            normalized_value: object = ""
+        else:
+            try:
+                normalized_value = normalize_angle(text)
+            except Exception:
+                return False
 
         target_index = stacking_model.index(row, StackingTableModel.COL_ORIENTATION)
         if not target_index.isValid():
             return False
         # Permit blank values; delegate validation to StackingTableModel.
-        if not stacking_model.setData(target_index, text, QtCore.Qt.EditRole):
+        if not stacking_model.setData(target_index, normalized_value, QtCore.Qt.EditRole):
             return False
         laminate.camadas = stacking_model.layers()
         self._auto_fill_material_if_missing(laminate, stacking_model, row)
@@ -440,6 +461,35 @@ class VirtualStackingModel(QtCore.QAbstractTableModel):
         target_index = stacking_model.index(row, StackingTableModel.COL_MATERIAL)
         if target_index.isValid():
             stacking_model.setData(target_index, suggestion, QtCore.Qt.EditRole)
+
+    def _set_ply_type_for_row(self, row: int, value: object) -> bool:
+        new_value = normalize_ply_type_label(value)
+        changed: list[Laminado] = []
+        for cell in self.cells:
+            laminate = cell.laminate
+            stacking_model = self._stacking_model_provider(laminate)
+            if stacking_model is None:
+                continue
+            layers = self._ensure_row_exists(stacking_model, row, laminate)
+            if row >= len(layers):
+                continue
+            target_layer = layers[row]
+            if normalize_ply_type_label(getattr(target_layer, "ply_type", DEFAULT_PLY_TYPE)) == new_value:
+                continue
+            idx = stacking_model.index(row, StackingTableModel.COL_PLY_TYPE)
+            if idx.isValid() and stacking_model.setData(idx, new_value, QtCore.Qt.EditRole):
+                changed.append(laminate)
+            else:
+                target_layer.ply_type = new_value
+                laminate.camadas = stacking_model.layers()
+                changed.append(laminate)
+        if changed:
+            self.layers[row].ply_type = new_value
+            model_index = self.index(row, self.COL_PLY_TYPE)
+            self.dataChanged.emit(model_index, model_index, [QtCore.Qt.DisplayRole, QtCore.Qt.EditRole])
+            self._emit_change_callbacks(changed)
+            return True
+        return False
 
     def _set_material_for_row(self, row: int, value: str) -> bool:
         new_material = str(value or "").strip()
@@ -600,6 +650,10 @@ class VirtualStackingWindow(QtWidgets.QDialog):
             if candidate.is_file():
                 icon = QtGui.QIcon(str(candidate))
         if icon.isNull():
+            candidate_png = package_path("resources", "icons", "stacking_summary.png")
+            if candidate_png.is_file():
+                icon = QtGui.QIcon(str(candidate_png))
+        if icon.isNull():
             app_icon = QtWidgets.QApplication.windowIcon()
             if app_icon is not None and not app_icon.isNull():
                 icon = app_icon
@@ -607,6 +661,10 @@ class VirtualStackingWindow(QtWidgets.QDialog):
             icon = self.style().standardIcon(QtWidgets.QStyle.SP_FileDialogInfoView)
         if not icon.isNull():
             self.setWindowIcon(icon)
+            try:
+                QtWidgets.QApplication.setWindowIcon(icon)
+            except Exception:
+                pass
 
 
     def _build_ui(self) -> None:
@@ -684,6 +742,10 @@ class VirtualStackingWindow(QtWidgets.QDialog):
         )
         self.table.setItemDelegateForColumn(
             VirtualStackingModel.COL_MATERIAL, material_delegate
+        )
+        ply_type_delegate = PlyTypeComboDelegate(self.table)
+        self.table.setItemDelegateForColumn(
+            VirtualStackingModel.COL_PLY_TYPE, ply_type_delegate
         )
         delegate = OrientationComboDelegate(
             self.table,
@@ -836,6 +898,7 @@ class VirtualStackingWindow(QtWidgets.QDialog):
             material = ""
             sequence_label = ""
             ply_label = ""
+            ply_type = DEFAULT_PLY_TYPE
             rosette = ""
             for lam in laminates:
                 if idx >= len(lam.camadas):
@@ -847,9 +910,15 @@ class VirtualStackingWindow(QtWidgets.QDialog):
                     sequence_label = camada.sequence
                 if not ply_label and getattr(camada, "ply_label", ""):
                     ply_label = camada.ply_label
+                if getattr(camada, "ply_type", ""):
+                    candidate_type = normalize_ply_type_label(camada.ply_type)
+                    if candidate_type == PLY_TYPE_OPTIONS[1]:
+                        ply_type = candidate_type
+                    elif ply_type == DEFAULT_PLY_TYPE:
+                        ply_type = candidate_type
                 if not rosette and getattr(camada, "rosette", ""):
                     rosette = camada.rosette
-                if material and sequence_label and ply_label and rosette:
+                if material and sequence_label and ply_label and rosette and ply_type:
                     break
             if not sequence_label:
                 sequence_label = f"Seq.{idx + 1}"
@@ -861,6 +930,7 @@ class VirtualStackingWindow(QtWidgets.QDialog):
                 VirtualStackingLayer(
                     sequence_label=sequence_label,
                     ply_label=ply_label,
+                    ply_type=ply_type,
                     material=material,
                     rosette=rosette,
                 )
@@ -1106,6 +1176,12 @@ class VirtualStackingWindow(QtWidgets.QDialog):
             except Exception:
                 return None
 
+    def _row_considered(self, row: int) -> bool:
+        if not (0 <= row < len(self._layers)):
+            return True
+        layer = self._layers[row]
+        return is_structural_ply_label(getattr(layer, "ply_type", DEFAULT_PLY_TYPE))
+
     def _summary_for_laminate(self, laminate: Optional[Laminado]) -> str:
         if laminate is None:
             return ""
@@ -1113,6 +1189,11 @@ class VirtualStackingWindow(QtWidgets.QDialog):
         orientations = Counter()
         oriented_count = 0
         for camada in layers:
+            row_idx = getattr(camada, "idx", None)
+            if row_idx is not None and not self._row_considered(row_idx):
+                continue
+            if not is_structural_ply_label(getattr(camada, "ply_type", DEFAULT_PLY_TYPE)):
+                continue
             token = self._orientation_token(getattr(camada, "orientacao", None))
             if token is None:
                 continue
@@ -1153,7 +1234,11 @@ class VirtualStackingWindow(QtWidgets.QDialog):
                 laminate = self._cells[cell_idx].laminate if 0 <= cell_idx < len(self._cells) else None
                 text = self._summary_for_laminate(laminate)
             item = QtGui.QStandardItem(text)
-            item.setTextAlignment(QtCore.Qt.AlignCenter)
+            if col < self.model.LAMINATE_COLUMN_OFFSET:
+                alignment = QtCore.Qt.AlignCenter
+            else:
+                alignment = QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter
+            item.setTextAlignment(alignment)
             summary_model.setItem(0, col, item)
             max_lines = max(max_lines, max(1, text.count("\n") + 1))
         self._update_summary_height(max_lines, metrics)
@@ -1166,6 +1251,11 @@ class VirtualStackingWindow(QtWidgets.QDialog):
         padding = 10
         target_height = max(48, lines * line_height + padding)
         self.summary_table.setFixedHeight(target_height)
+        try:
+            if self.summary_table.model() is not None and self.summary_table.model().rowCount() > 0:
+                self.summary_table.setRowHeight(0, max(36, target_height - 8))
+        except Exception:
+            pass
 
     def _resize_summary_columns(self) -> None:
         header = self.table.horizontalHeader()
@@ -1188,8 +1278,10 @@ class VirtualStackingWindow(QtWidgets.QDialog):
         if self.model.columnCount() >= 2:
             header.resizeSection(VirtualStackingModel.COL_PLY, 90)
         if self.model.columnCount() >= 3:
-            header.resizeSection(VirtualStackingModel.COL_MATERIAL, 160)
+            header.resizeSection(VirtualStackingModel.COL_PLY_TYPE, 150)
         if self.model.columnCount() >= 4:
+            header.resizeSection(VirtualStackingModel.COL_MATERIAL, 160)
+        if self.model.columnCount() >= 5:
             header.resizeSection(VirtualStackingModel.COL_ROSETTE, 140)
         for col in range(self.model.LAMINATE_COLUMN_OFFSET, self.model.columnCount()):
             if header.sectionSize(col) < 110:
@@ -1213,7 +1305,8 @@ class VirtualStackingWindow(QtWidgets.QDialog):
             structural_rows = [
                 idx
                 for idx, camada in enumerate(layers)
-                if camada.orientacao is not None
+                if self._row_considered(idx)
+                and camada.orientacao is not None
                 and is_structural_ply_label(getattr(camada, "ply_type", DEFAULT_PLY_TYPE))
             ]
             count_struct = len(structural_rows)
