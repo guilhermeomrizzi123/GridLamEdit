@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import copy
+import os
 import secrets
 from collections import Counter, OrderedDict
 from dataclasses import dataclass
@@ -257,6 +258,18 @@ class MainWindow(QMainWindow):
         self._update_save_actions_enabled()
         self._restore_stacking_summary_dialog_state()
         self._center_on_screen()
+
+    def _file_dialog_options(self, *, force_qt_dialog: bool = False) -> QFileDialog.Options:
+        """
+        Return QFileDialog options.
+
+        By default we keep the native Windows dialog (preferred layout).
+        If freezes reappear, set env GRIDLAMEDIT_FORCE_QT_DIALOGS=1 to force the Qt dialog.
+        """
+        options = QFileDialog.Options()
+        if force_qt_dialog or os.getenv("GRIDLAMEDIT_FORCE_QT_DIALOGS") == "1":
+            options |= QFileDialog.Option.DontUseNativeDialog
+        return options
 
     def _apply_initial_geometry(self) -> None:
         screen = QGuiApplication.primaryScreen()
@@ -2833,12 +2846,14 @@ class MainWindow(QMainWindow):
         """Open an Excel file and populate the UI."""
         if not self._confirm_discard_changes():
             return
+        options = self._file_dialog_options()
         path, _ = QFileDialog.getOpenFileName(
             self,
             "Carregar planilha do Grid Design",
             "",
             "Planilhas Excel (*.xlsx *.xls);;Todos os arquivos (*)",
-)
+            options=options,
+        )
         if not path:
             return
 
@@ -2886,11 +2901,13 @@ class MainWindow(QMainWindow):
     def _on_open_project(self, checked: bool = False) -> None:  # noqa: ARG002
         if not self._confirm_discard_changes():
             return
+        options = self._file_dialog_options()
         path, _ = QFileDialog.getOpenFileName(
             self,
             "Abrir projeto GridLam",
             str(self.project_manager.current_path or ""),
             "Projetos GridLam (*.gridlam);;Todos os arquivos (*)",
+            options=options,
         )
         if not path:
             return
@@ -3026,11 +3043,13 @@ class MainWindow(QMainWindow):
             if self.project_manager.current_path
             else str(Path.cwd() / "projeto.gridlam")
         )
+        options = self._file_dialog_options()
         path, _ = QFileDialog.getSaveFileName(
             self,
             "Salvar projeto",
             initial_path,
             "Projetos GridLam (*.gridlam);;Todos os arquivos (*)",
+            options=options,
         )
         if not path:
             return False
@@ -3246,11 +3265,13 @@ class MainWindow(QMainWindow):
         else:
             suggested = Path.cwd() / "grid_export.xlsx"
 
+        options = self._file_dialog_options()
         path_str, _ = QFileDialog.getSaveFileName(
             self,
             "Exportar planilha do Grid Design",
             str(suggested),
             "Planilhas Excel (*.xlsx *.xls);;Todos os arquivos (*)",
+            options=options,
         )
         if not path_str:
             return None
