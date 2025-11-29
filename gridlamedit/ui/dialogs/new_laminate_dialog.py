@@ -7,7 +7,6 @@ from typing import Iterable, Optional, Sequence
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
-    QCheckBox,
     QComboBox,
     QDialog,
     QDialogButtonBox,
@@ -81,8 +80,15 @@ class NewLaminateDialog(QDialog):
 
         self.edt_nome = QLineEdit(self)
         self.edt_nome.setObjectName("edtNomeLaminado")
-        self.edt_nome.setPlaceholderText("Ex.: WEB-RIB-26")
-        self.edt_nome.setClearButtonEnabled(True)
+        self.edt_nome.setPlaceholderText("Automatic Rename")
+        self.edt_nome.setClearButtonEnabled(False)
+        self.edt_nome.setReadOnly(True)
+        self.edt_nome.setText("Automatic Rename")
+        self.edt_nome.setFocusPolicy(Qt.NoFocus)
+        self.edt_nome.setCursor(Qt.ArrowCursor)
+        self.edt_nome.setStyleSheet(
+            "QLineEdit { color: gray; background-color: #f0f0f0; }"
+        )
         form_layout.addRow("Nome:", self.edt_nome)
 
         self.edt_tag = QLineEdit(self)
@@ -90,14 +96,7 @@ class NewLaminateDialog(QDialog):
         self.edt_tag.textChanged.connect(self._update_auto_name)
         form_layout.addRow("Tag:", self.edt_tag)
 
-        self.chk_auto_rename = QCheckBox("Automatic Rename", self)
-        self.chk_auto_rename.setObjectName("chkAutomaticRenameNewLaminate")
-        self.chk_auto_rename.setChecked(True)
-        self.chk_auto_rename.setToolTip(
-            "Atualiza o nome automaticamente conforme o stacking."
-        )
-        self.chk_auto_rename.toggled.connect(self._handle_auto_rename_toggle)
-        form_layout.addRow("", self.chk_auto_rename)
+        # Automatic Rename option removed from UI; name is always auto-generated.
 
         self.cmb_cor = QComboBox(self)
         self.cmb_cor.setObjectName("cmbCor")
@@ -129,8 +128,8 @@ class NewLaminateDialog(QDialog):
         self.button_box.rejected.connect(self.reject)
         layout.addWidget(self.button_box)
 
-        self._handle_auto_rename_toggle(True)
-        self.edt_nome.setFocus()
+        self._update_auto_name()
+        self.edt_nome.clearFocus()
 
     def refresh_options(
         self,
@@ -154,7 +153,7 @@ class NewLaminateDialog(QDialog):
 
     def reset_fields(self) -> None:
         """Reset user inputs to defaults."""
-        self.edt_nome.clear()
+        self._update_auto_name()
         self.edt_tag.clear()
         if self.cmb_cor.count():
             self.cmb_cor.setCurrentIndex(0)
@@ -162,8 +161,6 @@ class NewLaminateDialog(QDialog):
             self.cmb_tipo.setCurrentIndex(0)
         if self.cmb_celula.count():
             self.cmb_celula.setCurrentIndex(0)
-        if hasattr(self, "chk_auto_rename"):
-            self.chk_auto_rename.setChecked(True)
         self.created_laminate = None
 
     def set_grid_model(self, grid_model: GridModel) -> None:
@@ -187,9 +184,19 @@ class NewLaminateDialog(QDialog):
             self.cmb_celula.addItem(text, cell_id)
 
     def _handle_create(self) -> None:
-        nome = self.edt_nome.text().strip()
+        # Name is always auto-generated; ignore user input
+        auto_name = auto_name_for_layers(
+            self._grid_model,
+            layer_count=0,
+            tag=self.edt_tag.text(),
+        )
+        nome = (auto_name or "").strip()
         if not nome:
-            QMessageBox.warning(self, "Campos obrigatórios", "O campo Nome não pode ficar vazio.")
+            QMessageBox.warning(
+                self,
+                "Campos obrigatórios",
+                "O nome será gerado automaticamente, mas não foi possível determinar um nome.",
+            )
             return
         cor = self.cmb_cor.currentData()
         if cor is None:
@@ -233,19 +240,6 @@ class NewLaminateDialog(QDialog):
         self.created_laminate = laminado
         self.accept()
 
-    def _handle_auto_rename_toggle(self, checked: bool) -> None:
-        self.edt_nome.setReadOnly(checked)
-        self.cmb_cor.setEnabled(not checked)
-        if checked:
-            self._update_auto_name()
-
     def _update_auto_name(self) -> None:
-        if not self.chk_auto_rename.isChecked():
-            return
-        auto_name = auto_name_for_layers(
-            self._grid_model,
-            layer_count=0,
-            tag=self.edt_tag.text(),
-        )
-        if auto_name:
-            self.edt_nome.setText(auto_name)
+        # Display-only text indicating automatic naming; field is non-editable
+        self.edt_nome.setText("Automatic Rename")
