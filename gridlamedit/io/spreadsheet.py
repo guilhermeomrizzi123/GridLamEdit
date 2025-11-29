@@ -2051,7 +2051,8 @@ class _GridUiBinding:
                 if idx >= 0:
                     color_combo.setCurrentIndex(idx)
                 else:
-                    color_combo.setCurrentText(target)
+                    color_combo.addItem(target)
+                    color_combo.setCurrentIndex(color_combo.count() - 1)
                 color_combo.blockSignals(False)
 
             type_combo = getattr(self.ui, "laminate_type_combo", None)
