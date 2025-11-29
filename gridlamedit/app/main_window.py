@@ -86,6 +86,7 @@ from gridlamedit.app.dialogs.stacking_summary_dialog import StackingSummaryDialo
 from gridlamedit.app.virtualstacking import VirtualStackingWindow
 from gridlamedit.core.project_manager import ProjectManager
 from gridlamedit.core.paths import package_path
+from gridlamedit.core.utils import natural_sort_key
 from gridlamedit.io.spreadsheet import (
     Camada,
     DEFAULT_COLOR_INDEX,
@@ -134,21 +135,6 @@ COL_SELECTION = StackingTableModel.COL_SELECT
 COL_PLY_TYPE = StackingTableModel.COL_PLY_TYPE
 COL_MATERIAL = StackingTableModel.COL_MATERIAL
 COL_ORIENTATION = StackingTableModel.COL_ORIENTATION
-
-
-def _natural_sort_key(text: str) -> list:
-    """Return a key for natural sorting, e.g. L1, L2, L10, L25, L25.1."""
-    parts = re.split(r"(\d+\.?\d*)", text)
-    result = []
-    for part in parts:
-        part_stripped = part.strip()
-        if not part_stripped:
-            continue
-        try:
-            result.append(float(part_stripped))
-        except ValueError:
-            result.append(part_stripped.lower())
-    return result
 
 
 class _LaminateChecksWorker(QObject):
@@ -787,7 +773,7 @@ class MainWindow(QMainWindow):
         combo.addItem("--")
         if self._grid_model is not None:
             names = list(self._grid_model.laminados.keys())
-            names.sort(key=_natural_sort_key)
+            names.sort(key=natural_sort_key)
             combo.addItems(names)
         combo.setCurrentIndex(0)  # Always reset to "--"
         combo.blockSignals(False)
