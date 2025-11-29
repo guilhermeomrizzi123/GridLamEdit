@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Callable, Iterable, Optional
 
 from PySide6.QtCore import Qt, QRect, QRegularExpression
-from PySide6.QtGui import QRegularExpressionValidator, QPainter, QPen, QColor
+from PySide6.QtGui import QRegularExpressionValidator, QPainter, QPen, QColor, QDoubleValidator
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
     QWidget,
     QStyle,
     QStyleOptionButton,
+    QMessageBox,
 )
 
 from gridlamedit.io.spreadsheet import (
@@ -141,9 +142,16 @@ class OrientationComboDelegate(QStyledItemDelegate):
 
     def createEditor(self, parent: QWidget, option, index):  # noqa: D401, N802
         editor = QComboBox(parent)
+        # By default, do NOT allow typing; only enable when 'Outro valor...' selected.
         editor.setEditable(False)
+        editor.setInsertPolicy(QComboBox.NoInsert)
         for text, data in self._option_items():
             editor.addItem(text, data)
+        # Prepare validator; will be installed only when enabling custom typing.
+        validator = QDoubleValidator(-100.0, 100.0, 3, editor)
+        validator.setNotation(QDoubleValidator.StandardNotation)
+        editor.setProperty("_validator", validator)
+        editor.setProperty("_validatorInstalled", False)
         editor.setProperty("allowCustomPrompt", False)
         editor.setProperty("pendingCustomOrientation", None)
         editor.currentIndexChanged.connect(
@@ -159,6 +167,12 @@ class OrientationComboDelegate(QStyledItemDelegate):
         editor.setProperty("currentOrientation", value)
         editor.setCurrentIndex(self._find_index_for_value(editor, value))
         editor.setProperty("allowCustomPrompt", True)
+        # Ensure typing is only allowed when custom option is selected.
+        if isinstance(editor, QComboBox):
+            if editor.currentData() == self.CUSTOM_TOKEN:
+                self._enable_inline_custom(editor)
+            else:
+                self._disable_inline_typing(editor)
 
     def setModelData(self, editor: QWidget, model, index):  # noqa: N802
         if not isinstance(editor, QComboBox):
@@ -174,12 +188,58 @@ class OrientationComboDelegate(QStyledItemDelegate):
             editor.setProperty("pendingCustomOrientation", None)
             if value is None:
                 return
-            model.setData(index, value, Qt.EditRole)
+            # Validate within allowed range; warn user if invalid.
+            try:
+                normalized = normalize_angle(value)
+            except Exception:
+                QMessageBox.warning(
+                    editor,
+                    "Dados inválidos",
+                    "Informe uma orientação entre -100° e 100°.",
+                )
+                # Restore previous selection to avoid leaving at 'Outro valor...'
+                self._restore_previous_selection(editor)
+                return
+            # Apply normalized value; try multiple roles and fallbacks.
+            ok = bool(model.setData(index, normalized, Qt.EditRole))
+            if not ok:
+                ok = bool(model.setData(index, normalized, Qt.DisplayRole))
+            if not ok and hasattr(model, "apply_field_value"):
+                try:
+                    ok = bool(model.apply_field_value(index.row(), index.column(), normalized))
+                except Exception:
+                    ok = False
+            if not ok:
+                self._restore_previous_selection(editor)
+                return
+            editor.setProperty("currentOrientation", normalized)
             return
         if data is None:
-            model.setData(index, "", Qt.EditRole)
+            ok = bool(model.setData(index, "", Qt.EditRole))
+            if not ok:
+                ok = bool(model.setData(index, "", Qt.DisplayRole))
+            if not ok and hasattr(model, "apply_field_value"):
+                try:
+                    ok = bool(model.apply_field_value(index.row(), index.column(), ""))
+                except Exception:
+                    ok = False
+            if not ok:
+                self._restore_previous_selection(editor)
+                return
         else:
-            model.setData(index, float(data), Qt.EditRole)
+            value = float(data)
+            ok = bool(model.setData(index, value, Qt.EditRole))
+            if not ok:
+                ok = bool(model.setData(index, value, Qt.DisplayRole))
+            if not ok and hasattr(model, "apply_field_value"):
+                try:
+                    ok = bool(model.apply_field_value(index.row(), index.column(), value))
+                except Exception:
+                    ok = False
+            if not ok:
+                self._restore_previous_selection(editor)
+                return
+            editor.setProperty("currentOrientation", value)
 
     def _restore_previous_selection(self, editor: QComboBox) -> None:
         previous_value = self._coerce_orientation(editor.property("currentOrientation"))
@@ -191,15 +251,67 @@ class OrientationComboDelegate(QStyledItemDelegate):
         if not editor.property("allowCustomPrompt"):
             return
         if editor.currentData() != self.CUSTOM_TOKEN:
+            # When a preset is selected, make sure edit text matches selection and disable typing.
+            self._disable_inline_typing(editor)
             editor.setProperty("pendingCustomOrientation", None)
+            preset = editor.currentText().strip()
+            if editor.lineEdit() is not None:
+                editor.lineEdit().setText(preset)
             return
-        value = self._prompt_custom_orientation(editor)
-        if value is None:
+        # Enable inline custom entry and focus.
+        self._enable_inline_custom(editor)
+        if editor.lineEdit() is not None:
+            editor.lineEdit().clear()
+            editor.lineEdit().setFocus()
+            editor.lineEdit().selectAll()
+
+    def _on_inline_custom_finished(self, editor: QComboBox) -> None:
+        # Only act when custom option is selected.
+        if editor.currentData() != self.CUSTOM_TOKEN:
+            return
+        text = editor.currentText().strip()
+        if not text:
             self._restore_previous_selection(editor)
             return
+        try:
+            value = normalize_angle(text)
+        except Exception:
+            QMessageBox.warning(
+                editor,
+                "Dados inválidos",
+                "Informe uma orientação entre -100° e 100°.",
+            )
+            self._restore_previous_selection(editor)
+            return
+        # Show degree symbol in the edit box for user convenience.
+        if editor.lineEdit() is not None:
+            display = f"{value if value % 1 != 0 else int(value)}\N{DEGREE SIGN}"
+            editor.lineEdit().setText(display)
+        # Store pending value and commit to model.
         editor.setProperty("pendingCustomOrientation", value)
         self.commitData.emit(editor)
         self.closeEditor.emit(editor)
+
+    def _enable_inline_custom(self, editor: QComboBox) -> None:
+        editor.setEditable(True)
+        editor.setInsertPolicy(QComboBox.NoInsert)
+        if editor.lineEdit() is not None and not bool(editor.property("_validatorInstalled")):
+            validator = editor.property("_validator")
+            try:
+                if isinstance(validator, QDoubleValidator):
+                    editor.lineEdit().setValidator(validator)
+            except Exception:
+                pass
+            editor.lineEdit().setPlaceholderText("Digite graus (-100 a 100)")
+            # Connect only once.
+            editor.lineEdit().editingFinished.connect(
+                lambda ed=editor: self._on_inline_custom_finished(ed)
+            )
+            editor.setProperty("_validatorInstalled", True)
+
+    def _disable_inline_typing(self, editor: QComboBox) -> None:
+        # Disable typing for preset selections.
+        editor.setEditable(False)
 
     def paint(self, painter: QPainter, option, index):  # noqa: N802
         super().paint(painter, option, index)
