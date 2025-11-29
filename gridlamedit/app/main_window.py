@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import copy
 import os
+import re
 import secrets
 from collections import Counter, OrderedDict
 from dataclasses import dataclass
@@ -85,6 +86,7 @@ from gridlamedit.app.dialogs.stacking_summary_dialog import StackingSummaryDialo
 from gridlamedit.app.virtualstacking import VirtualStackingWindow
 from gridlamedit.core.project_manager import ProjectManager
 from gridlamedit.core.paths import package_path
+from gridlamedit.core.utils import natural_sort_key
 from gridlamedit.io.spreadsheet import (
     Camada,
     DEFAULT_COLOR_INDEX,
@@ -459,13 +461,32 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(16, 16, 16, 16)
         layout.setSpacing(12)
 
+        # Header row with "Laminado Associado a Celula" and "Trocar Laminado:" combo
+        header_layout = QHBoxLayout()
+        header_layout.setSpacing(12)
+        header_layout.setContentsMargins(0, 0, 0, 0)
+
         header = QLabel("Laminado Associado a Celula", panel)
         header_font: QFont = header.font()
         header_font.setBold(True)
         header_font.setPointSize(header_font.pointSize() + 1)
         header.setFont(header_font)
+        header_layout.addWidget(header)
 
-        layout.addWidget(header)
+        # "Trocar Laminado:" combo box
+        swap_label = QLabel("Trocar Laminado:", panel)
+        header_layout.addWidget(swap_label)
+
+        self.laminate_swap_combo = QComboBox(panel)
+        self.laminate_swap_combo.setMinimumWidth(140)
+        self.laminate_swap_combo.addItem("--")
+        self.laminate_swap_combo.setCurrentIndex(0)
+        self.laminate_swap_combo.currentIndexChanged.connect(self._on_swap_laminate_selected)
+        header_layout.addWidget(self.laminate_swap_combo)
+
+        header_layout.addStretch()
+        layout.addLayout(header_layout)
+
         layout.addLayout(self._build_laminate_form())
         associated_view = self._build_associated_cells_view()
         layout.addWidget(associated_view, alignment=Qt.AlignLeft)
@@ -484,13 +505,13 @@ class MainWindow(QMainWindow):
         layout.setSpacing(12)
         layout.setContentsMargins(0, 0, 0, 0)
 
-        name_combo_layout = self._combo_with_label(
-            "Nome:", ["LAM-1", "LAM-2"], "name", editable=False
-        )
-        name_row = QHBoxLayout()
-        name_row.setSpacing(6)
-        name_row.addLayout(name_combo_layout)
-        layout.addLayout(name_row)
+        # The "Nome:" combo was removed per request - now using "Trocar Laminado:" in header
+        # Still create the internal name combo for compatibility with binding
+        self.laminate_name_combo = QComboBox(self)
+        self.laminate_name_combo.setEditable(False)
+        self.laminate_name_combo.setMinimumWidth(180)
+        self.laminate_name_combo.setVisible(False)  # Hidden, used internally
+
         layout.addLayout(
             self._combo_with_label(
                 "Cor:", (str(i) for i in range(1, 151)), "color", editable=False
@@ -740,6 +761,84 @@ class MainWindow(QMainWindow):
         self._update_auto_rename_controls(laminate)
         self._set_color_combo_value(laminate)
         self._apply_auto_rename_if_needed(laminate)
+        self._refresh_swap_laminate_combo()
+
+    def _refresh_swap_laminate_combo(self) -> None:
+        """Refresh the 'Trocar Laminado' combo with all laminates sorted naturally."""
+        combo = getattr(self, "laminate_swap_combo", None)
+        if not isinstance(combo, QComboBox):
+            return
+        combo.blockSignals(True)
+        combo.clear()
+        combo.addItem("--")
+        if self._grid_model is not None:
+            names = list(self._grid_model.laminados.keys())
+            names.sort(key=natural_sort_key)
+            combo.addItems(names)
+        combo.setCurrentIndex(0)  # Always reset to "--"
+        combo.blockSignals(False)
+
+    def _on_swap_laminate_selected(self, index: int) -> None:
+        """Handle selection in the 'Trocar Laminado' combo to swap the cell's laminate."""
+        combo = getattr(self, "laminate_swap_combo", None)
+        if not isinstance(combo, QComboBox):
+            return
+        if index <= 0:  # "--" or invalid
+            return
+        selected_name = combo.currentText().strip()
+        if not selected_name or selected_name == "--":
+            return
+        if self._grid_model is None:
+            return
+        # Get the current cell from the binding
+        binding = getattr(self, "_grid_binding", None)
+        if binding is None:
+            return
+        cell_id = getattr(binding, "_current_cell_id", None)
+        if not cell_id:
+            return
+        # Check if the selected laminate exists
+        new_laminate = self._grid_model.laminados.get(selected_name)
+        if new_laminate is None:
+            return
+        # Update the cell mapping
+        old_name = self._grid_model.cell_to_laminate.get(cell_id)
+        if old_name == selected_name:
+            # Already mapped to this laminate
+            combo.blockSignals(True)
+            combo.setCurrentIndex(0)
+            combo.blockSignals(False)
+            return
+        # Remove from old laminate if any
+        if old_name:
+            old_lam = self._grid_model.laminados.get(old_name)
+            if old_lam and cell_id in old_lam.celulas:
+                old_lam.celulas.remove(cell_id)
+        # Add to new laminate
+        if cell_id not in new_laminate.celulas:
+            new_laminate.celulas.append(cell_id)
+        # Update mapping
+        self._grid_model.cell_to_laminate[cell_id] = selected_name
+        # Refresh the UI with the new laminate
+        if binding is not None and hasattr(binding, "_apply_laminate"):
+            binding._apply_laminate(selected_name)
+        # Refresh cells list labels
+        self._refresh_cells_list_labels()
+        # Update the hidden name combo for compatibility
+        if hasattr(self, "laminate_name_combo"):
+            idx = self.laminate_name_combo.findText(selected_name)
+            if idx >= 0:
+                self.laminate_name_combo.setCurrentIndex(idx)
+        # Reset the swap combo to "--"
+        combo.blockSignals(True)
+        combo.setCurrentIndex(0)
+        combo.blockSignals(False)
+        # Mark project as dirty
+        self._mark_dirty()
+        # Refresh stacking summary
+        self.update_stacking_summary_ui()
+        # Refresh virtual stacking window if open
+        self._refresh_virtual_stacking_view()
 
     def _on_binding_layers_modified(
         self, laminate_name: Optional[str]
@@ -2196,6 +2295,7 @@ class MainWindow(QMainWindow):
             return
         if self._grid_model is None:
             combo.clear()
+            self._refresh_swap_laminate_combo()
             return
         current_selection = select_name or combo.currentText().strip()
         names = [laminado.nome for laminado in self._grid_model.laminados.values()]
@@ -2212,6 +2312,8 @@ class MainWindow(QMainWindow):
                 combo.setCurrentText(target)
         elif combo.count() > 0:
             combo.setCurrentIndex(0)
+        # Also refresh the swap laminate combo
+        self._refresh_swap_laminate_combo()
 
     def _open_associated_cells_dialog(self) -> None:
         laminate = self._current_laminate_instance()
