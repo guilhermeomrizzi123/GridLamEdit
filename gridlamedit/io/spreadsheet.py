@@ -2025,31 +2025,24 @@ class _GridUiBinding:
 
     def _apply_laminate(self, laminate_name: str) -> None:
         if self._updating:
-            logger.debug("_apply_laminate called but _updating is True, skipping")
             return
         laminado = self.model.laminados.get(laminate_name)
         if laminado is None:
-            logger.debug("_apply_laminate: laminado '%s' not found", laminate_name)
             return
 
-        logger.debug("_apply_laminate: applying laminate '%s' (nome='%s')", laminate_name, laminado.nome)
         self._updating = True
         try:
             name_combo = getattr(self.ui, "laminate_name_combo", None)
             if isinstance(name_combo, QComboBox):
                 name_combo.blockSignals(True)
                 idx = name_combo.findText(laminado.nome)
-                logger.debug("_apply_laminate: findText('%s') returned idx=%d", laminado.nome, idx)
                 if idx >= 0:
                     name_combo.setCurrentIndex(idx)
-                    logger.debug("_apply_laminate: set currentIndex to %d", idx)
                 else:
                     # Name not found, add it
                     name_combo.addItem(laminado.nome)
                     name_combo.setCurrentIndex(name_combo.count() - 1)
-                    logger.debug("_apply_laminate: added '%s' and set to index %d", laminado.nome, name_combo.count() - 1)
                 name_combo.blockSignals(False)
-                logger.debug("_apply_laminate: name_combo currentText is now '%s'", name_combo.currentText())
 
             color_combo = getattr(self.ui, "laminate_color_combo", None)
             if isinstance(color_combo, QComboBox):
