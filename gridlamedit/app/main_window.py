@@ -58,6 +58,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QStyle,
     QSizePolicy,
+    QSpacerItem,
     QSplitter,
     QStatusBar,
     QStackedWidget,
@@ -495,6 +496,18 @@ class MainWindow(QMainWindow):
         layers_section = self._build_layers_section()
         layout.addWidget(layers_section, stretch=2)
         layout.setStretchFactor(layers_section, 2)
+
+        # Footer outside stacking table (panel-level footer in gray area)
+        footer_bar = QHBoxLayout()
+        # Increase right margin even further to shift the label more left
+        footer_bar.setContentsMargins(8, 0, 64, 8)
+        footer_bar.setSpacing(0)
+        footer_bar.addItem(QSpacerItem(0, 0, QSizePolicy.Expanding, QSizePolicy.Minimum))
+        self.layers_count_label = QLabel("Quantidade Total de Camadas: 0", panel)
+        self.layers_count_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.layers_count_label.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        footer_bar.addWidget(self.layers_count_label)
+        layout.addLayout(footer_bar)
         return panel
 
     def _build_laminate_form(self) -> QHBoxLayout:
@@ -979,9 +992,14 @@ class MainWindow(QMainWindow):
 
     def _build_layers_section(self) -> QWidget:
         container = QWidget(self)
-        layout = QHBoxLayout(container)
-        layout.setSpacing(12)
-        layout.setContentsMargins(0, 0, 0, 0)
+        outer_layout = QVBoxLayout(container)
+        outer_layout.setSpacing(12)
+        outer_layout.setContentsMargins(0, 0, 0, 0)
+
+        # Main content row: table + buttons
+        content_row = QHBoxLayout()
+        content_row.setSpacing(12)
+        content_row.setContentsMargins(0, 0, 0, 0)
 
         table_layout = QVBoxLayout()
         table_layout.setSpacing(6)
@@ -991,20 +1009,15 @@ class MainWindow(QMainWindow):
         header_widget = self._create_layers_header_widget(container)
         table_layout.addWidget(header_widget)
         table_layout.addWidget(self.layers_table, stretch=1)
-        table_layout.addSpacing(8)
         table_layout.setStretch(0, 0)
         table_layout.setStretch(1, 1)
 
-        self.layers_count_label = QLabel(
-            "Quantidade Total de Camadas: 0", container
-        )
-        self.layers_count_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        self.layers_count_label.setContentsMargins(0, 0, 0, 4)
-        table_layout.addWidget(self.layers_count_label)
-        table_layout.setStretch(2, 0)
+        content_row.addLayout(table_layout, stretch=1)
+        content_row.addLayout(self._create_layers_buttons())
+        outer_layout.addLayout(content_row)
 
-        layout.addLayout(table_layout, stretch=1)
-        layout.addLayout(self._create_layers_buttons())
+        # No footer here; footer is placed at the laminate panel level
+
         container.setMinimumHeight(0)
         container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         header = self.layers_table.horizontalHeader()
