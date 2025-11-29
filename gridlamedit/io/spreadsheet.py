@@ -2035,13 +2035,21 @@ class _GridUiBinding:
             name_combo = getattr(self.ui, "laminate_name_combo", None)
             if isinstance(name_combo, QComboBox):
                 name_combo.blockSignals(True)
-                idx = name_combo.findText(laminado.nome)
-                if idx >= 0:
-                    name_combo.setCurrentIndex(idx)
+                # Search for the laminate name in the combo box
+                target_idx = -1
+                for i in range(name_combo.count()):
+                    if name_combo.itemText(i) == laminado.nome:
+                        target_idx = i
+                        break
+                if target_idx >= 0:
+                    name_combo.setCurrentIndex(target_idx)
                 else:
+                    # Name not found, add it
                     name_combo.addItem(laminado.nome)
                     name_combo.setCurrentIndex(name_combo.count() - 1)
                 name_combo.blockSignals(False)
+                # Force UI update
+                name_combo.update()
 
             color_combo = getattr(self.ui, "laminate_color_combo", None)
             if isinstance(color_combo, QComboBox):
