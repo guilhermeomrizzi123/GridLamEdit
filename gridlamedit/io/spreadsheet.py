@@ -2038,7 +2038,8 @@ class _GridUiBinding:
                 if idx >= 0:
                     name_combo.setCurrentIndex(idx)
                 else:
-                    name_combo.setCurrentText(laminado.nome)
+                    name_combo.addItem(laminado.nome)
+                    name_combo.setCurrentIndex(name_combo.count() - 1)
 
             color_combo = getattr(self.ui, "laminate_color_combo", None)
             if isinstance(color_combo, QComboBox):
