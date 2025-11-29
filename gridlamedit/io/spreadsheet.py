@@ -1899,26 +1899,38 @@ class _GridUiBinding:
     # Internal helpers -------------------------------------------------- #
 
     def _build_cell_index(self) -> dict[str, list[str]]:
-        if self.model.cell_to_laminate:
-            mapping: dict[str, list[str]] = {}
-            for cell, lam in self.model.cell_to_laminate.items():
-                if lam:
-                    mapping.setdefault(cell, []).append(lam)
-            return mapping
+        """Cria um indice de celulas -> laminados combinando mapeamento explicito e declaracoes do laminado."""
         mapping: dict[str, list[str]] = {}
+        for cell, lam in self.model.cell_to_laminate.items():
+            if lam:
+                mapping.setdefault(cell, []).append(lam)
         for name, laminado in self.model.laminados.items():
             for cell_id in laminado.celulas:
-                mapping.setdefault(cell_id, []).append(name)
+                bucket = mapping.setdefault(cell_id, [])
+                if name not in bucket:
+                    bucket.append(name)
         return mapping
+
+    def _sorted_laminate_names(self) -> list[str]:
+        return sorted(
+            (laminado.nome for laminado in self.model.laminados.values()),
+            key=lambda text: text.lower(),
+        )
+
+    def _configure_name_combo(self, combo: QComboBox, names: list[str]) -> None:
+        combo.blockSignals(True)
+        combo.clear()
+        combo.addItems(names)
+        combo.setMaxVisibleItems(max(10, min(len(names), 25)))
+        view = combo.view()
+        if isinstance(view, QAbstractItemView):
+            view.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        combo.blockSignals(False)
 
     def _setup_widgets(self) -> None:
         name_combo = getattr(self.ui, "laminate_name_combo", None)
         if isinstance(name_combo, QComboBox):
-            name_combo.blockSignals(True)
-            name_combo.clear()
-            for laminado in self.model.laminados.values():
-                name_combo.addItem(laminado.nome)
-            name_combo.blockSignals(False)
+            self._configure_name_combo(name_combo, self._sorted_laminate_names())
 
         color_combo = getattr(self.ui, "laminate_color_combo", None)
         if isinstance(color_combo, QComboBox):
@@ -1992,17 +2004,26 @@ class _GridUiBinding:
         if not cell_id:
             return
         self._current_cell_id = cell_id
-        mapped = self.model.cell_to_laminate.get(cell_id)
-        if mapped and mapped in self.model.laminados:
-            self._apply_laminate(mapped)
-            return
-        candidates = self._laminates_by_cell.get(cell_id, [])
-        if candidates:
-            self._apply_laminate(candidates[0])
-            return
-        if self.model.laminados:
+        self._laminates_by_cell = self._build_cell_index()
+        laminate_name = self._laminate_for_cell(cell_id)
+        if laminate_name:
+            self._apply_laminate(laminate_name)
+        elif self.model.laminados:
             first_name = next(iter(self.model.laminados))
             self._apply_laminate(first_name)
+
+    def _laminate_for_cell(self, cell_id: str) -> Optional[str]:
+        """Resolve o laminado associado a uma celula priorizando o mapeamento explicito."""
+        mapped = self.model.cell_to_laminate.get(cell_id)
+        if mapped and mapped in self.model.laminados:
+            return mapped
+        for candidate in self._laminates_by_cell.get(cell_id, []):
+            if candidate in self.model.laminados:
+                return candidate
+        for name, laminado in self.model.laminados.items():
+            if cell_id in laminado.celulas:
+                return name
+        return None
 
     def _on_laminate_selected(self, laminate_name: str) -> None:
         if self._updating:
