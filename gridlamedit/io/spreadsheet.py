@@ -1912,19 +1912,24 @@ class _GridUiBinding:
         return mapping
 
     def _sorted_laminate_names(self) -> list[str]:
+        def natural_sort_key(s):
+            return [int(text) if text.isdigit() else text.lower()
+                    for text in re.split('([0-9]+)', s)]
         return sorted(
             (laminado.nome for laminado in self.model.laminados.values()),
-            key=lambda text: text.lower(),
+            key=natural_sort_key,
         )
 
     def _configure_name_combo(self, combo: QComboBox, names: list[str]) -> None:
         combo.blockSignals(True)
         combo.clear()
+        combo.addItem("--")
         combo.addItems(names)
         combo.setMaxVisibleItems(max(10, min(len(names), 25)))
         view = combo.view()
         if isinstance(view, QAbstractItemView):
             view.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        combo.setCurrentIndex(0) # Default to "--"
         combo.blockSignals(False)
 
     def _setup_widgets(self) -> None:
@@ -1980,9 +1985,10 @@ class _GridUiBinding:
         if isinstance(cells_widget, QListWidget):
             cells_widget.currentItemChanged.connect(self._on_cell_item_changed)
 
-        name_combo = getattr(self.ui, "laminate_name_combo", None)
-        if isinstance(name_combo, QComboBox):
-            name_combo.currentTextChanged.connect(self._on_laminate_selected)
+        # name_combo connection removed as it is handled by MainWindow via activated signal
+        # name_combo = getattr(self.ui, "laminate_name_combo", None)
+        # if isinstance(name_combo, QComboBox):
+        #     name_combo.currentTextChanged.connect(self._on_laminate_selected)
 
         if isinstance(getattr(self, "_table_view", None), QTableView):
             self._table_view.clicked.connect(self._on_table_clicked)
@@ -2053,9 +2059,12 @@ class _GridUiBinding:
 
         self._updating = True
         try:
+            # Reset laminate_name_combo to "--" when loading a cell
             name_combo = getattr(self.ui, "laminate_name_combo", None)
             if isinstance(name_combo, QComboBox):
-                name_combo.setEditText(laminado.nome)
+                name_combo.blockSignals(True)
+                name_combo.setCurrentIndex(0) # "--"
+                name_combo.blockSignals(False)
 
             color_combo = getattr(self.ui, "laminate_color_combo", None)
             if isinstance(color_combo, QComboBox):

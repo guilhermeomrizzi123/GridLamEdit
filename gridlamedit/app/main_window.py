@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import copy
 import os
+import re
 import secrets
 from collections import Counter, OrderedDict
 from dataclasses import dataclass
@@ -459,13 +460,30 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(16, 16, 16, 16)
         layout.setSpacing(12)
 
+        # Header row with title and laminate selector
+        header_layout = QHBoxLayout()
+        header_layout.setSpacing(12)
+        
         header = QLabel("Laminado Associado a Celula", panel)
         header_font: QFont = header.font()
         header_font.setBold(True)
         header_font.setPointSize(header_font.pointSize() + 1)
         header.setFont(header_font)
+        header_layout.addWidget(header)
 
-        layout.addWidget(header)
+        # Laminate selector (Trocar Laminado)
+        selector_label = QLabel("Trocar Laminado:", panel)
+        self.laminate_name_combo = QComboBox(panel)
+        self.laminate_name_combo.setMinimumWidth(180)
+        self.laminate_name_combo.setEditable(False)
+        # Connect signal to handle laminate change
+        self.laminate_name_combo.activated.connect(self._on_laminate_combo_changed)
+        
+        header_layout.addWidget(selector_label)
+        header_layout.addWidget(self.laminate_name_combo)
+        header_layout.addStretch()
+
+        layout.addLayout(header_layout)
         layout.addLayout(self._build_laminate_form())
         associated_view = self._build_associated_cells_view()
         layout.addWidget(associated_view, alignment=Qt.AlignLeft)
@@ -484,13 +502,8 @@ class MainWindow(QMainWindow):
         layout.setSpacing(12)
         layout.setContentsMargins(0, 0, 0, 0)
 
-        name_combo_layout = self._combo_with_label(
-            "Nome:", ["LAM-1", "LAM-2"], "name", editable=False
-        )
-        name_row = QHBoxLayout()
-        name_row.setSpacing(6)
-        name_row.addLayout(name_combo_layout)
-        layout.addLayout(name_row)
+        # Removed "Nome" combo from here as it is now in the header
+
         layout.addLayout(
             self._combo_with_label(
                 "Cor:", (str(i) for i in range(1, 151)), "color", editable=False
@@ -2183,6 +2196,28 @@ class MainWindow(QMainWindow):
         )
         self._mark_dirty()
 
+    def _on_laminate_combo_changed(self, index: int) -> None:
+        """Handle selection of a laminate from the combo box to assign it to the current cell."""
+        combo = self.laminate_name_combo
+        selected_name = combo.itemText(index)
+        
+        if selected_name == "--":
+            return
+
+        if hasattr(self, "_grid_binding"):
+             self._grid_binding._on_laminate_selected(selected_name)
+             
+             # Optionally reset to "--" if we want to enforce "Trocar Laminado" metaphor
+             # But keeping it selected gives feedback.
+             # However, if we select another cell, it should go back to "--" (which it does because we don't update it in _apply_laminate)
+             # Wait, if we don't update it in _apply_laminate, it stays at whatever it was.
+             # So if I select "L1" for Cell 1, combo shows "L1".
+             # Then I select Cell 2. _apply_laminate runs, but doesn't update combo. Combo still shows "L1".
+             # This is BAD. It should reset to "--" when cell changes.
+             
+             # So I DO need to update combo in _apply_laminate, but set it to "--".
+             pass
+
     def _clone_laminate(self, laminado: Laminado) -> Laminado:
         clone = copy.deepcopy(laminado)
         clone.celulas = []
@@ -2196,22 +2231,40 @@ class MainWindow(QMainWindow):
             return
         if self._grid_model is None:
             combo.clear()
+            combo.addItem("--")
             return
-        current_selection = select_name or combo.currentText().strip()
+        
+        # Natural sort key function
+        def natural_sort_key(s):
+            return [int(text) if text.isdigit() else text.lower()
+                    for text in re.split('([0-9]+)', s)]
+
         names = [laminado.nome for laminado in self._grid_model.laminados.values()]
+        sorted_names = sorted(names, key=natural_sort_key)
+        
         combo.blockSignals(True)
         combo.clear()
-        combo.addItems(names)
-        combo.blockSignals(False)
-        target = select_name or current_selection
-        if target:
-            idx = combo.findText(target)
+        combo.addItem("--")
+        combo.addItems(sorted_names)
+        
+        # If select_name is provided, select it.
+        # Otherwise, default to "--" (index 0).
+        # The user requirement says: "O valor exibido no QComboBox deve ser “--” por padrão sempre ao carregar a janela."
+        # But also: "O texto não deve exibir automaticamente o nome do laminado da célula — isso virá apenas após a seleção do usuário."
+        # However, if we are refreshing the list because we added a laminate or renamed it, we might want to keep selection?
+        # The requirement seems to imply that this combo is purely for *changing* the laminate, not for *displaying* the current one.
+        # So we should probably always reset to "--" unless specifically asked to select something (e.g. after creating a new laminate).
+        
+        if select_name:
+            idx = combo.findText(select_name)
             if idx >= 0:
                 combo.setCurrentIndex(idx)
             else:
-                combo.setCurrentText(target)
-        elif combo.count() > 0:
-            combo.setCurrentIndex(0)
+                combo.setCurrentIndex(0) # Default to "--"
+        else:
+            combo.setCurrentIndex(0) # Default to "--"
+            
+        combo.blockSignals(False)
 
     def _open_associated_cells_dialog(self) -> None:
         laminate = self._current_laminate_instance()
