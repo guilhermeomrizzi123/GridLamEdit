@@ -2055,20 +2055,33 @@ class _GridUiBinding:
         try:
             name_combo = getattr(self.ui, "laminate_name_combo", None)
             if isinstance(name_combo, QComboBox):
-                name_combo.setEditText(laminado.nome)
+                name_combo.blockSignals(True)
+                idx = name_combo.findText(laminado.nome)
+                if idx >= 0:
+                    name_combo.setCurrentIndex(idx)
+                else:
+                    # Name not found, add it
+                    name_combo.addItem(laminado.nome)
+                    name_combo.setCurrentIndex(name_combo.count() - 1)
+                name_combo.blockSignals(False)
 
             color_combo = getattr(self.ui, "laminate_color_combo", None)
             if isinstance(color_combo, QComboBox):
+                color_combo.blockSignals(True)
                 target = str(laminado.color_index or DEFAULT_COLOR_INDEX)
                 idx = color_combo.findText(target)
                 if idx >= 0:
                     color_combo.setCurrentIndex(idx)
                 else:
-                    color_combo.setCurrentText(target)
+                    color_combo.addItem(target)
+                    color_combo.setCurrentIndex(color_combo.count() - 1)
+                color_combo.blockSignals(False)
 
             type_combo = getattr(self.ui, "laminate_type_combo", None)
             if isinstance(type_combo, QComboBox):
+                type_combo.blockSignals(True)
                 type_combo.setEditText(laminado.tipo)
+                type_combo.blockSignals(False)
 
             tag_edit = getattr(self.ui, "laminate_tag_edit", None)
             if isinstance(tag_edit, QLineEdit):
