@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import copy
 import os
+import re
 import secrets
 from collections import Counter, OrderedDict
 from dataclasses import dataclass
@@ -133,6 +134,26 @@ COL_SELECTION = StackingTableModel.COL_SELECT
 COL_PLY_TYPE = StackingTableModel.COL_PLY_TYPE
 COL_MATERIAL = StackingTableModel.COL_MATERIAL
 COL_ORIENTATION = StackingTableModel.COL_ORIENTATION
+
+# Pattern for natural sort: splits text into sequences of digits and non-digits
+_NATURAL_SORT_PATTERN = re.compile(r"(\d+)")
+
+
+def _natural_sort_key(text: str) -> list:
+    """
+    Generate a key for natural sorting.
+
+    Splits the string into alternating digit and non-digit segments,
+    so that numeric parts are compared numerically (e.g., L2 < L10).
+    """
+    parts = _NATURAL_SORT_PATTERN.split(str(text or ""))
+    result = []
+    for part in parts:
+        if part.isdigit():
+            result.append(int(part))
+        else:
+            result.append(part.lower())
+    return result
 
 
 class _LaminateChecksWorker(QObject):
@@ -459,13 +480,36 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(16, 16, 16, 16)
         layout.setSpacing(12)
 
+        # Header row with title and "Trocar Laminado:" combo
+        header_layout = QHBoxLayout()
+        header_layout.setSpacing(12)
+        header_layout.setContentsMargins(0, 0, 0, 0)
+
         header = QLabel("Laminado Associado a Celula", panel)
         header_font: QFont = header.font()
         header_font.setBold(True)
         header_font.setPointSize(header_font.pointSize() + 1)
         header.setFont(header_font)
+        header_layout.addWidget(header)
 
-        layout.addWidget(header)
+        # "Trocar Laminado:" dropdown
+        trocar_laminado_label = QLabel("Trocar Laminado:", panel)
+        header_layout.addWidget(trocar_laminado_label)
+
+        self.trocar_laminado_combo = QComboBox(panel)
+        self.trocar_laminado_combo.setMinimumWidth(180)
+        self.trocar_laminado_combo.setEditable(False)
+        self.trocar_laminado_combo.setInsertPolicy(QComboBox.NoInsert)
+        self.trocar_laminado_combo.addItem("--")
+        self.trocar_laminado_combo.setCurrentIndex(0)
+        self.trocar_laminado_combo.currentIndexChanged.connect(
+            self._on_trocar_laminado_changed
+        )
+        header_layout.addWidget(self.trocar_laminado_combo)
+
+        header_layout.addStretch()
+        layout.addLayout(header_layout)
+
         layout.addLayout(self._build_laminate_form())
         associated_view = self._build_associated_cells_view()
         layout.addWidget(associated_view, alignment=Qt.AlignLeft)
@@ -484,13 +528,12 @@ class MainWindow(QMainWindow):
         layout.setSpacing(12)
         layout.setContentsMargins(0, 0, 0, 0)
 
-        name_combo_layout = self._combo_with_label(
-            "Nome:", ["LAM-1", "LAM-2"], "name", editable=False
-        )
-        name_row = QHBoxLayout()
-        name_row.setSpacing(6)
-        name_row.addLayout(name_combo_layout)
-        layout.addLayout(name_row)
+        # Create a hidden laminate_name_combo for compatibility with bind_model_to_ui
+        self.laminate_name_combo = QComboBox(self)
+        self.laminate_name_combo.setVisible(False)
+        self.laminate_name_combo.setEditable(False)
+        self.laminate_name_combo.setInsertPolicy(QComboBox.NoInsert)
+
         layout.addLayout(
             self._combo_with_label(
                 "Cor:", (str(i) for i in range(1, 151)), "color", editable=False
@@ -730,6 +773,122 @@ class MainWindow(QMainWindow):
         laminate.tag = new_tag
         self._mark_dirty()
         self._apply_auto_rename_if_needed(laminate, force=True)
+
+    def _get_current_cell_id(self) -> Optional[str]:
+        """Return the currently selected cell ID from the cells list."""
+        list_widget = getattr(self, "lstCelulas", None)
+        if not isinstance(list_widget, QListWidget):
+            list_widget = getattr(self, "cells_list", None)
+        if not isinstance(list_widget, QListWidget):
+            return None
+        item = list_widget.currentItem()
+        if item is None:
+            return None
+        cell_id = item.data(Qt.UserRole)
+        if not cell_id:
+            cell_id = item.text().split("|")[0].strip()
+        return str(cell_id) if cell_id else None
+
+    def _populate_trocar_laminado_combo(self) -> None:
+        """Populate the 'Trocar Laminado:' combo with all laminates sorted naturally."""
+        combo = getattr(self, "trocar_laminado_combo", None)
+        if not isinstance(combo, QComboBox):
+            return
+        combo.blockSignals(True)
+        combo.clear()
+        combo.addItem("--")
+        if self._grid_model is not None and self._grid_model.laminados:
+            names = sorted(
+                self._grid_model.laminados.keys(),
+                key=_natural_sort_key
+            )
+            for name in names:
+                combo.addItem(name)
+        combo.setCurrentIndex(0)
+        combo.blockSignals(False)
+
+    def _on_trocar_laminado_changed(self, index: int) -> None:
+        """Handle selection change in the 'Trocar Laminado:' dropdown."""
+        combo = getattr(self, "trocar_laminado_combo", None)
+        if not isinstance(combo, QComboBox):
+            return
+        if index <= 0:
+            # "--" selected, do nothing
+            return
+        selected_name = combo.currentText().strip()
+        if not selected_name or selected_name == "--":
+            return
+        if self._grid_model is None:
+            return
+        new_laminate = self._grid_model.laminados.get(selected_name)
+        if new_laminate is None:
+            return
+        cell_id = self._get_current_cell_id()
+        if not cell_id:
+            QMessageBox.information(
+                self,
+                "Trocar Laminado",
+                "Selecione uma célula antes de trocar o laminado.",
+            )
+            combo.blockSignals(True)
+            combo.setCurrentIndex(0)
+            combo.blockSignals(False)
+            return
+
+        # Get the old laminate association
+        old_name = self._grid_model.cell_to_laminate.get(cell_id)
+        if old_name == selected_name:
+            # Already associated with this laminate
+            combo.blockSignals(True)
+            combo.setCurrentIndex(0)
+            combo.blockSignals(False)
+            return
+
+        # Update associations
+        if old_name and old_name in self._grid_model.laminados:
+            old_laminate = self._grid_model.laminados[old_name]
+            if cell_id in old_laminate.celulas:
+                old_laminate.celulas.remove(cell_id)
+
+        self._grid_model.cell_to_laminate[cell_id] = selected_name
+        if cell_id not in new_laminate.celulas:
+            new_laminate.celulas.append(cell_id)
+
+        # Reset the combo to "--"
+        combo.blockSignals(True)
+        combo.setCurrentIndex(0)
+        combo.blockSignals(False)
+
+        # Refresh the UI
+        self._mark_dirty()
+        self._refresh_cells_list_labels()
+
+        # Update the binding to show the new laminate
+        binding = getattr(self, "_grid_binding", None)
+        if binding is not None and hasattr(binding, "_apply_laminate"):
+            try:
+                binding._apply_laminate(selected_name)
+            except Exception as exc:
+                logger.debug("Failed to apply laminate: %s", exc)
+
+        # Update the laminate_name_combo (hidden, for compatibility)
+        name_combo = getattr(self, "laminate_name_combo", None)
+        if isinstance(name_combo, QComboBox):
+            idx = name_combo.findText(selected_name)
+            if idx >= 0:
+                name_combo.blockSignals(True)
+                name_combo.setCurrentIndex(idx)
+                name_combo.blockSignals(False)
+
+        # Refresh the laminate form fields
+        self._on_binding_laminate_changed(selected_name)
+        self._refresh_virtual_stacking_view()
+        self.update_stacking_summary_ui()
+
+        if self.statusBar():
+            self.statusBar().showMessage(
+                f"Célula {cell_id} agora associada ao laminado '{selected_name}'.", 3000
+            )
 
     def _on_binding_laminate_changed(
         self, laminate_name: Optional[str]
@@ -2130,6 +2289,7 @@ class MainWindow(QMainWindow):
             self._configure_stacking_table(binding)
         self._sync_all_auto_renamed_laminates()
         bind_cells_to_ui(self._grid_model, self)
+        self._populate_trocar_laminado_combo()
         current_name = getattr(binding, "_current_laminate", None) if binding else None
         self._on_binding_laminate_changed(current_name)
         if hasattr(self, "laminate_name_combo"):
@@ -2934,6 +3094,7 @@ class MainWindow(QMainWindow):
             self._configure_stacking_table(binding)
         self._sync_all_auto_renamed_laminates()
         bind_cells_to_ui(self._grid_model, self)
+        self._populate_trocar_laminado_combo()
         current_name = getattr(binding, "_current_laminate", None) if binding else None
         self._on_binding_laminate_changed(current_name)
         self._refresh_virtual_stacking_view()
@@ -2981,6 +3142,7 @@ class MainWindow(QMainWindow):
             self._configure_stacking_table(binding)
         self._sync_all_auto_renamed_laminates()
         bind_cells_to_ui(self._grid_model, self)
+        self._populate_trocar_laminado_combo()
         current_name = getattr(binding, "_current_laminate", None) if binding else None
         self._on_binding_laminate_changed(current_name)
         self._refresh_virtual_stacking_view()
