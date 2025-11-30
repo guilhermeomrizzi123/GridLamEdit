@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from typing import Dict, Optional, Tuple
 
 from PySide6.QtCore import QPointF, QRectF, Qt
-from PySide6.QtGui import QColor, QFont, QPainterPath, QPen
+from PySide6.QtGui import QColor, QFont, QPainterPath, QPen, QAction, QUndoStack, QUndoCommand, QLinearGradient, QRadialGradient, QBrush
 from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
@@ -32,6 +32,10 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QSizePolicy,
+    QMenu,
+    QPushButton,
+    QToolBar,
+    QMessageBox,
 )
 
 try:
@@ -42,15 +46,20 @@ except Exception:  # pragma: no cover - optional import for loose coupling
 
 
 CELL_SIZE = 80.0
-PLUS_SIZE = 18.0
+PLUS_SIZE = 20.0
 GAP = 28.0
 MARGIN = 24.0
 
-COLOR_BG = QColor(220, 220, 220)
-COLOR_CELL = QColor(27, 36, 44)
-COLOR_TEXT = QColor(255, 255, 255)
-COLOR_PLUS = QColor(128, 128, 128)
-COLOR_DASH = QColor(140, 140, 140)
+# Technical grayscale palette
+COLOR_BG = QColor(248, 249, 250)  # Clean light gray
+COLOR_CELL = QColor(33, 37, 41)  # Dark charcoal
+COLOR_CELL_GRADIENT_START = QColor(52, 58, 64)  # Medium gray
+COLOR_CELL_GRADIENT_END = QColor(33, 37, 41)  # Dark charcoal
+COLOR_CELL_BORDER = QColor(108, 117, 125)  # Steel gray border
+COLOR_TEXT = QColor(248, 249, 250)  # Light gray text
+COLOR_PLUS = QColor(108, 117, 125)  # Steel gray
+COLOR_PLUS_HOVER = QColor(173, 181, 189)  # Light steel on hover
+COLOR_DASH = QColor(134, 142, 150)  # Medium steel gray lines
 
 
 DIR_OFFSETS: dict[str, tuple[int, int]] = {
@@ -70,27 +79,183 @@ def opposite(dir_name: str) -> str:
     }[dir_name]
 
 
+# Undo/Redo Commands
+class AddNeighborCommand(QUndoCommand):
+    """Command to add a neighbor relationship."""
+    def __init__(self, window, src_cell: str, direction: str, dst_cell: str, src_pos: tuple, dst_pos: tuple):
+        super().__init__(f"Adicionar vizinho {dst_cell} à {src_cell}")
+        self.window = window
+        self.src_cell = src_cell
+        self.direction = direction
+        self.dst_cell = dst_cell
+        self.src_pos = src_pos
+        self.dst_pos = dst_pos
+    
+    def redo(self):
+        """Execute: add the neighbor relationship."""
+        self.window._link_cells_internal(self.src_cell, self.direction, self.dst_cell)
+        self.window._draw_connection_between(self.src_pos, self.dst_pos)
+        # Update visual state
+        for rec in self.window._nodes_by_grid.values():
+            if rec.cell_id == self.src_cell or rec.cell_id == self.dst_cell:
+                self.window._update_node_neighbors(rec)
+        self.window._update_all_plus_buttons_visibility()
+    
+    def undo(self):
+        """Undo: remove the neighbor relationship."""
+        opposite_dir = opposite(self.direction)
+        if self.src_cell in self.window._neighbors:
+            self.window._neighbors[self.src_cell][self.direction] = None
+        if self.dst_cell in self.window._neighbors:
+            self.window._neighbors[self.dst_cell][opposite_dir] = None
+        # Remove line
+        key = (self.src_pos, self.dst_pos) if self.src_pos <= self.dst_pos else (self.dst_pos, self.src_pos)
+        line = self.window._lines_between_nodes.get(key)
+        if line:
+            self.window.scene.removeItem(line)
+            del self.window._lines_between_nodes[key]
+        # Update visual state
+        for rec in self.window._nodes_by_grid.values():
+            if rec.cell_id == self.src_cell or rec.cell_id == self.dst_cell:
+                self.window._update_node_neighbors(rec)
+        self.window._update_all_plus_buttons_visibility()
+
+
+class DeleteCellCommand(QUndoCommand):
+    """Command to delete a cell."""
+    def __init__(self, window, record):
+        super().__init__(f"Deletar célula {record.cell_id}")
+        self.window = window
+        self.cell_id = record.cell_id
+        self.grid_pos = record.grid_pos
+        # Save the rect position, not item.pos() which may be (0,0)
+        self.rect_topleft = record.item.rect().topLeft()
+        self.neighbors = dict(window._neighbors.get(record.cell_id, {}))
+    
+    def redo(self):
+        """Execute: delete the cell."""
+        record = self.window._nodes_by_grid.get(self.grid_pos)
+        if not record:
+            return
+        
+        # Update neighbors
+        for direction, neighbor_id in self.neighbors.items():
+            if neighbor_id and neighbor_id in self.window._neighbors:
+                opposite_dir = opposite(direction)
+                self.window._neighbors[neighbor_id][opposite_dir] = None
+                # Update visual state
+                for rec in self.window._nodes_by_grid.values():
+                    if rec.cell_id == neighbor_id:
+                        self.window._update_node_neighbors(rec)
+        
+        # Remove from neighbors dict
+        if self.cell_id in self.window._neighbors:
+            del self.window._neighbors[self.cell_id]
+        
+        # Remove lines
+        keys_to_remove = [key for key in self.window._lines_between_nodes.keys() if self.grid_pos in key]
+        for key in keys_to_remove:
+            line = self.window._lines_between_nodes[key]
+            self.window.scene.removeItem(line)
+            del self.window._lines_between_nodes[key]
+        
+        # Remove node
+        self.window.scene.removeItem(record.item)
+        del self.window._nodes_by_grid[self.grid_pos]
+        self.window._update_all_plus_buttons_visibility()
+    
+    def undo(self):
+        """Undo: restore the cell."""
+        # Recreate node at same position using rect coordinates
+        rect = QRectF(self.rect_topleft.x(), self.rect_topleft.y(), CELL_SIZE, CELL_SIZE)
+        item = CellNodeItem(rect)
+        item.set_text(self.cell_id)
+        self.window.scene.addItem(item)
+        
+        record = _NodeRecord(item=item, grid_pos=self.grid_pos, cell_id=self.cell_id)
+        self.window._nodes_by_grid[self.grid_pos] = record
+        
+        # Setup callbacks
+        def on_select_cell():
+            self.window._prompt_select_cell(record)
+        def on_add_neighbor(direction: str):
+            self.window._handle_add_neighbor(record, direction)
+        def on_delete_cell():
+            self.window._delete_cell(record)
+        
+        item.on_select_cell = on_select_cell
+        item.on_add_neighbor = on_add_neighbor
+        item.on_delete_cell = on_delete_cell
+        
+        # Restore neighbors
+        self.window._neighbors[self.cell_id] = dict(self.neighbors)
+        for direction, neighbor_id in self.neighbors.items():
+            if neighbor_id:
+                opposite_dir = opposite(direction)
+                if neighbor_id in self.window._neighbors:
+                    self.window._neighbors[neighbor_id][opposite_dir] = self.cell_id
+                # Redraw connection
+                neighbor_rec = None
+                for rec in self.window._nodes_by_grid.values():
+                    if rec.cell_id == neighbor_id:
+                        neighbor_rec = rec
+                        break
+                if neighbor_rec:
+                    self.window._draw_connection_between(self.grid_pos, neighbor_rec.grid_pos)
+                    self.window._update_node_neighbors(neighbor_rec)
+        
+        self.window._update_node_neighbors(record)
+        self.window._update_all_plus_buttons_visibility()
+
+
 class PlusButtonItem(QGraphicsRectItem):
-    """Small square "+" button around a node."""
+    """Modern circular "+" button with hover effect."""
 
     def __init__(self, rect: QRectF, parent: Optional[QGraphicsItem] = None) -> None:
         super().__init__(rect, parent)
         self.setFlags(QGraphicsItem.ItemIsSelectable | QGraphicsItem.ItemIgnoresParentOpacity)
-        self.setBrush(COLOR_PLUS)
-        self.setPen(Qt.NoPen)
+        self.setAcceptHoverEvents(True)
+        
+        # Create circular appearance with rounded rect
+        self._original_brush = QBrush(COLOR_PLUS)
+        self._hover_brush = QBrush(COLOR_PLUS_HOVER)
+        self.setBrush(self._original_brush)
+        
+        # Modern border
+        pen = QPen(COLOR_CELL_BORDER)
+        pen.setWidth(2)
+        self.setPen(pen)
+        
         self.on_click = None
 
         self._label = QGraphicsSimpleTextItem("+", self)
         font = self._label.font()
         font.setBold(True)
+        font.setPointSize(font.pointSize() + 2)
         self._label.setFont(font)
-        self._label.setBrush(COLOR_TEXT)
-        # Center inside the square
+        self._label.setBrush(QColor(255, 255, 255))
+        # Center inside the circle - adjusted for better centering
         text_rect = self._label.boundingRect()
         self._label.setPos(
-            rect.x() + (rect.width() - text_rect.width()) / 2,
-            rect.y() + (rect.height() - text_rect.height()) / 2,
+            rect.x() + (rect.width() - text_rect.width()) / 2 - 0.5,
+            rect.y() + (rect.height() - text_rect.height()) / 2 - 1,
         )
+
+    def paint(self, painter, option, widget=None):
+        """Custom paint for circular shape."""
+        painter.setRenderHint(painter.RenderHint.Antialiasing)
+        painter.setBrush(self.brush())
+        painter.setPen(self.pen())
+        # Draw as circle (ellipse)
+        painter.drawEllipse(self.rect())
+
+    def hoverEnterEvent(self, event):  # noqa: N802
+        self.setBrush(self._hover_brush)
+        super().hoverEnterEvent(event)
+
+    def hoverLeaveEvent(self, event):  # noqa: N802
+        self.setBrush(self._original_brush)
+        super().hoverLeaveEvent(event)
 
     # Use mousePress to emulate a simple button
     def mousePressEvent(self, event):  # noqa: N802
@@ -100,16 +265,25 @@ class PlusButtonItem(QGraphicsRectItem):
 
 
 class CellNodeItem(QGraphicsRectItem):
-    """Square node with central label and four plus buttons.
+    """Modern rounded node with gradient, border glow and hover effect.
     Only shows '+' buttons on sides without neighbors. Lines are drawn behind the block.
     """
     def __init__(self, rect: QRectF, *, parent: Optional[QGraphicsItem] = None) -> None:
         super().__init__(rect, parent)
-        self.setBrush(COLOR_CELL)
-        pen = QPen(QColor(11, 92, 115))
+        
+        # Create gradient brush for modern look
+        gradient = QLinearGradient(rect.topLeft(), rect.bottomRight())
+        gradient.setColorAt(0, COLOR_CELL_GRADIENT_START)
+        gradient.setColorAt(1, COLOR_CELL_GRADIENT_END)
+        self._normal_brush = QBrush(gradient)
+        self.setBrush(self._normal_brush)
+        
+        # Modern glowing border
+        pen = QPen(COLOR_CELL_BORDER)
         pen.setWidth(2)
         self.setPen(pen)
         self.setAcceptHoverEvents(True)
+        
         self._label = QGraphicsSimpleTextItem("Select\nCell", self)
         f: QFont = self._label.font()
         f.setBold(True)
@@ -119,6 +293,7 @@ class CellNodeItem(QGraphicsRectItem):
         self._recenter_label()
         self.on_select_cell = None
         self.on_add_neighbor = None
+        self.on_delete_cell = None
         self.plus_items: dict[str, PlusButtonItem] = {}
         self.plus_lines: dict[str, QGraphicsLineItem] = {}
         self._neighbors: dict[str, Optional[str]] = {"up": None, "down": None, "left": None, "right": None}
@@ -128,103 +303,33 @@ class CellNodeItem(QGraphicsRectItem):
         self._label.setText(text)
         self._recenter_label()
 
+    def paint(self, painter, option, widget=None):
+        """Custom paint for rounded corners."""
+        painter.setRenderHint(painter.RenderHint.Antialiasing)
+        painter.setBrush(self.brush())
+        painter.setPen(self.pen())
+        # Draw rounded rectangle
+        painter.drawRoundedRect(self.rect(), 8, 8)
+
     def set_neighbor(self, direction: str, cell_id: Optional[str]) -> None:
         self._neighbors[direction] = cell_id
         self._update_plus_buttons()
 
     def _update_plus_buttons(self) -> None:
+        """Hide plus buttons and their lines when a neighbor is set in that direction.
+        Note: This only hides buttons when neighbors exist. Showing buttons is handled
+        by _update_all_plus_buttons_visibility which checks cell availability."""
         for direction in DIR_OFFSETS.keys():
             has_neighbor = self._neighbors.get(direction)
             btn = self.plus_items.get(direction)
             line = self.plus_lines.get(direction)
             if has_neighbor:
+                # Has neighbor - always hide
                 if btn:
                     btn.setVisible(False)
                 if line:
                     line.setVisible(False)
-            else:
-                if btn:
-                    btn.setVisible(True)
-                if line:
-                    line.setVisible(True)
-
-        def _recenter_label(self) -> None:
-            rect = self.rect()
-            tb = self._label.boundingRect()
-            self._label.setPos(
-                rect.x() + (rect.width() - tb.width()) / 2,
-                rect.y() + (rect.height() - tb.height()) / 2,
-            )
-
-        def _create_plus_buttons(self) -> None:
-            cx = self.rect().center().x()
-            cy = self.rect().center().y()
-            half = CELL_SIZE / 2.0
-            offsets: dict[str, Tuple[float, float]] = {
-                "up": (0.0, -half - GAP),
-                "down": (0.0, half + GAP),
-                "left": (-half - GAP, 0.0),
-                "right": (half + GAP, 0.0),
-            }
-            for direction, (dx, dy) in offsets.items():
-                bx = cx + dx - PLUS_SIZE / 2.0
-                by = cy + dy - PLUS_SIZE / 2.0
-                button = PlusButtonItem(QRectF(bx, by, PLUS_SIZE, PLUS_SIZE), self)
-                line = QGraphicsLineItem(cx, cy, cx + dx, cy + dy, self)
-                pen = QPen(COLOR_DASH)
-                pen.setStyle(Qt.DashLine)
-                pen.setWidth(2)
-                line.setPen(pen)
-                line.setZValue(-1)  # Draw lines behind everything
-                self.plus_items[direction] = button
-                self.plus_lines[direction] = line
-                def handler(dir_name=direction):
-                    if callable(self.on_add_neighbor):
-                        self.on_add_neighbor(dir_name)
-                button.on_click = handler
-
-        def mousePressEvent(self, event):  # noqa: N802
-            if callable(self.on_select_cell):
-                self.on_select_cell()
-            event.accept()
-
-
-class CellNodeItem(QGraphicsRectItem):
-    """Square node with central label and four plus buttons.
-
-    This item is not draggable. It exposes callbacks for:
-      - on_select_cell(): user clicked the square to select/change the cell
-      - on_add_neighbor(direction): user clicked a "+" in the given direction
-    """
-
-    def __init__(self, rect: QRectF, *, parent: Optional[QGraphicsItem] = None) -> None:
-        super().__init__(rect, parent)
-        self.setBrush(COLOR_CELL)
-        pen = QPen(QColor(11, 92, 115))
-        pen.setWidth(2)
-        self.setPen(pen)
-        self.setAcceptHoverEvents(True)
-
-        self._label = QGraphicsSimpleTextItem("Select\nCell", self)
-        f: QFont = self._label.font()
-        f.setBold(True)
-        f.setPointSize(f.pointSize() + 2)
-        self._label.setFont(f)
-        self._label.setBrush(COLOR_TEXT)
-        self._recenter_label()
-
-        # Callbacks set by owner
-        self.on_select_cell = None
-        self.on_add_neighbor = None
-
-        # Plus buttons and dashed lines to them
-        self.plus_items: dict[str, PlusButtonItem] = {}
-        self.plus_lines: dict[str, QGraphicsLineItem] = {}
-        self._create_plus_buttons()
-
-    def set_text(self, text: str) -> None:
-        self._label.setText(text)
-        self._recenter_label()
+            # Don't show here - let _update_all_plus_buttons_visibility handle visibility
 
     def _recenter_label(self) -> None:
         rect = self.rect()
@@ -235,47 +340,100 @@ class CellNodeItem(QGraphicsRectItem):
         )
 
     def _create_plus_buttons(self) -> None:
-        cx = self.rect().center().x()
-        cy = self.rect().center().y()
+        """Create plus buttons and dashed lines from cell edge (not center) to button center."""
+        rect = self.rect()
+        cx = rect.center().x()
+        cy = rect.center().y()
         half = CELL_SIZE / 2.0
-        d = HALF = half
-        # mapping dir -> (button center offset x,y)
+        
+        # Button positions (center of the button)
         offsets: dict[str, Tuple[float, float]] = {
-            "up": (0.0, -HALF - GAP),
-            "down": (0.0, HALF + GAP),
-            "left": (-HALF - GAP, 0.0),
-            "right": (HALF + GAP, 0.0),
+            "up": (0.0, -half - GAP),
+            "down": (0.0, half + GAP),
+            "left": (-half - GAP, 0.0),
+            "right": (half + GAP, 0.0),
         }
+        
         for direction, (dx, dy) in offsets.items():
+            # Button rectangle
             bx = cx + dx - PLUS_SIZE / 2.0
             by = cy + dy - PLUS_SIZE / 2.0
             button = PlusButtonItem(QRectF(bx, by, PLUS_SIZE, PLUS_SIZE), self)
-            # dashed line from node center to the button center
-            line = QGraphicsLineItem(cx, cy, cx + dx, cy + dy, self)
+            
+            # Line from cell edge to button center
+            # Start point: edge of the cell
+            if direction == "up":
+                line_start_x = cx
+                line_start_y = rect.top()
+            elif direction == "down":
+                line_start_x = cx
+                line_start_y = rect.bottom()
+            elif direction == "left":
+                line_start_x = rect.left()
+                line_start_y = cy
+            else:  # right
+                line_start_x = rect.right()
+                line_start_y = cy
+            
+            # End point: center of button
+            line_end_x = cx + dx
+            line_end_y = cy + dy
+            
+            line = QGraphicsLineItem(line_start_x, line_start_y, line_end_x, line_end_y, self)
             pen = QPen(COLOR_DASH)
             pen.setStyle(Qt.DashLine)
             pen.setWidth(2)
+            pen.setCapStyle(Qt.PenCapStyle.RoundCap)
             line.setPen(pen)
             line.setZValue(-1)  # Draw lines behind everything
+            line.setOpacity(0.6)  # Subtle transparency
             self.plus_items[direction] = button
             self.plus_lines[direction] = line
-
+            
             def handler(dir_name=direction):
                 if callable(self.on_add_neighbor):
                     self.on_add_neighbor(dir_name)
             button.on_click = handler
 
+    def mouseDoubleClickEvent(self, event):  # noqa: N802
+        if event.button() == Qt.LeftButton:
+            if callable(self.on_select_cell):
+                self.on_select_cell()
+            event.accept()
+        else:
+            super().mouseDoubleClickEvent(event)
+
     def mousePressEvent(self, event):  # noqa: N802
-        if callable(self.on_select_cell):
-            self.on_select_cell()
-        event.accept()
+        if event.button() == Qt.RightButton:
+            self._show_context_menu(event.screenPos())
+            event.accept()
+        else:
+            super().mousePressEvent(event)
+
+    def _show_context_menu(self, pos) -> None:
+        """Show context menu with delete option."""
+        menu = QMenu()
+        delete_action = QAction("Deletar C\u00e9lula", menu)
+        delete_action.triggered.connect(self._handle_delete)
+        menu.addAction(delete_action)
+        menu.exec(pos)
+
+    def _handle_delete(self) -> None:
+        """Handle delete action from context menu."""
+        if callable(self.on_delete_cell):
+            self.on_delete_cell()
 
     def hoverEnterEvent(self, event):  # noqa: N802
-        self.setBrush(QColor(45, 60, 70))  # Slightly lighter for hover
+        # Lighter gradient on hover
+        rect = self.rect()
+        gradient = QLinearGradient(rect.topLeft(), rect.bottomRight())
+        gradient.setColorAt(0, QColor(51, 65, 85))  # Lighter slate
+        gradient.setColorAt(1, QColor(30, 41, 59))
+        self.setBrush(QBrush(gradient))
         super().hoverEnterEvent(event)
 
     def hoverLeaveEvent(self, event):  # noqa: N802
-        self.setBrush(COLOR_CELL)
+        self.setBrush(self._normal_brush)
         super().hoverLeaveEvent(event)
 
 
@@ -295,14 +453,51 @@ class CellNeighborsWindow(QDialog):
         self.resize(1100, 720)
 
         self._model: Optional[GridModel] = None
+        self._project_manager = None  # Will be set via populate_from_project
         self._cells: list[str] = []
+        self._undo_stack = QUndoStack(self)
+        self._has_unsaved_changes = False
 
-        layout = QHBoxLayout(self)
+        # Main layout
+        main_layout = QVBoxLayout(self)
+        
+        # Toolbar with buttons
+        toolbar = QToolBar(self)
+        toolbar.setMovable(False)
+        
+        # Save button
+        self.save_button = QPushButton("Salvar", self)
+        self.save_button.clicked.connect(self._save_to_project)
+        self.save_button.setEnabled(False)  # Start disabled
+        toolbar.addWidget(self.save_button)
+        
+        toolbar.addSeparator()
+        
+        # Undo button
+        self.undo_button = QPushButton("Desfazer", self)
+        self.undo_button.clicked.connect(self._undo_stack.undo)
+        self.undo_button.setEnabled(False)
+        toolbar.addWidget(self.undo_button)
+        
+        # Redo button
+        self.redo_button = QPushButton("Refazer", self)
+        self.redo_button.clicked.connect(self._undo_stack.redo)
+        self.redo_button.setEnabled(False)
+        toolbar.addWidget(self.redo_button)
+        
+        # Connect undo stack signals
+        self._undo_stack.canUndoChanged.connect(self.undo_button.setEnabled)
+        self._undo_stack.canRedoChanged.connect(self.redo_button.setEnabled)
+        self._undo_stack.indexChanged.connect(self._mark_as_modified)
+        
+        main_layout.addWidget(toolbar)
+        
+        # Graphics view
         self.view = QGraphicsView(self)
         self.view.setRenderHint(self.view.renderHints(), True)
         self.view.setBackgroundBrush(COLOR_BG)
         self.view.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        layout.addWidget(self.view)
+        main_layout.addWidget(self.view)
 
         self.scene = QGraphicsScene(self)
         self.scene.setSceneRect(0, 0, 2000, 1200)
@@ -315,10 +510,13 @@ class CellNeighborsWindow(QDialog):
 
         # neighbors mapping public structure
         self._neighbors: Dict[str, dict[str, Optional[str]]] = {}
+        
+        # Track disconnected blocks for removal warnings
+        self._disconnected_highlight_rects: list[QGraphicsRectItem] = []
 
-        # Add initial placeholder node near bottom-right
-        anchor_x = self.scene.sceneRect().width() - (MARGIN + CELL_SIZE)
-        anchor_y = self.scene.sceneRect().height() - (MARGIN + CELL_SIZE)
+        # Add initial placeholder node with better positioning (away from edges)
+        anchor_x = 300.0
+        anchor_y = 200.0
         self._create_node((0, 0), QPointF(anchor_x, anchor_y))
 
     def _setup_view_interaction(self):
@@ -360,9 +558,23 @@ class CellNeighborsWindow(QDialog):
                 return True
         return super().eventFilter(obj, event)
 
+    def closeEvent(self, event) -> None:
+        """Handle window close event - check for disconnected blocks."""
+        # Check for disconnected blocks before closing
+        if not self._check_and_handle_disconnected_blocks():
+            # User cancelled - don't close
+            event.ignore()
+            return
+        
+        # Clear highlights and proceed with close
+        self._clear_disconnected_highlights()
+        event.accept()
+
     # -------- Public API ---------
-    def populate_from_project(self, model: Optional[GridModel]) -> None:
+    def populate_from_project(self, model: Optional[GridModel], project_manager=None) -> None:
+        """Populate the window with cells from the project and load existing neighbors."""
         self._model = model
+        self._project_manager = project_manager
         cells = []
         if model is not None:
             try:
@@ -374,14 +586,427 @@ class CellNeighborsWindow(QDialog):
                     cells = list(getattr(model, "cell_to_laminate", {}).keys())
                 except Exception:
                     cells = []
+            
+            # Load existing neighbors from the model
+            existing_neighbors = getattr(model, "cell_neighbors", {})
+            if existing_neighbors:
+                self._neighbors = {cell: dict(mapping) for cell, mapping in existing_neighbors.items()}
+                # Rebuild the visual graph from saved neighbors
+                self._rebuild_graph_from_neighbors()
         self._cells = cells
+        # Update all plus buttons visibility after loading project
+        self._update_all_plus_buttons_visibility()
+        # Center view on cells after loading
+        self._center_view_on_cells()
 
     def get_neighbors_mapping(self) -> Dict[str, dict[str, Optional[str]]]:
+        """Return neighbors mapping including cells without any neighbors (disconnected cells)."""
         # Return a deep-ish copy to avoid external mutation surprises
         result: Dict[str, dict[str, Optional[str]]] = {}
         for cell, mapping in self._neighbors.items():
             result[cell] = dict(mapping)
         return result
+
+    def _mark_as_modified(self) -> None:
+        """Mark that there are unsaved changes."""
+        self._has_unsaved_changes = True
+        self.save_button.setEnabled(True)
+
+    def _save_to_project(self) -> None:
+        """Save current neighbors mapping to the project (manual save)."""
+        # Check for disconnected blocks before saving
+        if not self._check_and_handle_disconnected_blocks():
+            return  # User cancelled or no valid blocks
+        
+        if self._model is not None:
+            self._model.cell_neighbors = self.get_neighbors_mapping()
+            if self._project_manager is not None:
+                try:
+                    # Capture and save the updated model
+                    self._project_manager.capture_from_model(self._model)
+                    if self._project_manager.current_path is not None:
+                        self._project_manager.save()
+                    # Mark as saved
+                    self._has_unsaved_changes = False
+                    self.save_button.setEnabled(False)
+                except Exception as e:
+                    import logging
+                    logger = logging.getLogger(__name__)
+                    logger.warning(f"Failed to save cell neighbors: {e}")
+
+    def _expand_scene_rect(self) -> None:
+        """Expand the scene rect to fit all nodes with a safety margin."""
+        if not self._nodes_by_grid:
+            return
+        
+        # Calculate bounding box of all cell items
+        min_x = float('inf')
+        min_y = float('inf')
+        max_x = float('-inf')
+        max_y = float('-inf')
+        
+        for record in self._nodes_by_grid.values():
+            rect = record.item.rect()
+            min_x = min(min_x, rect.left())
+            min_y = min(min_y, rect.top())
+            max_x = max(max_x, rect.right())
+            max_y = max(max_y, rect.bottom())
+        
+        # Add margin for plus buttons and safety space (100px on each side)
+        margin = 100.0
+        new_rect = QRectF(
+            min_x - margin,
+            min_y - margin,
+            (max_x - min_x) + 2 * margin,
+            (max_y - min_y) + 2 * margin
+        )
+        
+        # Expand scene rect if needed (never shrink)
+        current_rect = self.scene.sceneRect()
+        final_rect = current_rect.united(new_rect)
+        self.scene.setSceneRect(final_rect)
+
+    def _center_view_on_cells(self) -> None:
+        """Center the viewport on all existing cells."""
+        if not self._nodes_by_grid:
+            return
+        
+        # Calculate bounding box of all cell items
+        min_x = float('inf')
+        min_y = float('inf')
+        max_x = float('-inf')
+        max_y = float('-inf')
+        
+        for record in self._nodes_by_grid.values():
+            rect = record.item.sceneBoundingRect()
+            min_x = min(min_x, rect.left())
+            min_y = min(min_y, rect.top())
+            max_x = max(max_x, rect.right())
+            max_y = max(max_y, rect.bottom())
+        
+        # Calculate center point of all cells
+        center_x = (min_x + max_x) / 2.0
+        center_y = (min_y + max_y) / 2.0
+        
+        # Center the view on this point
+        self.view.centerOn(center_x, center_y)
+
+    def _get_used_cell_ids(self) -> set[str]:
+        """Return set of cell IDs already used in the interface."""
+        used = set()
+        for record in self._nodes_by_grid.values():
+            if record.cell_id:
+                used.add(record.cell_id)
+        return used
+
+    def _has_available_cells(self) -> bool:
+        """Check if there are any cells available for selection."""
+        used_cells = self._get_used_cell_ids()
+        available_cells = [cell for cell in self._cells if cell not in used_cells]
+        return len(available_cells) > 0
+
+    def _update_all_plus_buttons_visibility(self) -> None:
+        """Update visibility of all '+' buttons based on cell availability."""
+        has_available = self._has_available_cells()
+        
+        for record in self._nodes_by_grid.values():
+            if not record.cell_id:
+                # Node without cell assigned - show/hide all buttons based on availability
+                for direction in DIR_OFFSETS.keys():
+                    btn = record.item.plus_items.get(direction)
+                    line = record.item.plus_lines.get(direction)
+                    if btn:
+                        btn.setVisible(has_available)
+                    if line:
+                        line.setVisible(has_available)
+            else:
+                # Node with cell assigned - check each direction
+                neighbors = self._neighbors.get(record.cell_id, {})
+                for direction in DIR_OFFSETS.keys():
+                    has_neighbor = neighbors.get(direction) is not None
+                    btn = record.item.plus_items.get(direction)
+                    line = record.item.plus_lines.get(direction)
+                    
+                    if has_neighbor:
+                        # Has neighbor - hide button
+                        if btn:
+                            btn.setVisible(False)
+                        if line:
+                            line.setVisible(False)
+                    else:
+                        # No neighbor - show button only if cells are available
+                        if btn:
+                            btn.setVisible(has_available)
+                        if line:
+                            line.setVisible(has_available)
+
+    def _delete_cell(self, record: _NodeRecord) -> None:
+        """Delete a cell from the scene and update all neighbors."""
+        if not record.cell_id:
+            # Nothing to delete if no cell assigned
+            return
+        
+        command = DeleteCellCommand(self, record)
+        self._undo_stack.push(command)
+
+    def _find_connected_components(self) -> list[set[str]]:
+        """Find all connected components (blocks) of cells.
+        Returns a list of sets, where each set contains cell IDs in one connected component."""
+        # Get all cells that have been assigned
+        all_cells = set()
+        for record in self._nodes_by_grid.values():
+            if record.cell_id:
+                all_cells.add(record.cell_id)
+        
+        if not all_cells:
+            return []
+        
+        visited = set()
+        components = []
+        
+        for cell in all_cells:
+            if cell in visited:
+                continue
+            
+            # BFS to find all cells in this component
+            component = set()
+            queue = [cell]
+            
+            while queue:
+                current = queue.pop(0)
+                if current in visited:
+                    continue
+                visited.add(current)
+                component.add(current)
+                
+                # Check all neighbors
+                neighbors = self._neighbors.get(current, {})
+                for neighbor_id in neighbors.values():
+                    if neighbor_id and neighbor_id not in visited:
+                        queue.append(neighbor_id)
+            
+            if component:
+                components.append(component)
+        
+        return components
+
+    def _check_and_handle_disconnected_blocks(self) -> bool:
+        """Check for disconnected blocks, highlight them, and ask user for confirmation.
+        Returns True if save should proceed, False if cancelled."""
+        # Clear previous highlights
+        self._clear_disconnected_highlights()
+        
+        components = self._find_connected_components()
+        
+        if len(components) <= 1:
+            # No disconnected blocks
+            return True
+        
+        # Find the largest component (to preserve)
+        largest_component = max(components, key=len)
+        disconnected_components = [c for c in components if c != largest_component]
+        
+        if not disconnected_components:
+            return True
+        
+        # Highlight disconnected blocks with red rectangles
+        disconnected_cells = []
+        for component in disconnected_components:
+            disconnected_cells.extend(component)
+            self._highlight_disconnected_block(component)
+        
+        # Show warning dialog
+        cell_list = ", ".join(sorted(disconnected_cells))
+        msg = QMessageBox(self)
+        msg.setIcon(QMessageBox.Warning)
+        msg.setWindowTitle("Blocos Desconectados")
+        msg.setText(f"Os seguintes blocos estão desconectados e serão removidos:")
+        msg.setInformativeText(f"Células: {cell_list}\\n\\n"
+                              f"O bloco principal com {len(largest_component)} célula(s) será preservado.\\n"
+                              f"Blocos menores com {sum(len(c) for c in disconnected_components)} célula(s) serão removidos.")
+        msg.setStandardButtons(QMessageBox.Ok | QMessageBox.Cancel)
+        msg.setDefaultButton(QMessageBox.Cancel)
+        
+        result = msg.exec()
+        
+        if result == QMessageBox.Ok:
+            # Remove disconnected blocks
+            self._remove_disconnected_blocks(disconnected_components)
+            self._clear_disconnected_highlights()
+            return True
+        else:
+            # User cancelled - keep highlights visible
+            return False
+
+    def _highlight_disconnected_block(self, component: set[str]) -> None:
+        """Highlight a disconnected block with a red rectangle."""
+        # Find all nodes in this component
+        nodes = []
+        for record in self._nodes_by_grid.values():
+            if record.cell_id in component:
+                nodes.append(record)
+        
+        if not nodes:
+            return
+        
+        # Calculate bounding box
+        min_x = float('inf')
+        min_y = float('inf')
+        max_x = float('-inf')
+        max_y = float('-inf')
+        
+        for record in nodes:
+            rect = record.item.rect()
+            min_x = min(min_x, rect.left())
+            min_y = min(min_y, rect.top())
+            max_x = max(max_x, rect.right())
+            max_y = max(max_y, rect.bottom())
+        
+        # Add margin
+        margin = 10
+        highlight_rect = QGraphicsRectItem(
+            min_x - margin,
+            min_y - margin,
+            max_x - min_x + 2 * margin,
+            max_y - min_y + 2 * margin
+        )
+        
+        # Red border, transparent fill
+        pen = QPen(QColor(255, 0, 0))
+        pen.setWidth(3)
+        highlight_rect.setPen(pen)
+        highlight_rect.setBrush(Qt.NoBrush)
+        highlight_rect.setZValue(10)  # Draw on top
+        
+        self.scene.addItem(highlight_rect)
+        self._disconnected_highlight_rects.append(highlight_rect)
+
+    def _clear_disconnected_highlights(self) -> None:
+        """Remove all red highlight rectangles."""
+        for rect in self._disconnected_highlight_rects:
+            self.scene.removeItem(rect)
+        self._disconnected_highlight_rects.clear()
+
+    def _remove_disconnected_blocks(self, components: list[set[str]]) -> None:
+        """Remove all cells in the given disconnected components."""
+        cells_to_remove = set()
+        for component in components:
+            cells_to_remove.update(component)
+        
+        # Find records to delete
+        records_to_delete = []
+        for record in list(self._nodes_by_grid.values()):
+            if record.cell_id in cells_to_remove:
+                records_to_delete.append(record)
+        
+        # Delete each record (this will also clean up neighbors)
+        for record in records_to_delete:
+            # Remove neighbors references
+            if record.cell_id in self._neighbors:
+                neighbors = self._neighbors[record.cell_id]
+                for direction, neighbor_id in neighbors.items():
+                    if neighbor_id and neighbor_id in self._neighbors:
+                        opposite_dir = opposite(direction)
+                        self._neighbors[neighbor_id][opposite_dir] = None
+                del self._neighbors[record.cell_id]
+            
+            # Remove lines
+            keys_to_remove = [key for key in self._lines_between_nodes.keys() if record.grid_pos in key]
+            for key in keys_to_remove:
+                line = self._lines_between_nodes[key]
+                self.scene.removeItem(line)
+                del self._lines_between_nodes[key]
+            
+            # Remove node
+            self.scene.removeItem(record.item)
+            del self._nodes_by_grid[record.grid_pos]
+        
+        # Update visual state
+        self._update_all_plus_buttons_visibility()
+
+    def _rebuild_graph_from_neighbors(self) -> None:
+        """Rebuild the visual node graph from saved neighbor relationships."""
+        if not self._neighbors:
+            return
+        
+        # Clear existing nodes except the initial one
+        nodes_to_remove = [pos for pos in self._nodes_by_grid.keys() if pos != (0, 0)]
+        for pos in nodes_to_remove:
+            rec = self._nodes_by_grid[pos]
+            self.scene.removeItem(rec.item)
+            del self._nodes_by_grid[pos]
+        
+        # Clear connection lines
+        for line in self._lines_between_nodes.values():
+            self.scene.removeItem(line)
+        self._lines_between_nodes.clear()
+        
+        # Build a graph of cells and their positions
+        # Start from first cell at (0,0)
+        cell_to_grid: Dict[str, tuple[int, int]] = {}
+        cells_to_process = list(self._neighbors.keys())
+        
+        if not cells_to_process:
+            return
+        
+        # Place first cell at origin
+        first_cell = cells_to_process[0]
+        cell_to_grid[first_cell] = (0, 0)
+        initial_node = self._nodes_by_grid.get((0, 0))
+        if initial_node:
+            initial_node.cell_id = first_cell
+            initial_node.item.set_text(first_cell)
+        
+        # BFS to position all connected cells
+        queue = [first_cell]
+        visited = {first_cell}
+        
+        while queue:
+            current_cell = queue.pop(0)
+            current_pos = cell_to_grid[current_cell]
+            neighbors = self._neighbors.get(current_cell, {})
+            
+            for direction, neighbor_cell in neighbors.items():
+                if not neighbor_cell or neighbor_cell in visited:
+                    continue
+                
+                # Calculate neighbor position
+                offset = DIR_OFFSETS[direction]
+                neighbor_pos = (current_pos[0] + offset[0], current_pos[1] + offset[1])
+                cell_to_grid[neighbor_cell] = neighbor_pos
+                
+                # Create node if doesn't exist
+                if neighbor_pos not in self._nodes_by_grid:
+                    base = self._nodes_by_grid[(0, 0)].item.rect().topLeft()
+                    top_left = QPointF(
+                        base.x() + (CELL_SIZE + GAP + PLUS_SIZE) * neighbor_pos[0],
+                        base.y() + (CELL_SIZE + GAP + PLUS_SIZE) * neighbor_pos[1],
+                    )
+                    self._create_node(neighbor_pos, top_left)
+                
+                # Assign cell to node
+                neighbor_node = self._nodes_by_grid[neighbor_pos]
+                neighbor_node.cell_id = neighbor_cell
+                neighbor_node.item.set_text(neighbor_cell)
+                
+                visited.add(neighbor_cell)
+                queue.append(neighbor_cell)
+        
+        # Update visual state and draw connections
+        for cell_id, grid_pos in cell_to_grid.items():
+            record = self._nodes_by_grid.get(grid_pos)
+            if record:
+                self._update_node_neighbors(record)
+                # Draw connections to neighbors (use internal to avoid undo stack on load)
+                neighbors = self._neighbors.get(cell_id, {})
+                for direction, neighbor_cell in neighbors.items():
+                    if neighbor_cell:
+                        neighbor_pos = cell_to_grid.get(neighbor_cell)
+                        if neighbor_pos:
+                            self._draw_connection_between(grid_pos, neighbor_pos)
+        
+        # Expand scene to fit all loaded nodes
+        self._expand_scene_rect()
 
     # -------- Internal helpers ---------
     def _create_node(self, grid_pos: tuple[int, int], top_left: QPointF) -> _NodeRecord:
@@ -398,14 +1023,30 @@ class CellNeighborsWindow(QDialog):
         def on_add_neighbor(direction: str):
             self._handle_add_neighbor(record, direction)
 
+        def on_delete_cell():
+            self._delete_cell(record)
+
         item.on_select_cell = on_select_cell
         item.on_add_neighbor = on_add_neighbor
+        item.on_delete_cell = on_delete_cell
+        
+        # Expand scene to accommodate new node
+        self._expand_scene_rect()
+        
         return record
 
     def _prompt_select_cell(self, record: _NodeRecord) -> None:
         if not self._cells:
             return
-        dialog = SelectCellDialog(self._cells, current=record.cell_id, parent=self)
+        
+        # Filter out already used cells
+        used_cells = self._get_used_cell_ids()
+        available_cells = [cell for cell in self._cells if cell not in used_cells or cell == record.cell_id]
+        
+        if not available_cells:
+            return
+        
+        dialog = SelectCellDialog(available_cells, current=record.cell_id, parent=self)
         if dialog.exec() != QDialog.Accepted:
             return
         selected = dialog.selected_cell()
@@ -413,16 +1054,25 @@ class CellNeighborsWindow(QDialog):
             return
         record.cell_id = selected
         record.item.set_text(record.cell_id)
+        # Always ensure cell is in neighbors dict, even without connections
         self._ensure_cell_mapping_entry(record.cell_id)
+        # Check for adjacent cells and auto-connect (without undo - this is part of cell selection)
         for dir_name, (dx, dy) in DIR_OFFSETS.items():
             neighbor_pos = (record.grid_pos[0] + dx, record.grid_pos[1] + dy)
             neighbor = self._nodes_by_grid.get(neighbor_pos)
             if neighbor and neighbor.cell_id:
-                self._link_cells(record.cell_id, dir_name, neighbor.cell_id)
+                self._link_cells_internal(record.cell_id, dir_name, neighbor.cell_id)
                 self._draw_connection_between(record.grid_pos, neighbor.grid_pos)
         self._update_node_neighbors(record)
+        self._expand_scene_rect()
+        # Update all plus buttons visibility after selecting a cell
+        self._update_all_plus_buttons_visibility()
 
     def _handle_add_neighbor(self, record: _NodeRecord, direction: str) -> None:
+        # Check if there are available cells before proceeding
+        if not self._has_available_cells():
+            return
+        
         # Cannot add neighbor if current node has no assigned cell yet
         if not record.cell_id:
             self._prompt_select_cell(record)
@@ -440,6 +1090,7 @@ class CellNeighborsWindow(QDialog):
             self._draw_connection_between(record.grid_pos, neighbor.grid_pos)
             self._update_node_neighbors(record)
             self._update_node_neighbors(neighbor)
+            self._expand_scene_rect()
             return
 
         # Create the node at aligned position
@@ -451,18 +1102,26 @@ class CellNeighborsWindow(QDialog):
         neighbor = self._create_node(target_grid, top_left)
         self._prompt_select_cell(neighbor)
         if not neighbor.cell_id:
+            # User cancelled - remove the created node
+            self.scene.removeItem(neighbor.item)
+            del self._nodes_by_grid[target_grid]
             return
         self._link_cells(record.cell_id, direction, neighbor.cell_id)
         self._draw_connection_between(record.grid_pos, neighbor.grid_pos)
         self._update_node_neighbors(record)
         self._update_node_neighbors(neighbor)
+        self._expand_scene_rect()
+        # Update all plus buttons visibility after creating neighbor
+        self._update_all_plus_buttons_visibility()
 
 
     def _ensure_cell_mapping_entry(self, cell_id: str) -> None:
+        """Ensure a cell has an entry in neighbors dict, even if it has no neighbors."""
         if cell_id not in self._neighbors:
             self._neighbors[cell_id] = {"up": None, "down": None, "left": None, "right": None}
 
-    def _link_cells(self, src: str, direction: str, dst: str) -> None:
+    def _link_cells_internal(self, src: str, direction: str, dst: str) -> None:
+        """Internal method to link cells without undo."""
         self._ensure_cell_mapping_entry(src)
         self._ensure_cell_mapping_entry(dst)
         self._neighbors[src][direction] = dst
@@ -474,30 +1133,96 @@ class CellNeighborsWindow(QDialog):
             if rec.cell_id == dst:
                 rec.item.set_neighbor(opposite(direction), src)
 
+    def _link_cells(self, src: str, direction: str, dst: str) -> None:
+        """Link cells with undo support."""
+        # Find grid positions
+        src_pos = None
+        dst_pos = None
+        for rec in self._nodes_by_grid.values():
+            if rec.cell_id == src:
+                src_pos = rec.grid_pos
+            if rec.cell_id == dst:
+                dst_pos = rec.grid_pos
+        
+        if src_pos and dst_pos:
+            command = AddNeighborCommand(self, src, direction, dst, src_pos, dst_pos)
+            self._undo_stack.push(command)
+
     def _draw_connection_between(self, a: tuple[int, int], b: tuple[int, int]) -> None:
+        """Draw dashed line between two cells, from edge to edge (only for direct neighbors)."""
+        # Calculate grid distance
+        dx = b[0] - a[0]
+        dy = b[1] - a[1]
+        
+        # Only draw if cells are direct neighbors (horizontal or vertical, distance of 1)
+        if not ((abs(dx) == 1 and dy == 0) or (abs(dy) == 1 and dx == 0)):
+            # Not direct neighbors - skip diagonal or distant connections
+            return
+        
         key = (a, b) if a <= b else (b, a)
         if key in self._lines_between_nodes:
             return
+        
         a_item = self._nodes_by_grid.get(a)
         b_item = self._nodes_by_grid.get(b)
         if not a_item or not b_item:
             return
-        ac = a_item.item.rect().center()
-        bc = b_item.item.rect().center()
-        line = QGraphicsLineItem(ac.x(), ac.y(), bc.x(), bc.y())
+        
+        a_rect = a_item.item.rect()
+        b_rect = b_item.item.rect()
+        a_center = a_rect.center()
+        b_center = b_rect.center()
+        
+        # Calculate start and end points on the edges of the cells
+        if dx != 0 and dy == 0:  # Horizontal connection
+            if dx > 0:  # a is left of b
+                start_x = a_rect.right()
+                start_y = a_center.y()
+                end_x = b_rect.left()
+                end_y = b_center.y()
+            else:  # a is right of b
+                start_x = a_rect.left()
+                start_y = a_center.y()
+                end_x = b_rect.right()
+                end_y = b_center.y()
+        elif dy != 0 and dx == 0:  # Vertical connection
+            if dy > 0:  # a is above b
+                start_x = a_center.x()
+                start_y = a_rect.bottom()
+                end_x = b_center.x()
+                end_y = b_rect.top()
+            else:  # a is below b
+                start_x = a_center.x()
+                start_y = a_rect.top()
+                end_x = b_center.x()
+                end_y = b_rect.bottom()
+        else:
+            # Should never reach here given the check above
+            return
+        
+        line = QGraphicsLineItem(start_x, start_y, end_x, end_y)
         pen = QPen(COLOR_DASH)
         pen.setStyle(Qt.DashLine)
-        pen.setWidth(2)
+        pen.setWidth(3)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
         line.setPen(pen)
         line.setZValue(-2)  # Draw connection lines behind everything
+        line.setOpacity(0.7)  # Subtle glow effect
         self.scene.addItem(line)
         self._lines_between_nodes[key] = line
 
     def _update_node_neighbors(self, record: _NodeRecord) -> None:
-        neighbors = self._neighbors.get(record.cell_id)
-        if neighbors:
-            for dir_name, cell_id in neighbors.items():
-                record.item.set_neighbor(dir_name, cell_id)
+        """Update the visual state of plus buttons based on current neighbors."""
+        if not record.cell_id:
+            # No cell assigned yet, show all plus buttons
+            for dir_name in DIR_OFFSETS.keys():
+                record.item.set_neighbor(dir_name, None)
+            return
+        
+        neighbors = self._neighbors.get(record.cell_id, {})
+        for dir_name in DIR_OFFSETS.keys():
+            cell_id = neighbors.get(dir_name)
+            record.item.set_neighbor(dir_name, cell_id)
 
 
 class SelectCellDialog(QDialog):

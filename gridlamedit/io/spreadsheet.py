@@ -365,6 +365,7 @@ class GridModel:
     laminados: Dict[str, Laminado] = field(default_factory=OrderedDict)
     celulas_ordenadas: list[str] = field(default_factory=list)
     cell_to_laminate: Dict[str, str] = field(default_factory=dict)
+    cell_neighbors: Dict[str, Dict[str, Optional[str]]] = field(default_factory=dict)
     compat_warnings: list[str] = field(default_factory=list)
     source_excel_path: Optional[str] = None
     dirty: bool = False

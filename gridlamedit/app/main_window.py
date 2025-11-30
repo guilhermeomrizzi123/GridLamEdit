@@ -422,7 +422,7 @@ class MainWindow(QMainWindow):
         """Open the Cell Neighbors dialog populated with the current project."""
         if self._cell_neighbors_window is None:
             self._cell_neighbors_window = CellNeighborsWindow(self)
-        self._cell_neighbors_window.populate_from_project(self._grid_model)
+        self._cell_neighbors_window.populate_from_project(self._grid_model, self.project_manager)
         self._cell_neighbors_window.show()
         self._cell_neighbors_window.raise_()
         self._cell_neighbors_window.activateWindow()
