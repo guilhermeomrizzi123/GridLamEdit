@@ -1091,6 +1091,15 @@ class VirtualStackingWindow(QtWidgets.QDialog):
 
         toolbar.addStretch()
 
+        # Novo botão: reorganizar sequências por vizinhança
+        self.btn_reorganize = QtWidgets.QToolButton(self)
+        self.btn_reorganize.setText("Reorganizar por Vizinhança")
+        self.btn_reorganize.setToolTip(
+            "Garante que cada sequência tenha vizinhos compatíveis; isola células sem vizinho de mesma orientação em novas sequências."
+        )
+        self.btn_reorganize.clicked.connect(self._reorganize_sequences_by_neighbors)
+        toolbar.addWidget(self.btn_reorganize)
+
         # Controles de movimentação.
         self.btn_move_left = QtWidgets.QToolButton(self)
         self.btn_move_left.setIcon(self.style().standardIcon(QtWidgets.QStyle.SP_ArrowLeft))
@@ -1933,6 +1942,171 @@ class VirtualStackingWindow(QtWidgets.QDialog):
             temp_cells.append((count_oriented_layers(getattr(laminate, "camadas", [])), idx, cell_id))
         temp_cells.sort(key=lambda entry: (-entry[0], entry[1]))
         return [cell_id for _, _, cell_id in temp_cells]
+
+    # ---------------------------------------------------------------
+    # Nova funcionalidade: reorganizar sequências por vizinhança
+    def _reorganize_sequences_by_neighbors(self) -> None:
+        project = self._project
+        if project is None:
+            return
+        neighbors_map = getattr(project, "cell_neighbors", {}) or {}
+        if not neighbors_map:
+            QtWidgets.QMessageBox.information(
+                self,
+                "Vizinhança não definida",
+                "Defina vizinhos na interface Cell Neighbors antes de reorganizar.",
+            )
+            return
+
+        # Trabalhamos sobre uma cópia dos laminados ativos na visualização atual
+        cells = list(self._cells)
+        laminates = [cell.laminate for cell in cells]
+        max_layers = max((len(lam.camadas) for lam in laminates), default=0)
+        symmetry_index = self._symmetry_row_index
+
+        def orientation_at(lam: Laminado, row: int) -> Optional[float]:
+            if row < 0 or row >= len(getattr(lam, "camadas", [])):
+                return None
+            val = getattr(lam.camadas[row], "orientacao", None)
+            try:
+                return None if val is None else float(val)
+            except Exception:
+                return None
+
+        def material_at(lam: Laminado, row: int) -> str:
+            if row < 0 or row >= len(getattr(lam, "camadas", [])):
+                return ""
+            return str(getattr(lam.camadas[row], "material", "") or "").strip()
+
+        def insert_empty_sequence_at(row: int) -> None:
+            # Insere uma nova camada vazia imediatamente abaixo de 'row' em todos os laminados
+            for lam in laminates:
+                model = self._stacking_model_for(lam)
+                if model is None:
+                    continue
+                insert_pos = min(row + 1, model.rowCount())
+                cmd = _InsertLayerCommand(
+                    model,
+                    lam,
+                    [insert_pos],
+                    default_material=str(self._most_used_material() or ""),
+                    default_orientation=0.0,
+                )
+                self._execute_command(cmd)
+                # Marcar como Empty
+                idx_ori = model.index(insert_pos, StackingTableModel.COL_ORIENTATION)
+                if idx_ori.isValid():
+                    model.setData(idx_ori, "", QtCore.Qt.EditRole)
+                lam.camadas = model.layers()
+
+        def set_layer(lam: Laminado, row: int, orient: Optional[float], material: str) -> None:
+            model = self._stacking_model_for(lam)
+            if model is None:
+                return
+            self.model._ensure_row_exists(model, row, lam)
+            # Orientação
+            idx_ori = model.index(row, StackingTableModel.COL_ORIENTATION)
+            if idx_ori.isValid():
+                model.setData(idx_ori, "" if orient is None else f"{orient:g}", QtCore.Qt.EditRole)
+            # Material
+            idx_mat = model.index(row, StackingTableModel.COL_MATERIAL)
+            if idx_mat.isValid():
+                model.setData(idx_mat, material, QtCore.Qt.EditRole)
+            lam.camadas = model.layers()
+
+        def clear_layer(lam: Laminado, row: int) -> None:
+            model = self._stacking_model_for(lam)
+            if model is None:
+                return
+            if 0 <= row < model.rowCount():
+                idx_ori = model.index(row, StackingTableModel.COL_ORIENTATION)
+                if idx_ori.isValid():
+                    model.setData(idx_ori, "", QtCore.Qt.EditRole)
+                idx_mat = model.index(row, StackingTableModel.COL_MATERIAL)
+                if idx_mat.isValid():
+                    model.setData(idx_mat, "", QtCore.Qt.EditRole)
+                lam.camadas = model.layers()
+
+        # Processa cada sequência original até o plano de simetria
+        row = 0
+        while row < max_layers and (symmetry_index is None or row <= symmetry_index):
+            # Coleta células com orientação na sequência
+            oriented_cells: list[int] = []
+            orientations: dict[int, float] = {}
+            for ci, cell in enumerate(cells):
+                ori = orientation_at(cell.laminate, row)
+                if ori is not None:
+                    oriented_cells.append(ci)
+                    orientations[ci] = ori
+            # Regra especial: apenas uma célula orientada => não mover
+            if len(oriented_cells) <= 1:
+                row += 1
+                continue
+
+            # Identifica células isoladas (sem vizinho de mesma orientação na mesma sequência)
+            isolated: list[int] = []
+            for ci in oriented_cells:
+                cell_id = cells[ci].cell_id
+                ori = orientations[ci]
+                mapping = neighbors_map.get(cell_id, {})
+                has_same = False
+                for neighbor in mapping.values():
+                    if not neighbor:
+                        continue
+                    # Encontra índice da coluna do vizinho
+                    try:
+                        n_idx = next(i for i, c in enumerate(cells) if c.cell_id == neighbor)
+                    except StopIteration:
+                        continue
+                    n_ori = orientation_at(cells[n_idx].laminate, row)
+                    if n_ori is not None and math.isclose(n_ori, ori, abs_tol=1e-6):
+                        has_same = True
+                        break
+                if not has_same:
+                    isolated.append(ci)
+
+            if not isolated:
+                row += 1
+                continue
+
+            # Para cada célula isolada, cria uma nova sequência e move a camada
+            # Novas sequências são inseridas imediatamente abaixo da sequência analisada
+            for ci in isolated:
+                insert_empty_sequence_at(row)
+                # Move dados da célula isolada
+                lam = cells[ci].laminate
+                ori = orientation_at(lam, row)
+                mat = material_at(lam, row)
+                clear_layer(lam, row)
+                set_layer(lam, row + 1, ori, mat)
+
+                # Tratar simetria: cria contraparte espelhada se existir plano
+                if symmetry_index is not None:
+                    # Índice espelhado relativo ao plano de simetria
+                    # Ex.: para pares, espelha em relação ao centro; aqui usamos simples cálculo
+                    dist = symmetry_index - row
+                    mirror_row = symmetry_index + dist + 1  # abaixo do plano
+                    # Garante existe a linha de espelho
+                    while mirror_row >= max_layers:
+                        insert_empty_sequence_at(max_layers - 1)
+                        max_layers += 1
+                    # Move também a camada espelhada do mesmo laminado
+                    m_ori = orientation_at(lam, mirror_row - 1)  # original posição antes da inserção
+                    m_mat = material_at(lam, mirror_row - 1)
+                    clear_layer(lam, mirror_row - 1)
+                    set_layer(lam, mirror_row, m_ori, m_mat)
+
+                max_layers += 1
+                if symmetry_index is not None and row <= symmetry_index:
+                    symmetry_index += 1  # plano se desloca para baixo ao inserir linhas acima dele
+
+            # Avança para próxima sequência original (pula as recém-criadas)
+            row += 1
+
+        # Finaliza: reconstruir UI e avisar alterações
+        self._rebuild_view()
+        self._mark_project_dirty()
+        self._notify_changes([cell.laminate.nome for cell in cells])
 
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:  # noqa: N802
         super().closeEvent(event)
