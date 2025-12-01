@@ -108,6 +108,9 @@ class AddNeighborCommand(QUndoCommand):
             if rec.cell_id == self.src_cell or rec.cell_id == self.dst_cell:
                 self.window._update_node_neighbors(rec)
         self.window._update_all_plus_buttons_visibility()
+        # Update colors for current sequence if one is selected
+        if self.window._current_sequence_index is not None:
+            self.window.update_cell_colors_for_sequence(self.window._current_sequence_index)
     
     def undo(self):
         """Undo: remove the neighbor relationship."""
@@ -127,6 +130,9 @@ class AddNeighborCommand(QUndoCommand):
             if rec.cell_id == self.src_cell or rec.cell_id == self.dst_cell:
                 self.window._update_node_neighbors(rec)
         self.window._update_all_plus_buttons_visibility()
+        # Update colors for current sequence if one is selected
+        if self.window._current_sequence_index is not None:
+            self.window.update_cell_colors_for_sequence(self.window._current_sequence_index)
 
 
 class DeleteCellCommand(QUndoCommand):
@@ -171,6 +177,9 @@ class DeleteCellCommand(QUndoCommand):
         self.window.scene.removeItem(record.item)
         del self.window._nodes_by_grid[self.grid_pos]
         self.window._update_all_plus_buttons_visibility()
+        # Update colors for current sequence if one is selected
+        if self.window._current_sequence_index is not None:
+            self.window.update_cell_colors_for_sequence(self.window._current_sequence_index)
     
     def undo(self):
         """Undo: restore the cell."""
@@ -214,6 +223,9 @@ class DeleteCellCommand(QUndoCommand):
         
         self.window._update_node_neighbors(record)
         self.window._update_all_plus_buttons_visibility()
+        # Update colors for current sequence if one is selected
+        if self.window._current_sequence_index is not None:
+            self.window.update_cell_colors_for_sequence(self.window._current_sequence_index)
 
 
 class PlusButtonItem(QGraphicsRectItem):
@@ -290,7 +302,8 @@ class CellNodeItem(QGraphicsRectItem):
         pen = QPen(COLOR_CELL_BORDER)
         pen.setWidth(2)
         self.setPen(pen)
-        self.setAcceptHoverEvents(True)
+        # Hover events disabled to preserve orientation colors
+        self.setAcceptHoverEvents(False)
         
         self._label = QGraphicsSimpleTextItem("Select\nCell", self)
         f: QFont = self._label.font()
@@ -456,19 +469,6 @@ class CellNodeItem(QGraphicsRectItem):
         """Handle delete action from context menu."""
         if callable(self.on_delete_cell):
             self.on_delete_cell()
-
-    def hoverEnterEvent(self, event):  # noqa: N802
-        # Lighter gradient on hover
-        rect = self.rect()
-        gradient = QLinearGradient(rect.topLeft(), rect.bottomRight())
-        gradient.setColorAt(0, QColor(51, 65, 85))  # Lighter slate
-        gradient.setColorAt(1, QColor(30, 41, 59))
-        self.setBrush(QBrush(gradient))
-        super().hoverEnterEvent(event)
-
-    def hoverLeaveEvent(self, event):  # noqa: N802
-        self.setBrush(self._normal_brush)
-        super().hoverLeaveEvent(event)
 
 
 @dataclass
@@ -957,7 +957,8 @@ class CellNeighborsWindow(QDialog):
             self._clear_disconnected_highlights()
             return True
         else:
-            # User cancelled - keep highlights visible
+            # User cancelled - clear highlights so they can continue editing
+            self._clear_disconnected_highlights()
             return False
 
     def _highlight_disconnected_block(self, component: set[str]) -> None:
@@ -1039,17 +1040,39 @@ class CellNeighborsWindow(QDialog):
                 self.scene.removeItem(line)
                 del self._lines_between_nodes[key]
             
-            # Remove node
-            self.scene.removeItem(record.item)
-            del self._nodes_by_grid[record.grid_pos]
+            # Special case: never remove the origin node at (0,0)
+            # Instead, just clear its cell assignment
+            if record.grid_pos == (0, 0):
+                record.cell_id = None
+                record.item.set_text("Select\nCell")
+                # Clear all neighbors for this node
+                record.item.set_neighbor("up", None)
+                record.item.set_neighbor("down", None)
+                record.item.set_neighbor("left", None)
+                record.item.set_neighbor("right", None)
+            else:
+                # Remove node normally
+                self.scene.removeItem(record.item)
+                del self._nodes_by_grid[record.grid_pos]
         
         # Update visual state
         self._update_all_plus_buttons_visibility()
+        
+        # Update colors for current sequence if one is selected
+        if self._current_sequence_index is not None:
+            self.update_cell_colors_for_sequence(self._current_sequence_index)
 
     def _rebuild_graph_from_neighbors(self) -> None:
         """Rebuild the visual node graph from saved neighbor relationships."""
         if not self._neighbors:
             return
+        
+        # Ensure the origin node (0,0) always exists
+        if (0, 0) not in self._nodes_by_grid:
+            # Recreate the origin node if it was somehow removed
+            anchor_x = MARGIN
+            anchor_y = MARGIN
+            self._create_node((0, 0), QPointF(anchor_x, anchor_y))
         
         # Clear existing nodes except the initial one
         nodes_to_remove = [pos for pos in self._nodes_by_grid.keys() if pos != (0, 0)]
@@ -1099,12 +1122,14 @@ class CellNeighborsWindow(QDialog):
                 
                 # Create node if doesn't exist
                 if neighbor_pos not in self._nodes_by_grid:
-                    base = self._nodes_by_grid[(0, 0)].item.rect().topLeft()
-                    top_left = QPointF(
-                        base.x() + (CELL_SIZE + GAP + PLUS_SIZE) * neighbor_pos[0],
-                        base.y() + (CELL_SIZE + GAP + PLUS_SIZE) * neighbor_pos[1],
-                    )
-                    self._create_node(neighbor_pos, top_left)
+                    origin_node = self._nodes_by_grid.get((0, 0))
+                    if origin_node:
+                        base = origin_node.item.rect().topLeft()
+                        top_left = QPointF(
+                            base.x() + (CELL_SIZE + GAP + PLUS_SIZE) * neighbor_pos[0],
+                            base.y() + (CELL_SIZE + GAP + PLUS_SIZE) * neighbor_pos[1],
+                        )
+                        self._create_node(neighbor_pos, top_left)
                 
                 # Assign cell to node
                 neighbor_node = self._nodes_by_grid[neighbor_pos]
@@ -1129,6 +1154,10 @@ class CellNeighborsWindow(QDialog):
         
         # Expand scene to fit all loaded nodes
         self._expand_scene_rect()
+        
+        # Update colors for current sequence if one is selected
+        if self._current_sequence_index is not None:
+            self.update_cell_colors_for_sequence(self._current_sequence_index)
 
     # -------- Internal helpers ---------
     def _create_node(self, grid_pos: tuple[int, int], top_left: QPointF) -> _NodeRecord:
@@ -1189,6 +1218,9 @@ class CellNeighborsWindow(QDialog):
         self._expand_scene_rect()
         # Update all plus buttons visibility after selecting a cell
         self._update_all_plus_buttons_visibility()
+        # Update colors for current sequence if one is selected
+        if self._current_sequence_index is not None:
+            self.update_cell_colors_for_sequence(self._current_sequence_index)
 
     def _handle_add_neighbor(self, record: _NodeRecord, direction: str) -> None:
         # Check if there are available cells before proceeding
@@ -1216,7 +1248,10 @@ class CellNeighborsWindow(QDialog):
             return
 
         # Create the node at aligned position
-        base = self._nodes_by_grid[(0, 0)].item.rect().topLeft()
+        origin_node = self._nodes_by_grid.get((0, 0))
+        if not origin_node:
+            return  # Cannot create node without origin reference
+        base = origin_node.item.rect().topLeft()
         top_left = QPointF(
             base.x() + (CELL_SIZE + GAP + PLUS_SIZE) * target_grid[0],
             base.y() + (CELL_SIZE + GAP + PLUS_SIZE) * target_grid[1],
@@ -1235,6 +1270,9 @@ class CellNeighborsWindow(QDialog):
         self._expand_scene_rect()
         # Update all plus buttons visibility after creating neighbor
         self._update_all_plus_buttons_visibility()
+        # Update colors for current sequence if one is selected
+        if self._current_sequence_index is not None:
+            self.update_cell_colors_for_sequence(self._current_sequence_index)
 
 
     def _ensure_cell_mapping_entry(self, cell_id: str) -> None:
