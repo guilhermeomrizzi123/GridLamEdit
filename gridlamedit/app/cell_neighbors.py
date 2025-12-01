@@ -36,13 +36,21 @@ from PySide6.QtWidgets import (
     QPushButton,
     QToolBar,
     QMessageBox,
+    QLabel,
+    QComboBox,
 )
 
 try:
-    # Optional: reference to the GridModel for populate convenience
-    from gridlamedit.io.spreadsheet import GridModel
+    # Optional: reference to the GridModel and orientation colour map
+    from gridlamedit.io.spreadsheet import (
+        GridModel,
+        ORIENTATION_HIGHLIGHT_COLORS,
+        DEFAULT_ORIENTATION_HIGHLIGHT,
+    )
 except Exception:  # pragma: no cover - optional import for loose coupling
     GridModel = object  # type: ignore
+    ORIENTATION_HIGHLIGHT_COLORS = {45.0: QColor(193, 174, 255), 90.0: QColor(160, 196, 255), -45.0: QColor(176, 230, 176), 0.0: QColor(230, 230, 230)}
+    DEFAULT_ORIENTATION_HIGHLIGHT = QColor(255, 236, 200)
 
 
 CELL_SIZE = 80.0
@@ -290,6 +298,12 @@ class CellNodeItem(QGraphicsRectItem):
         f.setPointSize(f.pointSize() + 2)
         self._label.setFont(f)
         self._label.setBrush(COLOR_TEXT)
+        # Orientation overlay in bottom-right
+        self._orientation_label = QGraphicsSimpleTextItem("", self)
+        of: QFont = self._orientation_label.font()
+        of.setPointSize(max(8, of.pointSize() - 2))
+        self._orientation_label.setFont(of)
+        self._orientation_label.setBrush(COLOR_TEXT)
         self._recenter_label()
         self.on_select_cell = None
         self.on_add_neighbor = None
@@ -310,6 +324,11 @@ class CellNodeItem(QGraphicsRectItem):
         painter.setPen(self.pen())
         # Draw rounded rectangle
         painter.drawRoundedRect(self.rect(), 8, 8)
+        # Adjust text contrast according to current fill
+        br = self.brush()
+        color = br.color() if isinstance(br, QBrush) else COLOR_CELL
+        self._update_text_contrast(color)
+        self._recenter_label()
 
     def set_neighbor(self, direction: str, cell_id: Optional[str]) -> None:
         self._neighbors[direction] = cell_id
@@ -338,6 +357,21 @@ class CellNodeItem(QGraphicsRectItem):
             rect.x() + (rect.width() - tb.width()) / 2,
             rect.y() + (rect.height() - tb.height()) / 2,
         )
+        ob = self._orientation_label.boundingRect()
+        margin = 4.0
+        self._orientation_label.setPos(
+            rect.right() - ob.width() - margin,
+            rect.bottom() - ob.height() - margin,
+        )
+
+    def _update_text_contrast(self, base_color: QColor) -> None:
+        r, g, b = base_color.red(), base_color.green(), base_color.blue()
+        luminance = 0.299 * r + 0.587 * g + 0.114 * b
+        light = QColor(248, 249, 250)
+        dark = QColor(33, 37, 41)
+        chosen = light if luminance < 150 else dark
+        self._label.setBrush(chosen)
+        self._orientation_label.setBrush(chosen)
 
     def _create_plus_buttons(self) -> None:
         """Create plus buttons and dashed lines from cell edge (not center) to button center."""
@@ -484,6 +518,16 @@ class CellNeighborsWindow(QDialog):
         self.redo_button.clicked.connect(self._undo_stack.redo)
         self.redo_button.setEnabled(False)
         toolbar.addWidget(self.redo_button)
+
+        # Sequence selection label & combo box
+        self.sequence_label = QLabel("Sequência:", self)
+        toolbar.addWidget(self.sequence_label)
+        self.sequence_combo = QComboBox(self)
+        self.sequence_combo.addItem("Nenhuma")  # index 0 => no colouring
+        self.sequence_combo.currentIndexChanged.connect(self._on_sequence_changed)
+        toolbar.addWidget(self.sequence_combo)
+
+        self._current_sequence_index: Optional[int] = None  # 1-based; None => no colouring
         
         # Connect undo stack signals
         self._undo_stack.canUndoChanged.connect(self.undo_button.setEnabled)
@@ -596,6 +640,8 @@ class CellNeighborsWindow(QDialog):
         self._cells = cells
         # Update all plus buttons visibility after loading project
         self._update_all_plus_buttons_visibility()
+        # Populate sequence combo (max layers among laminados)
+        self._populate_sequence_combo()
         # Center view on cells after loading
         self._center_view_on_cells()
 
@@ -611,6 +657,82 @@ class CellNeighborsWindow(QDialog):
         """Mark that there are unsaved changes."""
         self._has_unsaved_changes = True
         self.save_button.setEnabled(True)
+
+    # ---------- Sequence colouring ----------
+    def _populate_sequence_combo(self) -> None:
+        """Fill the sequence combo with available sequence numbers based on current model.
+        Always keeps 'Nenhuma' as first option."""
+        if not hasattr(self, "sequence_combo"):
+            return
+        # Preserve first item, clear the rest
+        while self.sequence_combo.count() > 1:
+            self.sequence_combo.removeItem(1)
+        max_layers = 0
+        if self._model is not None:
+            try:
+                for laminado in self._model.laminados.values():
+                    max_layers = max(max_layers, len(getattr(laminado, "camadas", [])))
+            except Exception:
+                max_layers = 0
+        for i in range(1, max_layers + 1):
+            self.sequence_combo.addItem(str(i))
+        # Reset selection & colours
+        self.sequence_combo.setCurrentIndex(0)
+        self._current_sequence_index = None
+        self.update_cell_colors_for_sequence(None)
+
+    def _on_sequence_changed(self, combo_index: int) -> None:
+        """Handle combo change: index 0 => no sequence colouring, else 1-based sequence number."""
+        if combo_index <= 0:
+            self._current_sequence_index = None
+        else:
+            self._current_sequence_index = combo_index  # 1-based sequence
+        self.update_cell_colors_for_sequence(self._current_sequence_index)
+
+    def update_cell_colors_for_sequence(self, sequence_index: Optional[int]) -> None:
+        """Apply orientation-based colours to each cell for the given sequence.
+
+        sequence_index: 1-based sequence number or None for reset.
+        Rule: same orientation => same colour (reuses global orientation mapping).
+        Cells lacking a layer at that sequence or orientation => reset to neutral brush.
+        """
+        for record in self._nodes_by_grid.values():
+            item = record.item
+            # Reset when no sequence selected
+            if sequence_index is None or not record.cell_id or self._model is None:
+                item.setBrush(item._normal_brush)
+                item._orientation_label.setText("")
+                continue
+            # Resolve laminate for cell
+            try:
+                laminate_name = self._model.cell_to_laminate.get(record.cell_id)
+                laminado = self._model.laminados.get(laminate_name) if laminate_name else None
+                camadas = getattr(laminado, "camadas", []) if laminado else []
+            except Exception:
+                camadas = []
+            layer_idx = sequence_index - 1
+            if layer_idx < 0 or layer_idx >= len(camadas):
+                item.setBrush(item._normal_brush)
+                item._orientation_label.setText("")
+                continue
+            camada = camadas[layer_idx]
+            orient = getattr(camada, "orientacao", None)
+            if orient is None:
+                item.setBrush(item._normal_brush)
+                item._orientation_label.setText("")
+                continue
+            # Use exact match first, else fallback default highlight
+            color = ORIENTATION_HIGHLIGHT_COLORS.get(float(orient), DEFAULT_ORIENTATION_HIGHLIGHT)
+            item.setBrush(QBrush(color))
+            # Show orientation text in degrees with sign
+            try:
+                val = float(orient)
+                # Normalize decimal: show integers without .0
+                label = f"{val:.0f}\u00b0" if abs(val - round(val)) < 1e-6 else f"{val:.1f}\u00b0"
+            except Exception:
+                label = str(orient)
+            item._orientation_label.setText(label)
+            item._recenter_label()
 
     def _save_to_project(self) -> None:
         """Save current neighbors mapping to the project (manual save)."""
