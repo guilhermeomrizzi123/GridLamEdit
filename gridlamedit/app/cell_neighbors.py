@@ -38,6 +38,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QLabel,
     QComboBox,
+    QInputDialog,
 )
 
 try:
@@ -199,10 +200,13 @@ class DeleteCellCommand(QUndoCommand):
             self.window._handle_add_neighbor(record, direction)
         def on_delete_cell():
             self.window._delete_cell(record)
+        def on_change_orientation():
+            self.window._change_cell_orientation(record)
         
         item.on_select_cell = on_select_cell
         item.on_add_neighbor = on_add_neighbor
         item.on_delete_cell = on_delete_cell
+        item.on_change_orientation = on_change_orientation
         
         # Restore neighbors
         self.window._neighbors[self.cell_id] = dict(self.neighbors)
@@ -321,6 +325,7 @@ class CellNodeItem(QGraphicsRectItem):
         self.on_select_cell = None
         self.on_add_neighbor = None
         self.on_delete_cell = None
+        self.on_change_orientation = None
         self.plus_items: dict[str, PlusButtonItem] = {}
         self.plus_lines: dict[str, QGraphicsLineItem] = {}
         self._neighbors: dict[str, Optional[str]] = {"up": None, "down": None, "left": None, "right": None}
@@ -458,8 +463,16 @@ class CellNodeItem(QGraphicsRectItem):
             super().mousePressEvent(event)
 
     def _show_context_menu(self, pos) -> None:
-        """Show context menu with delete option."""
+        """Show context menu with change orientation and delete options."""
         menu = QMenu()
+        
+        # Add "Trocar orientação" option
+        change_orientation_action = QAction("Trocar orienta\u00e7\u00e3o", menu)
+        change_orientation_action.triggered.connect(self._handle_change_orientation)
+        menu.addAction(change_orientation_action)
+        
+        menu.addSeparator()
+        
         delete_action = QAction("Deletar C\u00e9lula", menu)
         delete_action.triggered.connect(self._handle_delete)
         menu.addAction(delete_action)
@@ -469,6 +482,11 @@ class CellNodeItem(QGraphicsRectItem):
         """Handle delete action from context menu."""
         if callable(self.on_delete_cell):
             self.on_delete_cell()
+
+    def _handle_change_orientation(self) -> None:
+        """Handle change orientation action from context menu."""
+        if callable(self.on_change_orientation):
+            self.on_change_orientation()
 
 
 @dataclass
@@ -871,6 +889,186 @@ class CellNeighborsWindow(QDialog):
         command = DeleteCellCommand(self, record)
         self._undo_stack.push(command)
 
+    def _prompt_custom_orientation(self) -> float | None:
+        """Prompt user for a custom orientation value."""
+        dialog = QInputDialog(self)
+        dialog.setInputMode(QInputDialog.InputMode.DoubleInput)
+        dialog.setWindowTitle("Outro valor")
+        dialog.setLabelText("Informe a orientação (-100 a 100 graus):")
+        dialog.setDoubleRange(-100.0, 100.0)
+        dialog.setDoubleDecimals(1)
+        dialog.setDoubleStep(1.0)
+        dialog.setDoubleValue(0.0)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return None
+        return dialog.doubleValue()
+
+    def _change_cell_orientation(self, record: _NodeRecord) -> None:
+        """Change the orientation of a cell's layer for the current sequence."""
+        # Check if there is a cell assigned
+        if not record.cell_id:
+            QMessageBox.information(
+                self,
+                "Célula não atribuída",
+                "Esta célula não possui um ID atribuído. Selecione uma célula primeiro.",
+            )
+            return
+        
+        # Check if there is a sequence selected
+        if self._current_sequence_index is None:
+            QMessageBox.information(
+                self,
+                "Nenhuma sequência selecionada",
+                "Selecione uma sequência no menu suspenso para trocar a orientação.",
+            )
+            return
+        
+        # Check if model is available
+        if self._model is None:
+            QMessageBox.warning(
+                self,
+                "Modelo não disponível",
+                "Não há um modelo de projeto carregado.",
+            )
+            return
+        
+        # Get the laminate for this cell
+        laminate_name = self._model.cell_to_laminate.get(record.cell_id)
+        if not laminate_name:
+            QMessageBox.warning(
+                self,
+                "Laminado não encontrado",
+                f"Não foi possível encontrar o laminado associado à célula {record.cell_id}.",
+            )
+            return
+        
+        laminado = self._model.laminados.get(laminate_name)
+        if not laminado:
+            QMessageBox.warning(
+                self,
+                "Laminado não encontrado",
+                f"O laminado '{laminate_name}' não existe no projeto.",
+            )
+            return
+        
+        # Get the layer index (0-based)
+        layer_idx = self._current_sequence_index - 1
+        if layer_idx < 0 or layer_idx >= len(laminado.camadas):
+            QMessageBox.warning(
+                self,
+                "Camada não encontrada",
+                f"A célula {record.cell_id} não possui uma camada na sequência {self._current_sequence_index}.",
+            )
+            return
+        
+        # Get current orientation
+        current_camada = laminado.camadas[layer_idx]
+        current_orientation = current_camada.orientacao
+        
+        # Use the same pattern as Virtual Stacking - QInputDialog.getItem
+        options = ["Empty", "0", "45", "-45", "90", "Outro valor..."]
+        
+        # Find the default selection based on current orientation
+        default_index = 0
+        if current_orientation is not None:
+            current_str = f"{current_orientation:g}"
+            try:
+                default_index = options.index(current_str)
+            except ValueError:
+                # Current orientation is not in the list, keep default at 0
+                pass
+        
+        selected, ok = QInputDialog.getItem(
+            self,
+            "Editar orientação",
+            "Selecione a orientação:",
+            options,
+            default_index,
+            False,
+        )
+        
+        if not ok:
+            return
+        
+        selected = selected.strip()
+        
+        # Handle the selection
+        if selected == "Outro valor...":
+            # Prompt for custom value
+            custom_value = self._prompt_custom_orientation()
+            if custom_value is None:
+                return
+            new_orientation = custom_value
+            print(f"DEBUG: Custom orientation selected: {new_orientation}")
+        elif selected.lower() == "empty":
+            new_orientation = None
+            print(f"DEBUG: Empty orientation selected")
+        else:
+            try:
+                new_orientation = float(selected)
+                print(f"DEBUG: Standard orientation selected: {new_orientation}")
+            except ValueError:
+                QMessageBox.warning(
+                    self,
+                    "Orientação inválida",
+                    f"Não foi possível converter '{selected}' para número.",
+                )
+                return
+        
+        print(f"DEBUG: Current orientation: {current_orientation}, New orientation: {new_orientation}")
+        
+        # Check if orientation actually changed
+        if current_orientation == new_orientation:
+            QMessageBox.information(
+                self,
+                "Sem alterações",
+                "A orientação selecionada é igual à orientação atual.",
+            )
+            return
+        
+        # Update the model
+        current_camada.orientacao = new_orientation
+        print(f"DEBUG: Model updated. Layer {layer_idx} orientation is now: {current_camada.orientacao}")
+        
+        # Mark as modified
+        self._mark_as_modified()
+        
+        # Update the cell colors
+        self.update_cell_colors_for_sequence(self._current_sequence_index)
+        
+        # Notify other windows (Virtual Stacking and Main Window)
+        if self._project_manager is not None:
+            try:
+                # Capture changes to project manager
+                self._project_manager.capture_from_model(self._model)
+                # Mark project as dirty
+                if hasattr(self._model, 'mark_dirty'):
+                    self._model.mark_dirty(True)
+            except Exception:
+                pass
+        
+        # Notify parent window (main window) to refresh
+        parent_window = self.parent()
+        if parent_window is not None:
+            try:
+                # Try to call the refresh method on the main window
+                if hasattr(parent_window, '_on_virtual_stacking_changed'):
+                    parent_window._on_virtual_stacking_changed([laminate_name])
+            except Exception:
+                pass
+        
+        # Show confirmation message
+        if new_orientation is None:
+            orientation_text = "vazia"
+        else:
+            orientation_text = f"{new_orientation}°"
+        
+        QMessageBox.information(
+            self,
+            "Orientação atualizada",
+            f"A orientação da célula {record.cell_id} na sequência {self._current_sequence_index} foi atualizada para {orientation_text}.",
+        )
+
     def _find_connected_components(self) -> list[set[str]]:
         """Find all connected components (blocks) of cells.
         Returns a list of sets, where each set contains cell IDs in one connected component."""
@@ -1177,9 +1375,13 @@ class CellNeighborsWindow(QDialog):
         def on_delete_cell():
             self._delete_cell(record)
 
+        def on_change_orientation():
+            self._change_cell_orientation(record)
+
         item.on_select_cell = on_select_cell
         item.on_add_neighbor = on_add_neighbor
         item.on_delete_cell = on_delete_cell
+        item.on_change_orientation = on_change_orientation
         
         # Expand scene to accommodate new node
         self._expand_scene_rect()
