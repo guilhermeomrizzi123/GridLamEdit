@@ -258,6 +258,7 @@ class VirtualStackingModel(QtCore.QAbstractTableModel):
         return icon
 
     # Data roles ------------------------------------------------------
+
     def data(  # noqa: N802
         self,
         index: QtCore.QModelIndex,
@@ -655,8 +656,22 @@ class VirtualStackingModel(QtCore.QAbstractTableModel):
             self.headerDataChanged.emit(QtCore.Qt.Horizontal, first, last)
 
 
+
 class VirtualStackingWindow(QtWidgets.QDialog):
     """Dialog that renders the Virtual Stacking spreadsheet-like view."""
+
+    def _on_sequence_column_clicked(self, index: QtCore.QModelIndex) -> None:
+        if not index.isValid() or index.column() != self.model.COL_SEQUENCE:
+            self.table.clearSelection()
+            return
+        self.table.selectRow(index.row())
+
+    def _setup_table_signals(self) -> None:
+        self.table.clicked.connect(self._on_sequence_column_clicked)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._setup_table_signals()
 
     stacking_changed = QtCore.Signal(list)
     closed = QtCore.Signal()
@@ -745,8 +760,12 @@ class VirtualStackingWindow(QtWidgets.QDialog):
         header.sectionClicked.connect(self._on_header_section_clicked)
         self.table.verticalHeader().setVisible(False)
         self.table.setAlternatingRowColors(True)
-        self.table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectItems)
-        self.table.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
+        # Seleção por linha para destacar bordas sem alterar cores
+        self.table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
+        self.table.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
+        self.table.setStyleSheet(
+            "QTableView::item:selected { background: transparent; border: 2px solid #0078D7; }"
+        )
         self.table.setHorizontalScrollMode(QtWidgets.QAbstractItemView.ScrollPerPixel)
         self.table.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAsNeeded)
         self.table.setEditTriggers(
@@ -1949,6 +1968,43 @@ class VirtualStackingWindow(QtWidgets.QDialog):
         project = self._project
         if project is None:
             return
+
+        # --- Salvar snapshot completo para Undo/Redo ---
+        # Salva estado de todas as camadas, células, simetria, etc.
+        import copy
+        snapshot = {
+            'layers': copy.deepcopy(self._layers),
+            'cells': copy.deepcopy(self._cells),
+            'symmetry_row_index': self._symmetry_row_index,
+            'project': copy.deepcopy(self._project),
+        }
+        class _VirtualStackingSnapshotCommand(QtGui.QUndoCommand):
+            def __init__(self, window, snapshot):
+                super().__init__('Virtual Stacking Snapshot')
+                self.window = window
+                self.snapshot = snapshot
+                self._restore_snapshot = None
+            def undo(self):
+                # Salva estado atual para refazer
+                self._restore_snapshot = {
+                    'layers': copy.deepcopy(self.window._layers),
+                    'cells': copy.deepcopy(self.window._cells),
+                    'symmetry_row_index': self.window._symmetry_row_index,
+                    'project': copy.deepcopy(self.window._project),
+                }
+                self.window._layers = copy.deepcopy(self.snapshot['layers'])
+                self.window._cells = copy.deepcopy(self.snapshot['cells'])
+                self.window._symmetry_row_index = self.snapshot['symmetry_row_index']
+                self.window._project = copy.deepcopy(self.snapshot['project'])
+                self.window._rebuild_view()
+            def redo(self):
+                if self._restore_snapshot:
+                    self.window._layers = copy.deepcopy(self._restore_snapshot['layers'])
+                    self.window._cells = copy.deepcopy(self._restore_snapshot['cells'])
+                    self.window._symmetry_row_index = self._restore_snapshot['symmetry_row_index']
+                    self.window._project = copy.deepcopy(self._restore_snapshot['project'])
+                    self.window._rebuild_view()
+        self.undo_stack.push(_VirtualStackingSnapshotCommand(self, snapshot))
         neighbors_map = getattr(project, "cell_neighbors", {}) or {}
         if not neighbors_map:
             QtWidgets.QMessageBox.information(
@@ -1985,14 +2041,16 @@ class VirtualStackingWindow(QtWidgets.QDialog):
                 if model is None:
                     continue
                 insert_pos = min(row + 1, model.rowCount())
-                cmd = _InsertLayerCommand(
-                    model,
-                    lam,
-                    [insert_pos],
-                    default_material=str(self._most_used_material() or ""),
-                    default_orientation=0.0,
+                # Cria camada com simetria=True (Considerar)
+                camada_nova = Camada(
+                    idx=0,
+                    material=str(self._most_used_material() or ""),
+                    orientacao=0.0,
+                    ativo=True,
+                    simetria=True,  # Considerar por padrão
+                    ply_type=DEFAULT_PLY_TYPE,
                 )
-                self._execute_command(cmd)
+                model.insert_layer(insert_pos, camada_nova)
                 # Marcar como Empty
                 idx_ori = model.index(insert_pos, StackingTableModel.COL_ORIENTATION)
                 if idx_ori.isValid():
@@ -2105,8 +2163,35 @@ class VirtualStackingWindow(QtWidgets.QDialog):
 
         # Finaliza: reconstruir UI e avisar alterações
         self._rebuild_view()
+        self._check_symmetry()
         self._mark_project_dirty()
         self._notify_changes([cell.laminate.nome for cell in cells])
+
+        # --- Remover sequências totalmente vazias e reindexar ---
+        def is_row_empty(row_idx: int) -> bool:
+            for cell in self._cells:
+                lam = cell.laminate
+                layers = getattr(lam, "camadas", [])
+                if row_idx >= len(layers):
+                    continue
+                val = getattr(layers[row_idx], "orientacao", None)
+                if val not in (None, "", "Empty"):
+                    return False
+            return True
+
+        empty_rows = [i for i in range(len(self._layers)) if is_row_empty(i)]
+        if empty_rows:
+            for cell in self._cells:
+                lam = cell.laminate
+                layers = getattr(lam, "camadas", [])
+                for idx in reversed(empty_rows):
+                    if 0 <= idx < len(layers):
+                        layers.pop(idx)
+                lam.camadas = layers
+            self._layers = [layer for i, layer in enumerate(self._layers) if i not in empty_rows]
+            self.model.set_virtual_stacking(self._layers, self._cells, self._symmetry_row_index)
+            self._rebuild_view()
+            self._check_symmetry()
 
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:  # noqa: N802
         super().closeEvent(event)
