@@ -176,6 +176,7 @@ class VirtualStackingModel(QtCore.QAbstractTableModel):
         self.layers: list[VirtualStackingLayer] = []
         self.cells: list[VirtualStackingCell] = []
         self.symmetry_row_index: int | None = None
+        self.symmetry_rows: set[int] = set()
         self._change_callback = change_callback
         self._stacking_model_provider = stacking_model_provider or (lambda _lam: None)
         self._post_edit_callback = post_edit_callback
@@ -307,6 +308,8 @@ class VirtualStackingModel(QtCore.QAbstractTableModel):
                 return ""
 
         if role == QtCore.Qt.BackgroundRole:
+            if self.symmetry_rows and row in self.symmetry_rows:
+                return QtGui.QBrush(QtGui.QColor(250, 128, 114))
             if column < self.LAMINATE_COLUMN_OFFSET:
                 return QtGui.QBrush(QtGui.QColor(240, 240, 240))
             if (row, column) in self._red_cells:
@@ -322,17 +325,7 @@ class VirtualStackingModel(QtCore.QAbstractTableModel):
                         getattr(layers[row], "orientacao", None)
                     )
                     if color is not None:
-                        if (
-                            self.symmetry_row_index is not None
-                            and row == self.symmetry_row_index
-                        ):
-                            return QtGui.QBrush(color.lighter(110))
                         return QtGui.QBrush(color)
-            if (
-                self.symmetry_row_index is not None
-                and row == self.symmetry_row_index
-            ):
-                return QtGui.QBrush(QtGui.QColor(220, 235, 255))
 
         if role == QtCore.Qt.ForegroundRole and column >= self.LAMINATE_COLUMN_OFFSET:
             cell_index = column - self.LAMINATE_COLUMN_OFFSET
@@ -587,12 +580,20 @@ class VirtualStackingModel(QtCore.QAbstractTableModel):
         self,
         layers: Iterable[VirtualStackingLayer],
         cells: Iterable[VirtualStackingCell],
-        symmetry_row_index: int | None = None,
+        symmetry_row_index: int | set[int] | list[int] | tuple[int, ...] | None = None,
     ) -> None:
         self.beginResetModel()
         self.layers = list(layers)
         self.cells = list(cells)
-        self.symmetry_row_index = symmetry_row_index
+        if symmetry_row_index is None:
+            self.symmetry_rows = set()
+            self.symmetry_row_index = None
+        elif isinstance(symmetry_row_index, int):
+            self.symmetry_rows = {symmetry_row_index}
+            self.symmetry_row_index = symmetry_row_index
+        else:
+            self.symmetry_rows = {idx for idx in symmetry_row_index}
+            self.symmetry_row_index = min(self.symmetry_rows) if self.symmetry_rows else None
         self._red_cells.clear()
         self._green_cells.clear()
         self._unbalanced_columns.clear()
@@ -601,6 +602,10 @@ class VirtualStackingModel(QtCore.QAbstractTableModel):
     def set_symmetry_row_index(self, index: int | None) -> None:
         if index == self.symmetry_row_index:
             return
+        if index is None:
+            self.symmetry_rows = set()
+        else:
+            self.symmetry_rows = {index}
         self.symmetry_row_index = index
         if self.layers:
             top_left = self.createIndex(0, 0)
@@ -703,6 +708,7 @@ class VirtualStackingWindow(QtWidgets.QDialog):
         self._layers: list[VirtualStackingLayer] = []
         self._cells: list[VirtualStackingCell] = []
         self._symmetry_row_index: int | None = None
+        self._symmetry_rows: set[int] = set()
         self._project: Optional[GridModel] = None
         self._sorted_cell_ids: list[str] = []
         self._initial_sort_done = False
@@ -1125,14 +1131,6 @@ class VirtualStackingWindow(QtWidgets.QDialog):
         self.btn_reorganize.clicked.connect(self._reorganize_sequences_by_neighbors)
         toolbar.addWidget(self.btn_reorganize)
 
-        self.btn_symmetry = QtWidgets.QToolButton(self)
-        self.btn_symmetry.setText("Reorganizar por Simetria")
-        self.btn_symmetry.setToolTip(
-            "Organiza cada laminado em formato espelhado: metade esquerda, centro (quando existir) e metade direita espelhada."
-        )
-        self.btn_symmetry.clicked.connect(self._reorganize_by_symmetry)
-        toolbar.addWidget(self.btn_symmetry)
-
         # Controles de movimentação.
         self.btn_move_left = QtWidgets.QToolButton(self)
         self.btn_move_left.setIcon(self.style().standardIcon(QtWidgets.QStyle.SP_ArrowLeft))
@@ -1194,11 +1192,19 @@ class VirtualStackingWindow(QtWidgets.QDialog):
         layers, cells, symmetry_index = self._collect_virtual_data(self._project)
         self._layers = layers
         self._cells = cells
-        self._symmetry_row_index = symmetry_index
+        if isinstance(symmetry_index, set):
+            self._symmetry_rows = symmetry_index
+            self._symmetry_row_index = min(symmetry_index) if symmetry_index else None
+        elif symmetry_index is None:
+            self._symmetry_rows = set()
+            self._symmetry_row_index = None
+        else:
+            self._symmetry_rows = {symmetry_index}
+            self._symmetry_row_index = symmetry_index
         valid_ids = {cell.cell_id for cell in cells}
         self._selected_cell_ids = {cid for cid in self._selected_cell_ids if cid in valid_ids}
         self._refresh_stacking_models(cells)
-        self.model.set_virtual_stacking(layers, cells, symmetry_index)
+        self.model.set_virtual_stacking(layers, cells, self._symmetry_rows or self._symmetry_row_index)
         self._apply_orientation_delegate()
         self._restore_column_order()
         self._resize_columns()
@@ -1208,7 +1214,7 @@ class VirtualStackingWindow(QtWidgets.QDialog):
 
     def _collect_virtual_data(
         self, project: GridModel
-    ) -> tuple[list[VirtualStackingLayer], list[VirtualStackingCell], int | None]:
+    ) -> tuple[list[VirtualStackingLayer], list[VirtualStackingCell], set[int] | int | None]:
         cells: list[VirtualStackingCell] = []
         laminates: list[Laminado] = []
         for cell_id in project.celulas_ordenadas:
@@ -1273,8 +1279,8 @@ class VirtualStackingWindow(QtWidgets.QDialog):
                 )
             )
 
-        symmetry_index = self._detect_symmetry_row(laminates, max_layers)
-        return layers, cells, symmetry_index
+        symmetry_rows = self._compute_symmetry_axis_from_layers(layers)
+        return layers, cells, symmetry_rows
 
     def _refresh_stacking_models(self, cells: list[VirtualStackingCell]) -> None:
         active_ids = {id(cell.laminate) for cell in cells}
@@ -1617,7 +1623,15 @@ class VirtualStackingWindow(QtWidgets.QDialog):
         if not (0 <= row < len(self._layers)):
             return True
         layer = self._layers[row]
-        return is_structural_ply_label(getattr(layer, "ply_type", DEFAULT_PLY_TYPE))
+        return normalize_ply_type_label(getattr(layer, "ply_type", DEFAULT_PLY_TYPE)) != PLY_TYPE_OPTIONS[1]
+
+    def _considered_sequence_rows_from_layers(self, layers: list[VirtualStackingLayer]) -> list[int]:
+        rows: list[int] = []
+        for idx, layer in enumerate(layers):
+            ply_type = normalize_ply_type_label(getattr(layer, "ply_type", DEFAULT_PLY_TYPE))
+            if ply_type != PLY_TYPE_OPTIONS[1]:
+                rows.append(idx)
+        return rows
 
     def _summary_for_laminate(self, laminate: Optional[Laminado]) -> str:
         if laminate is None:
@@ -1714,67 +1728,21 @@ class VirtualStackingWindow(QtWidgets.QDialog):
         red_cells: set[tuple[int, int]] = set()
         green_cells: set[tuple[int, int]] = set()
         unbalanced_columns: set[int] = set()
+        considered_rows = self._considered_sequence_rows_from_layers(self._layers)
+        pairings: list[tuple[int, int]] = []
+        centers: list[int] = []
+        if considered_rows:
+            if len(considered_rows) % 2 == 1:
+                mid_idx = len(considered_rows) // 2
+                centers = [considered_rows[mid_idx]]
+            else:
+                centers = [considered_rows[len(considered_rows) // 2 - 1], considered_rows[len(considered_rows) // 2]]
+            for i in range(len(considered_rows) // 2):
+                pairings.append((considered_rows[i], considered_rows[-(i + 1)]))
         for col, cell in enumerate(self._cells):
             laminate = cell.laminate
             layers = getattr(laminate, "camadas", [])
-            structural_rows = [
-                idx
-                for idx, camada in enumerate(layers)
-                if self._row_considered(idx)
-                and camada.orientacao is not None
-                and is_structural_ply_label(getattr(camada, "ply_type", DEFAULT_PLY_TYPE))
-            ]
-            count_struct = len(structural_rows)
-            if count_struct == 0:
-                continue
-            center_rows: list[int] = []
-            is_symmetrical = False
-            def _layers_match(idx_top: int, idx_bottom: int) -> bool:
-                camada_top = layers[idx_top]
-                camada_bot = layers[idx_bottom]
-                mat_top = (getattr(camada_top, "material", "") or "").strip().lower()
-                mat_bot = (getattr(camada_bot, "material", "") or "").strip().lower()
-                ori_top = self._orientation_token(getattr(camada_top, "orientacao", None))
-                ori_bot = self._orientation_token(getattr(camada_bot, "orientacao", None))
-                return mat_top == mat_bot and self._orientations_match(ori_top, ori_bot)
-            if count_struct == 1:
-                center_rows = [structural_rows[0]]
-                green_cells.add((structural_rows[0], col + self.model.LAMINATE_COLUMN_OFFSET))
-                is_symmetrical = True
-            else:
-                i, j = 0, count_struct - 1
-                broken = False
-                while i < j:
-                    r_top = structural_rows[i]
-                    r_bot = structural_rows[j]
-                    if not _layers_match(r_top, r_bot):
-                        red_cells.update(
-                            {
-                                (r_top, col + self.model.LAMINATE_COLUMN_OFFSET),
-                                (r_bot, col + self.model.LAMINATE_COLUMN_OFFSET),
-                            }
-                        )
-                        broken = True
-                        break
-                    i += 1
-                    j -= 1
-                if not broken:
-                    is_symmetrical = True
-                    mid_left = structural_rows[(count_struct - 1) // 2]
-                    if count_struct % 2 == 0:
-                        mid_right = structural_rows[count_struct // 2]
-                        center_rows = [mid_left, mid_right]
-                    else:
-                        center_rows = [mid_left]
-                        neighbor_pos = (count_struct // 2) + 1
-                        if neighbor_pos < count_struct:
-                            candidate = structural_rows[neighbor_pos]
-                            if _layers_match(mid_left, candidate):
-                                center_rows = [mid_left, candidate]
-                    green_cells.update(
-                        {(row, col + self.model.LAMINATE_COLUMN_OFFSET) for row in center_rows}
-                    )
-            if is_symmetrical and center_rows and self._is_unbalanced(layers, structural_rows, center_rows):
+            if centers and self._is_unbalanced(layers, considered_rows, centers):
                 unbalanced_columns.add(col + self.model.LAMINATE_COLUMN_OFFSET)
         self.model.set_highlights(red_cells, green_cells)
         self.model.set_unbalanced_columns(unbalanced_columns)
@@ -1795,7 +1763,8 @@ class VirtualStackingWindow(QtWidgets.QDialog):
             if row in center_set:
                 continue
             if row > center_min:
-                # Only consider layers above the symmetry plane.
+                continue
+            if not (0 <= row < len(layers)):
                 continue
             orientation = self._orientation_token(getattr(layers[row], "orientacao", None))
             if orientation is None:
@@ -1923,6 +1892,64 @@ class VirtualStackingWindow(QtWidgets.QDialog):
         self._after_laminate_changed(laminate)
         self._notify_changes([laminate.nome])
 
+    def _add_sequence_below_row(self, row: int) -> None:
+        if row < 0 or not self._cells:
+            return
+        self._push_virtual_snapshot()
+        changed: list[str] = []
+        for cell in self._cells:
+            laminate = self._ensure_unique_laminate_for_cell(cell)
+            stacking_model = self._stacking_model_for(laminate)
+            if stacking_model is None:
+                continue
+            # Garante que a linha alvo existe antes de inserir abaixo.
+            try:
+                self.model._ensure_row_exists(stacking_model, row, laminate)
+            except Exception:
+                pass
+            insert_at = min(row + 1, stacking_model.rowCount())
+            new_layer = Camada(
+                idx=0,
+                material="",
+                orientacao=None,
+                ativo=True,
+                simetria=False,
+                ply_type=DEFAULT_PLY_TYPE,
+                rosette=DEFAULT_ROSETTE_LABEL,
+            )
+            stacking_model.insert_layer(insert_at, new_layer)
+            laminate.camadas = stacking_model.layers()
+            self._after_laminate_changed(laminate)
+            changed.append(laminate.nome)
+        if changed:
+            self._notify_changes(changed)
+
+    def _delete_sequence_row(self, row: int) -> None:
+        if row < 0 or not self._cells:
+            return
+        has_targets = False
+        for cell in self._cells:
+            model = self._stacking_model_for(cell.laminate)
+            if model is not None and 0 <= row < model.rowCount():
+                has_targets = True
+                break
+        if not has_targets:
+            return
+        self._push_virtual_snapshot()
+        changed: list[str] = []
+        for cell in self._cells:
+            laminate = self._ensure_unique_laminate_for_cell(cell)
+            stacking_model = self._stacking_model_for(laminate)
+            if stacking_model is None:
+                continue
+            if 0 <= row < stacking_model.rowCount():
+                stacking_model.remove_rows([row])
+                laminate.camadas = stacking_model.layers()
+                self._after_laminate_changed(laminate)
+                changed.append(laminate.nome)
+        if changed:
+            self._notify_changes(changed)
+
     def _insert_layer(self, index: Optional[QtCore.QModelIndex] = None) -> None:
         # If a specific cell was clicked, handle that single insertion directly.
         if index is not None and index.isValid() and index.column() >= self.model.LAMINATE_COLUMN_OFFSET:
@@ -2023,17 +2050,28 @@ class VirtualStackingWindow(QtWidgets.QDialog):
 
     def _show_context_menu(self, pos: QtCore.QPoint) -> None:
         index = self.table.indexAt(pos)
-        if not index.isValid() or index.column() < self.model.LAMINATE_COLUMN_OFFSET:
+        if (
+            not index.isValid()
+            or index.column() < self.model.LAMINATE_COLUMN_OFFSET
+            or index.row() < 0
+            or index.row() >= self.model.rowCount()
+        ):
             return
         self.table.setCurrentIndex(index)
         menu = QtWidgets.QMenu(self)
-        above_action = menu.addAction("Adicionar camada")
+        add_sequence_action = menu.addAction("Adicionar nova sequência")
+        delete_sequence_action = menu.addAction("Deletar sequência selecionada")
         menu.addSeparator()
+        above_action = menu.addAction("Adicionar camada")
         edit_action = menu.addAction("Editar orientacao...")
         clear_action = menu.addAction("Limpar orientacao")
         remove_action = menu.addAction("Remover camada")
         chosen = menu.exec(self.table.viewport().mapToGlobal(pos))
-        if chosen == above_action:
+        if chosen == add_sequence_action:
+            self._add_sequence_below_row(index.row())
+        elif chosen == delete_sequence_action:
+            self._delete_sequence_row(index.row())
+        elif chosen == above_action:
             self._insert_layer(index=index)
         elif chosen == edit_action:
             self._edit_orientation_at(index)
@@ -2055,18 +2093,17 @@ class VirtualStackingWindow(QtWidgets.QDialog):
                 return laminate
         return None
 
-    def _detect_symmetry_row(
-        self, laminates: Iterable[Laminado], layer_count: int
-    ) -> int | None:
-        for idx in range(layer_count):
-            for lam in laminates:
-                if (
-                    idx < len(lam.camadas)
-                    and getattr(lam.camadas[idx], "orientacao", None) is not None
-                    and getattr(lam.camadas[idx], "simetria", False)
-                ):
-                    return idx
-        return None
+    def _compute_symmetry_axis_from_layers(self, layers: list[VirtualStackingLayer]) -> set[int]:
+        considered_rows = self._considered_sequence_rows_from_layers(layers)
+        count = len(considered_rows)
+        if count == 0:
+            return set()
+        if count % 2 == 1:
+            mid = considered_rows[count // 2]
+            return {mid}
+        mid1 = considered_rows[count // 2 - 1]
+        mid2 = considered_rows[count // 2]
+        return {mid1, mid2}
 
     def _compute_sorted_cell_ids(self, project: Optional[GridModel]) -> list[str]:
         """
@@ -2089,7 +2126,7 @@ class VirtualStackingWindow(QtWidgets.QDialog):
         return {
             "layers": copy.deepcopy(self._layers),
             "cells": copy.deepcopy(self._cells),
-            "symmetry_row_index": self._symmetry_row_index,
+            "symmetry_row_index": copy.deepcopy(self._symmetry_rows or self._symmetry_row_index),
             "project": copy.deepcopy(self._project),
         }
 
@@ -2099,7 +2136,16 @@ class VirtualStackingWindow(QtWidgets.QDialog):
             return
         self._layers = copy.deepcopy(snapshot.get("layers", []))
         self._cells = copy.deepcopy(snapshot.get("cells", []))
-        self._symmetry_row_index = snapshot.get("symmetry_row_index")
+        symmetry_index = snapshot.get("symmetry_row_index")
+        if isinstance(symmetry_index, set):
+            self._symmetry_rows = symmetry_index
+            self._symmetry_row_index = min(symmetry_index) if symmetry_index else None
+        elif symmetry_index is None:
+            self._symmetry_rows = set()
+            self._symmetry_row_index = None
+        else:
+            self._symmetry_rows = {symmetry_index}
+            self._symmetry_row_index = symmetry_index
         self._project = copy.deepcopy(snapshot.get("project"))
         self._rebuild_view()
 
@@ -2126,99 +2172,6 @@ class VirtualStackingWindow(QtWidgets.QDialog):
 
         self.undo_stack.push(_VirtualStackingSnapshotCommand(before_state))
         self._update_undo_buttons()
-
-    def _build_symmetry_layout(self, layers: list[Camada]) -> list[Camada]:
-        """
-        Reorder the provided layers into a symmetric layout.
-
-        The algorithm:
-        - Groups layers by orientation token.
-        - Forms matched pairs (same orientation) preserving the outermost/innermost order.
-        - Uses remaining layers to fill the center (if odd) and to build fallback pairs near the center.
-        """
-        entries: list[dict] = []
-        for idx, layer in enumerate(layers):
-            entries.append(
-                {
-                    "index": idx,
-                    "layer": layer,
-                    "token": self._orientation_token(getattr(layer, "orientacao", None)),
-                }
-            )
-        if not entries:
-            return list(layers)
-
-        buckets: dict[object, list[dict]] = {}
-        for entry in entries:
-            buckets.setdefault(entry["token"], []).append(entry)
-        for bucket in buckets.values():
-            bucket.sort(key=lambda e: e["index"])
-
-        matched_pairs: list[tuple[dict, dict]] = []
-        leftovers: list[dict] = []
-        for bucket in buckets.values():
-            while len(bucket) >= 2:
-                left = bucket.pop(0)
-                right = bucket.pop()
-                matched_pairs.append((left, right))
-            if bucket:
-                leftovers.extend(bucket)
-
-        center_entry: Optional[dict] = None
-        if len(entries) % 2 == 1 and leftovers:
-            leftovers.sort(key=lambda e: e["index"])
-            center_entry = leftovers.pop(0)
-
-        def _pop_best_pair(source: list[dict]) -> tuple[dict, dict]:
-            """Pick a pair prioritizing same orientation, falling back to closest angle."""
-            left = source.pop(0)
-            if not source:
-                return left, left
-
-            for idx, candidate in enumerate(source):
-                if candidate["token"] == left["token"]:
-                    right = source.pop(idx)
-                    return left, right
-
-            def _angle(entry: dict) -> float:
-                token = entry["token"]
-                try:
-                    return float(token)
-                except Exception:
-                    return float("inf")
-
-            left_val = _angle(left)
-            closest_idx = min(range(len(source)), key=lambda i: abs(_angle(source[i]) - left_val))
-            right = source.pop(closest_idx)
-            return left, right
-
-        forced_pairs: list[tuple[dict, dict]] = []
-        while len(leftovers) >= 2:
-            forced_pairs.append(_pop_best_pair(leftovers))
-
-        if leftovers:
-            extra = leftovers.pop(0)
-            if center_entry is None:
-                center_entry = extra
-            else:
-                forced_pairs.append((extra, center_entry))
-                center_entry = None
-
-        matched_pairs.sort(key=lambda pair: min(pair[0]["index"], pair[1]["index"]))
-        forced_pairs.sort(key=lambda pair: min(pair[0]["index"], pair[1]["index"]))
-        ordered_pairs = matched_pairs + forced_pairs
-
-        left_half = [pair[0]["layer"] for pair in ordered_pairs]
-        right_half = [pair[1]["layer"] for pair in reversed(ordered_pairs)]
-
-        new_order = left_half + ([center_entry["layer"]] if center_entry is not None else []) + right_half
-
-        for pos, layer in enumerate(new_order):
-            try:
-                layer.idx = pos
-            except Exception:
-                pass
-        return new_order
 
     # ---------------------------------------------------------------
     # Nova funcionalidade: reorganizar sequências por vizinhança
@@ -2424,59 +2377,9 @@ class VirtualStackingWindow(QtWidgets.QDialog):
                         layers.pop(idx)
                 lam.camadas = layers
             self._layers = [layer for i, layer in enumerate(self._layers) if i not in empty_rows]
-            self.model.set_virtual_stacking(self._layers, self._cells, self._symmetry_row_index)
+            self.model.set_virtual_stacking(self._layers, self._cells, self._symmetry_rows or self._symmetry_row_index)
             self._rebuild_view()
             self._check_symmetry()
-
-    def _reorganize_by_symmetry(self) -> None:
-        """Reorder laminates to make their sequences explicitly symmetric."""
-        project = self._project
-        if project is None or not self._cells:
-            return
-
-        available_ids = {cell.cell_id for cell in self._cells}
-        selected_ids = {cid for cid in self._selected_cell_ids if cid in available_ids}
-        target_cells = [cell for cell in self._cells if not selected_ids or cell.cell_id in selected_ids]
-        if not target_cells:
-            return
-
-        planned: list[tuple[Laminado, StackingTableModel, list[Camada], bool]] = []
-        any_change = False
-        for cell in target_cells:
-            laminate = self._ensure_unique_laminate_for_cell(cell)
-            model = self._stacking_model_for(laminate)
-            if model is None:
-                continue
-            current_layers = model.layers()
-            new_layers = self._build_symmetry_layout(current_layers)
-            changed = [id(layer) for layer in new_layers] != [id(layer) for layer in current_layers]
-            planned.append((laminate, model, new_layers, changed))
-            any_change = any_change or changed
-
-        if not planned:
-            return
-        if not any_change:
-            QtWidgets.QMessageBox.information(
-                self,
-                "Reorganizar por Simetria",
-                "As sequencias ja estao organizadas por simetria.",
-            )
-            return
-
-        self._push_virtual_snapshot()
-        changed_names: list[str] = []
-        for laminate, model, new_layers, changed in planned:
-            if not changed:
-                continue
-            model.update_layers(new_layers)
-            laminate.camadas = model.layers()
-            self._after_laminate_changed(laminate)
-            changed_names.append(laminate.nome)
-
-        self._rebuild_view()
-        self._check_symmetry()
-        if changed_names:
-            self._notify_changes(changed_names)
 
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:  # noqa: N802
         super().closeEvent(event)

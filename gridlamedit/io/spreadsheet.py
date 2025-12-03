@@ -878,6 +878,7 @@ class StackingTableModel(QAbstractTableModel):
         elif column == self.COL_PLY_TYPE:
             normalized_type = normalize_ply_type_label(value)
             camada.ply_type = normalized_type
+            setattr(camada, "_manual_symmetry_override", True)
             material_text = str(getattr(camada, "material", "") or "")
             if (
                 material_text
@@ -909,6 +910,7 @@ class StackingTableModel(QAbstractTableModel):
                         pass
         elif column == self.COL_ORIENTATION:
             old_orientation = getattr(camada, "orientacao", None)
+            manual_symmetry = bool(getattr(camada, "_manual_symmetry_override", False))
             if value is None:
                 camada.orientacao = None
             else:
@@ -923,12 +925,18 @@ class StackingTableModel(QAbstractTableModel):
                             camada.orientacao = normalize_angle(text)
                         except (TypeError, ValueError):
                             return False
-            if camada.orientacao is None and camada.material:
-                camada.material = ""
-                extra_columns.append(self.COL_MATERIAL)
-                if camada.ply_type != PLY_TYPE_OPTIONS[1]:
-                    camada.ply_type = PLY_TYPE_OPTIONS[1]
-                    extra_columns.append(self.COL_PLY_TYPE)
+            current_ply_type = normalize_ply_type_label(getattr(camada, "ply_type", DEFAULT_PLY_TYPE))
+            if camada.orientacao is None:
+                if camada.material:
+                    camada.material = ""
+                    extra_columns.append(self.COL_MATERIAL)
+                if manual_symmetry and current_ply_type == PLY_TYPE_OPTIONS[1]:
+                    pass
+                else:
+                    if current_ply_type != PLY_TYPE_OPTIONS[0]:
+                        camada.ply_type = PLY_TYPE_OPTIONS[0]
+                        extra_columns.append(self.COL_PLY_TYPE)
+                    manual_symmetry = False
             elif (
                 camada.orientacao is not None
                 and not camada.material
@@ -938,9 +946,14 @@ class StackingTableModel(QAbstractTableModel):
                 if suggestion:
                     camada.material = suggestion
                     extra_columns.append(self.COL_MATERIAL)
-                if old_orientation is None and camada.ply_type == PLY_TYPE_OPTIONS[1]:
+                if (
+                    old_orientation is None
+                    and current_ply_type == PLY_TYPE_OPTIONS[1]
+                    and not manual_symmetry
+                ):
                     camada.ply_type = PLY_TYPE_OPTIONS[0]
                     extra_columns.append(self.COL_PLY_TYPE)
+            setattr(camada, "_manual_symmetry_override", manual_symmetry)
         else:
             return False
 
@@ -1009,18 +1022,21 @@ class StackingTableModel(QAbstractTableModel):
         normalized_label = normalize_ply_type_label(getattr(camada, "ply_type", None))
         if legacy_flag and normalized_label == DEFAULT_PLY_TYPE:
             normalized_label = PLY_TYPE_OPTIONS[1]
+        manual_symmetry = bool(getattr(camada, "_manual_symmetry_override", False))
+        if normalized_label == PLY_TYPE_OPTIONS[1] and not manual_symmetry:
+            manual_symmetry = True
         camada.ply_type = normalized_label
         camada.ply_label = str(getattr(camada, "ply_label", "") or "")
         rosette_value = str(getattr(camada, "rosette", "") or "").strip()
         camada.rosette = rosette_value or DEFAULT_ROSETTE_LABEL
         if getattr(camada, "orientacao", None) is None:
             camada.material = ""
-            camada.ply_type = PLY_TYPE_OPTIONS[1]
         if hasattr(camada, "nao_estrutural"):
             try:
                 delattr(camada, "nao_estrutural")
             except AttributeError:
                 pass
+        setattr(camada, "_manual_symmetry_override", manual_symmetry)
         return camada
 
     def rowCount(self, parent: QModelIndex = QModelIndex()) -> int:  # noqa: N802
