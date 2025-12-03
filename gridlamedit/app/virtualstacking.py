@@ -1729,6 +1729,14 @@ class VirtualStackingWindow(QtWidgets.QDialog):
                 continue
             center_rows: list[int] = []
             is_symmetrical = False
+            def _layers_match(idx_top: int, idx_bottom: int) -> bool:
+                camada_top = layers[idx_top]
+                camada_bot = layers[idx_bottom]
+                mat_top = (getattr(camada_top, "material", "") or "").strip().lower()
+                mat_bot = (getattr(camada_bot, "material", "") or "").strip().lower()
+                ori_top = self._orientation_token(getattr(camada_top, "orientacao", None))
+                ori_bot = self._orientation_token(getattr(camada_bot, "orientacao", None))
+                return mat_top == mat_bot and self._orientations_match(ori_top, ori_bot)
             if count_struct == 1:
                 center_rows = [structural_rows[0]]
                 green_cells.add((structural_rows[0], col + self.model.LAMINATE_COLUMN_OFFSET))
@@ -1739,13 +1747,7 @@ class VirtualStackingWindow(QtWidgets.QDialog):
                 while i < j:
                     r_top = structural_rows[i]
                     r_bot = structural_rows[j]
-                    camada_top = layers[r_top]
-                    camada_bot = layers[r_bot]
-                    mat_top = (getattr(camada_top, "material", "") or "").strip().lower()
-                    mat_bot = (getattr(camada_bot, "material", "") or "").strip().lower()
-                    ori_top = self._orientation_token(getattr(camada_top, "orientacao", None))
-                    ori_bot = self._orientation_token(getattr(camada_bot, "orientacao", None))
-                    if not (mat_top == mat_bot and self._orientations_match(ori_top, ori_bot)):
+                    if not _layers_match(r_top, r_bot):
                         red_cells.update(
                             {
                                 (r_top, col + self.model.LAMINATE_COLUMN_OFFSET),
@@ -1758,27 +1760,20 @@ class VirtualStackingWindow(QtWidgets.QDialog):
                     j -= 1
                 if not broken:
                     is_symmetrical = True
-                    if count_struct % 2 == 1:
-                        center = structural_rows[count_struct // 2]
-                        center_rows = [center]
-                        green_cells.add((center, col + self.model.LAMINATE_COLUMN_OFFSET))
+                    mid_left = structural_rows[(count_struct - 1) // 2]
+                    if count_struct % 2 == 0:
+                        mid_right = structural_rows[count_struct // 2]
+                        center_rows = [mid_left, mid_right]
                     else:
-                        center_rows = [
-                            structural_rows[count_struct // 2 - 1],
-                            structural_rows[count_struct // 2],
-                        ]
-                        green_cells.update(
-                            {
-                                (
-                                    structural_rows[count_struct // 2 - 1],
-                                    col + self.model.LAMINATE_COLUMN_OFFSET,
-                                ),
-                                (
-                                    structural_rows[count_struct // 2],
-                                    col + self.model.LAMINATE_COLUMN_OFFSET,
-                                ),
-                            }
-                        )
+                        center_rows = [mid_left]
+                        neighbor_pos = (count_struct // 2) + 1
+                        if neighbor_pos < count_struct:
+                            candidate = structural_rows[neighbor_pos]
+                            if _layers_match(mid_left, candidate):
+                                center_rows = [mid_left, candidate]
+                    green_cells.update(
+                        {(row, col + self.model.LAMINATE_COLUMN_OFFSET) for row in center_rows}
+                    )
             if is_symmetrical and center_rows and self._is_unbalanced(layers, structural_rows, center_rows):
                 unbalanced_columns.add(col + self.model.LAMINATE_COLUMN_OFFSET)
         self.model.set_highlights(red_cells, green_cells)
