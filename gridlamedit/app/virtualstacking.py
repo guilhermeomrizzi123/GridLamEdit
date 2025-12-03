@@ -388,7 +388,13 @@ class VirtualStackingModel(QtCore.QAbstractTableModel):
             return False
 
         cell = self.cells[cell_index]
-        laminate = cell.laminate
+        
+        # Ensure unique laminate before modifying to prevent affecting other cells
+        if hasattr(self.parent(), '_ensure_unique_laminate_for_cell'):
+            laminate = self.parent()._ensure_unique_laminate_for_cell(cell)
+        else:
+            laminate = cell.laminate
+            
         stacking_model = self._stacking_model_provider(laminate)
         if stacking_model is None:
             return False
@@ -1463,10 +1469,100 @@ class VirtualStackingWindow(QtWidgets.QDialog):
             if mapped == old_name:
                 self._project.cell_to_laminate[cell_id] = new_name
 
+    def _ensure_unique_laminate_for_cell(self, cell: VirtualStackingCell) -> Laminado:
+        """
+        Ensure the cell has a unique laminate object.
+        If the laminate is shared with other cells, create a copy for this cell.
+        Returns the laminate (either the original if unique, or a new copy).
+        """
+        if self._project is None:
+            return cell.laminate
+        
+        # Check how many cells in the ENTIRE PROJECT reference this laminate by NAME
+        laminate_name = cell.laminate.nome
+        cells_using_this_laminate = [
+            cell_id for cell_id, lam_name in self._project.cell_to_laminate.items()
+            if lam_name == laminate_name
+        ]
+        
+        # Also check laminate.celulas for backward compatibility
+        if hasattr(cell.laminate, 'celulas'):
+            for c_id in cell.laminate.celulas:
+                if c_id not in cells_using_this_laminate:
+                    cells_using_this_laminate.append(c_id)
+        
+        # If only this cell uses the laminate, no need to copy
+        if len(cells_using_this_laminate) <= 1:
+            return cell.laminate
+        
+        # Create a deep copy of the laminate
+        import copy as copy_module
+        new_laminate = copy_module.deepcopy(cell.laminate)
+        
+        # Generate a unique name for the new laminate
+        original_name = cell.laminate.nome
+        counter = 1
+        base_name = original_name
+        # Remove existing number suffix if present
+        match = _PREFIX_NUMBER_PATTERN.match(original_name)
+        if match:
+            base_name = match.group(1)
+            counter = int(match.group(2))
+        
+        # Find a unique name
+        while True:
+            new_name = f"{base_name}.{counter}"
+            if new_name not in self._project.laminados:
+                break
+            counter += 1
+        
+        new_laminate.nome = new_name
+        
+        # Remove this cell from the old laminate's cell list
+        old_laminate = cell.laminate
+        if hasattr(old_laminate, 'celulas') and cell.cell_id in old_laminate.celulas:
+            old_laminate.celulas.remove(cell.cell_id)
+        
+        # Add this cell to the new laminate's cell list
+        if hasattr(new_laminate, 'celulas'):
+            if cell.cell_id not in new_laminate.celulas:
+                new_laminate.celulas.append(cell.cell_id)
+        else:
+            new_laminate.celulas = [cell.cell_id]
+        
+        # Add the new laminate to the project
+        self._project.laminados[new_name] = new_laminate
+        
+        # Update the cell-to-laminate mapping for this cell
+        self._project.cell_to_laminate[cell.cell_id] = new_name
+        
+        # Update the cell's laminate reference
+        cell.laminate = new_laminate
+        
+        # Update any other cells in self._cells that were pointing to the old laminate
+        # but should now point to the new one (only this specific cell)
+        for other_cell in self._cells:
+            if other_cell.cell_id == cell.cell_id and id(other_cell.laminate) == id(old_laminate):
+                other_cell.laminate = new_laminate
+        
+        # Create a new stacking model for the new laminate
+        # (the old model will be cleaned up automatically)
+        self._stacking_models[id(new_laminate)] = StackingTableModel(
+            camadas=list(getattr(new_laminate, "camadas", [])),
+            change_callback=lambda layers, lam=new_laminate: self._on_layers_replaced(
+                lam, layers
+            ),
+            undo_stack=self.undo_stack,
+            most_used_material_provider=self._most_used_material,
+        )
+        
+        return new_laminate
+
     def _after_laminate_changed(self, laminate: Laminado) -> None:
         self._auto_rename_if_enabled(laminate)
         self._mark_project_dirty()
         self._update_summary_row()
+
 
     def _selected_targets(self) -> dict[Laminado, set[int]]:
         if not hasattr(self, "table") or self.table.selectionModel() is None:
@@ -1807,6 +1903,18 @@ class VirtualStackingWindow(QtWidgets.QDialog):
                 "Selecione uma linha existente para remover.",
             )
             return
+        
+        # Ensure this cell has a unique laminate before removing the layer
+        # to prevent affecting other cells that might share the same laminate
+        cell_idx = index.column() - self.model.LAMINATE_COLUMN_OFFSET
+        if 0 <= cell_idx < len(self._cells):
+            current_cell = self._cells[cell_idx]
+            laminate = self._ensure_unique_laminate_for_cell(current_cell)
+            # Get the updated stacking model for the potentially new laminate
+            stacking_model = self._stacking_model_for(laminate)
+            if stacking_model is None:
+                return
+        
         command = _RemoveLayerCommand(stacking_model, laminate, [row])
         self._execute_command(command)
         self._after_laminate_changed(laminate)
@@ -1815,11 +1923,22 @@ class VirtualStackingWindow(QtWidgets.QDialog):
     def _insert_layer(self, index: Optional[QtCore.QModelIndex] = None) -> None:
         # If a specific cell was clicked, handle that single insertion directly.
         if index is not None and index.isValid() and index.column() >= self.model.LAMINATE_COLUMN_OFFSET:
-            entry = self._stacking_entry_for_index(index)
-            if entry is None:
-                return
-            laminate, stacking_model, row = entry
-            insert_at = max(0, min(row, stacking_model.rowCount()))
+            # Ensure this cell has a unique laminate before inserting the layer
+            # to prevent affecting other cells that might share the same laminate
+            cell_idx = index.column() - self.model.LAMINATE_COLUMN_OFFSET
+            if 0 <= cell_idx < len(self._cells):
+                current_cell = self._cells[cell_idx]
+                laminate = self._ensure_unique_laminate_for_cell(current_cell)
+                stacking_model = self._stacking_model_for(laminate)
+                if stacking_model is None:
+                    return
+            else:
+                entry = self._stacking_entry_for_index(index)
+                if entry is None:
+                    return
+                laminate, stacking_model, row = entry
+            
+            insert_at = max(0, min(index.row(), stacking_model.rowCount()))
             default_material = self._most_used_material() or ""
             command = _InsertLayerCommand(
                 stacking_model,
