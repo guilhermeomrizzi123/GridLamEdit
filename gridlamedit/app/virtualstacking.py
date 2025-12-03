@@ -1125,6 +1125,14 @@ class VirtualStackingWindow(QtWidgets.QDialog):
         self.btn_reorganize.clicked.connect(self._reorganize_sequences_by_neighbors)
         toolbar.addWidget(self.btn_reorganize)
 
+        self.btn_symmetry = QtWidgets.QToolButton(self)
+        self.btn_symmetry.setText("Reorganizar por Simetria")
+        self.btn_symmetry.setToolTip(
+            "Organiza cada laminado em formato espelhado: metade esquerda, centro (quando existir) e metade direita espelhada."
+        )
+        self.btn_symmetry.clicked.connect(self._reorganize_by_symmetry)
+        toolbar.addWidget(self.btn_symmetry)
+
         # Controles de movimentação.
         self.btn_move_left = QtWidgets.QToolButton(self)
         self.btn_move_left.setIcon(self.style().standardIcon(QtWidgets.QStyle.SP_ArrowLeft))
@@ -2081,6 +2089,142 @@ class VirtualStackingWindow(QtWidgets.QDialog):
         temp_cells.sort(key=lambda entry: (-entry[0], entry[1]))
         return [cell_id for _, _, cell_id in temp_cells]
 
+    def _capture_virtual_snapshot(self) -> dict:
+        """Return a deep-copied snapshot of the current virtual stacking state."""
+        return {
+            "layers": copy.deepcopy(self._layers),
+            "cells": copy.deepcopy(self._cells),
+            "symmetry_row_index": self._symmetry_row_index,
+            "project": copy.deepcopy(self._project),
+        }
+
+    def _restore_virtual_snapshot(self, snapshot: Optional[dict]) -> None:
+        """Restore a previously captured snapshot (used by undo/redo)."""
+        if snapshot is None:
+            return
+        self._layers = copy.deepcopy(snapshot.get("layers", []))
+        self._cells = copy.deepcopy(snapshot.get("cells", []))
+        self._symmetry_row_index = snapshot.get("symmetry_row_index")
+        self._project = copy.deepcopy(snapshot.get("project"))
+        self._rebuild_view()
+
+    def _push_virtual_snapshot(self) -> None:
+        """Record a snapshot on the undo stack so reorg operations can be undone."""
+        if self.undo_stack is None:
+            return
+        window = self
+        before_state = self._capture_virtual_snapshot()
+
+        class _VirtualStackingSnapshotCommand(QtGui.QUndoCommand):
+            def __init__(self, state: dict) -> None:
+                super().__init__("Virtual Stacking Snapshot")
+                self.before_state = state
+                self.after_state: Optional[dict] = None
+
+            def undo(self) -> None:
+                self.after_state = window._capture_virtual_snapshot()
+                window._restore_virtual_snapshot(self.before_state)
+
+            def redo(self) -> None:
+                if self.after_state is not None:
+                    window._restore_virtual_snapshot(self.after_state)
+
+        self.undo_stack.push(_VirtualStackingSnapshotCommand(before_state))
+        self._update_undo_buttons()
+
+    def _build_symmetry_layout(self, layers: list[Camada]) -> list[Camada]:
+        """
+        Reorder the provided layers into a symmetric layout.
+
+        The algorithm:
+        - Groups layers by orientation token.
+        - Forms matched pairs (same orientation) preserving the outermost/innermost order.
+        - Uses remaining layers to fill the center (if odd) and to build fallback pairs near the center.
+        """
+        entries: list[dict] = []
+        for idx, layer in enumerate(layers):
+            entries.append(
+                {
+                    "index": idx,
+                    "layer": layer,
+                    "token": self._orientation_token(getattr(layer, "orientacao", None)),
+                }
+            )
+        if not entries:
+            return list(layers)
+
+        buckets: dict[object, list[dict]] = {}
+        for entry in entries:
+            buckets.setdefault(entry["token"], []).append(entry)
+        for bucket in buckets.values():
+            bucket.sort(key=lambda e: e["index"])
+
+        matched_pairs: list[tuple[dict, dict]] = []
+        leftovers: list[dict] = []
+        for bucket in buckets.values():
+            while len(bucket) >= 2:
+                left = bucket.pop(0)
+                right = bucket.pop()
+                matched_pairs.append((left, right))
+            if bucket:
+                leftovers.extend(bucket)
+
+        center_entry: Optional[dict] = None
+        if len(entries) % 2 == 1 and leftovers:
+            leftovers.sort(key=lambda e: e["index"])
+            center_entry = leftovers.pop(0)
+
+        def _pop_best_pair(source: list[dict]) -> tuple[dict, dict]:
+            """Pick a pair prioritizing same orientation, falling back to closest angle."""
+            left = source.pop(0)
+            if not source:
+                return left, left
+
+            for idx, candidate in enumerate(source):
+                if candidate["token"] == left["token"]:
+                    right = source.pop(idx)
+                    return left, right
+
+            def _angle(entry: dict) -> float:
+                token = entry["token"]
+                try:
+                    return float(token)
+                except Exception:
+                    return float("inf")
+
+            left_val = _angle(left)
+            closest_idx = min(range(len(source)), key=lambda i: abs(_angle(source[i]) - left_val))
+            right = source.pop(closest_idx)
+            return left, right
+
+        forced_pairs: list[tuple[dict, dict]] = []
+        while len(leftovers) >= 2:
+            forced_pairs.append(_pop_best_pair(leftovers))
+
+        if leftovers:
+            extra = leftovers.pop(0)
+            if center_entry is None:
+                center_entry = extra
+            else:
+                forced_pairs.append((extra, center_entry))
+                center_entry = None
+
+        matched_pairs.sort(key=lambda pair: min(pair[0]["index"], pair[1]["index"]))
+        forced_pairs.sort(key=lambda pair: min(pair[0]["index"], pair[1]["index"]))
+        ordered_pairs = matched_pairs + forced_pairs
+
+        left_half = [pair[0]["layer"] for pair in ordered_pairs]
+        right_half = [pair[1]["layer"] for pair in reversed(ordered_pairs)]
+
+        new_order = left_half + ([center_entry["layer"]] if center_entry is not None else []) + right_half
+
+        for pos, layer in enumerate(new_order):
+            try:
+                layer.idx = pos
+            except Exception:
+                pass
+        return new_order
+
     # ---------------------------------------------------------------
     # Nova funcionalidade: reorganizar sequências por vizinhança
     def _reorganize_sequences_by_neighbors(self) -> None:
@@ -2088,42 +2232,6 @@ class VirtualStackingWindow(QtWidgets.QDialog):
         if project is None:
             return
 
-        # --- Salvar snapshot completo para Undo/Redo ---
-        # Salva estado de todas as camadas, células, simetria, etc.
-        import copy
-        snapshot = {
-            'layers': copy.deepcopy(self._layers),
-            'cells': copy.deepcopy(self._cells),
-            'symmetry_row_index': self._symmetry_row_index,
-            'project': copy.deepcopy(self._project),
-        }
-        class _VirtualStackingSnapshotCommand(QtGui.QUndoCommand):
-            def __init__(self, window, snapshot):
-                super().__init__('Virtual Stacking Snapshot')
-                self.window = window
-                self.snapshot = snapshot
-                self._restore_snapshot = None
-            def undo(self):
-                # Salva estado atual para refazer
-                self._restore_snapshot = {
-                    'layers': copy.deepcopy(self.window._layers),
-                    'cells': copy.deepcopy(self.window._cells),
-                    'symmetry_row_index': self.window._symmetry_row_index,
-                    'project': copy.deepcopy(self.window._project),
-                }
-                self.window._layers = copy.deepcopy(self.snapshot['layers'])
-                self.window._cells = copy.deepcopy(self.snapshot['cells'])
-                self.window._symmetry_row_index = self.snapshot['symmetry_row_index']
-                self.window._project = copy.deepcopy(self.snapshot['project'])
-                self.window._rebuild_view()
-            def redo(self):
-                if self._restore_snapshot:
-                    self.window._layers = copy.deepcopy(self._restore_snapshot['layers'])
-                    self.window._cells = copy.deepcopy(self._restore_snapshot['cells'])
-                    self.window._symmetry_row_index = self._restore_snapshot['symmetry_row_index']
-                    self.window._project = copy.deepcopy(self._restore_snapshot['project'])
-                    self.window._rebuild_view()
-        self.undo_stack.push(_VirtualStackingSnapshotCommand(self, snapshot))
         neighbors_map = getattr(project, "cell_neighbors", {}) or {}
         if not neighbors_map:
             QtWidgets.QMessageBox.information(
@@ -2132,6 +2240,8 @@ class VirtualStackingWindow(QtWidgets.QDialog):
                 "Defina vizinhos na interface Cell Neighbors antes de reorganizar.",
             )
             return
+
+        self._push_virtual_snapshot()
 
         # Trabalhamos sobre uma cópia dos laminados ativos na visualização atual
         cells = list(self._cells)
@@ -2215,69 +2325,80 @@ class VirtualStackingWindow(QtWidgets.QDialog):
                 if ori is not None:
                     oriented_cells.append(ci)
                     orientations[ci] = ori
-            # Regra especial: apenas uma célula orientada => não mover
+            # Regra especial: apenas uma c?lula orientada => n?o mover
             if len(oriented_cells) <= 1:
                 row += 1
                 continue
 
-            # Identifica células isoladas (sem vizinho de mesma orientação na mesma sequência)
-            isolated: list[int] = []
-            for ci in oriented_cells:
-                cell_id = cells[ci].cell_id
-                ori = orientations[ci]
-                mapping = neighbors_map.get(cell_id, {})
-                has_same = False
-                for neighbor in mapping.values():
-                    if not neighbor:
-                        continue
-                    # Encontra índice da coluna do vizinho
-                    try:
-                        n_idx = next(i for i, c in enumerate(cells) if c.cell_id == neighbor)
-                    except StopIteration:
-                        continue
-                    n_ori = orientation_at(cells[n_idx].laminate, row)
-                    if n_ori is not None and math.isclose(n_ori, ori, abs_tol=1e-6):
-                        has_same = True
-                        break
-                if not has_same:
-                    isolated.append(ci)
+            # Componentes conexas (grupos) com mesma orienta??o
+            components: list[list[int]] = []
+            visited: set[int] = set()
 
-            if not isolated:
+            def dfs(start: int) -> list[int]:
+                stack = [start]
+                group: list[int] = []
+                while stack:
+                    node = stack.pop()
+                    if node in visited:
+                        continue
+                    visited.add(node)
+                    group.append(node)
+                    cell_id = cells[node].cell_id
+                    ori_node = orientations[node]
+                    for neighbor in neighbors_map.get(cell_id, {}).values():
+                        if not neighbor:
+                            continue
+                        try:
+                            n_idx = next(i for i, c in enumerate(cells) if c.cell_id == neighbor)
+                        except StopIteration:
+                            continue
+                        if n_idx in visited or n_idx not in oriented_cells:
+                            continue
+                        n_ori = orientations.get(n_idx)
+                        if n_ori is not None and math.isclose(n_ori, ori_node, abs_tol=1e-6):
+                            stack.append(n_idx)
+                return group
+
+            for ci in oriented_cells:
+                if ci not in visited:
+                    components.append(dfs(ci))
+
+            if len(components) <= 1:
                 row += 1
                 continue
 
-            # Para cada célula isolada, cria uma nova sequência e move a camada
-            # Novas sequências são inseridas imediatamente abaixo da sequência analisada
-            for ci in isolated:
-                insert_empty_sequence_at(row)
-                # Move dados da célula isolada
-                lam = cells[ci].laminate
-                ori = orientation_at(lam, row)
-                mat = material_at(lam, row)
-                clear_layer(lam, row)
-                set_layer(lam, row + 1, ori, mat)
+            # Mant?m a primeira componente; move as demais para novas sequ?ncias abaixo.
+            extra_components = components[1:]
+            created = 0
+            for comp in extra_components:
+                insert_empty_sequence_at(row + created)
+                created += 1
+                target_row = row + created
 
-                # Tratar simetria: cria contraparte espelhada se existir plano
-                if symmetry_index is not None:
-                    # Índice espelhado relativo ao plano de simetria
-                    # Ex.: para pares, espelha em relação ao centro; aqui usamos simples cálculo
-                    dist = symmetry_index - row
-                    mirror_row = symmetry_index + dist + 1  # abaixo do plano
-                    # Garante existe a linha de espelho
-                    while mirror_row >= max_layers:
-                        insert_empty_sequence_at(max_layers - 1)
-                        max_layers += 1
-                    # Move também a camada espelhada do mesmo laminado
-                    m_ori = orientation_at(lam, mirror_row - 1)  # original posição antes da inserção
-                    m_mat = material_at(lam, mirror_row - 1)
-                    clear_layer(lam, mirror_row - 1)
-                    set_layer(lam, mirror_row, m_ori, m_mat)
+                for ci in comp:
+                    lam = cells[ci].laminate
+                    ori = orientation_at(lam, row)
+                    mat = material_at(lam, row)
+                    clear_layer(lam, row)
+                    set_layer(lam, target_row, ori, mat)
+
+                    if symmetry_index is not None and row <= symmetry_index:
+                        dist = symmetry_index - row
+                        mirror_src = symmetry_index + dist + 1
+                        mirror_dst = mirror_src + created
+                        while mirror_dst >= max_layers:
+                            insert_empty_sequence_at(max_layers - 1)
+                            max_layers += 1
+                        m_ori = orientation_at(lam, mirror_src)
+                        m_mat = material_at(lam, mirror_src)
+                        clear_layer(lam, mirror_src)
+                        set_layer(lam, mirror_dst, m_ori, m_mat)
 
                 max_layers += 1
                 if symmetry_index is not None and row <= symmetry_index:
                     symmetry_index += 1  # plano se desloca para baixo ao inserir linhas acima dele
 
-            # Avança para próxima sequência original (pula as recém-criadas)
+            # Avanca para proxima sequencia original (pula as recem-criadas)
             row += 1
 
         # Finaliza: reconstruir UI e avisar alterações
@@ -2311,6 +2432,56 @@ class VirtualStackingWindow(QtWidgets.QDialog):
             self.model.set_virtual_stacking(self._layers, self._cells, self._symmetry_row_index)
             self._rebuild_view()
             self._check_symmetry()
+
+    def _reorganize_by_symmetry(self) -> None:
+        """Reorder laminates to make their sequences explicitly symmetric."""
+        project = self._project
+        if project is None or not self._cells:
+            return
+
+        available_ids = {cell.cell_id for cell in self._cells}
+        selected_ids = {cid for cid in self._selected_cell_ids if cid in available_ids}
+        target_cells = [cell for cell in self._cells if not selected_ids or cell.cell_id in selected_ids]
+        if not target_cells:
+            return
+
+        planned: list[tuple[Laminado, StackingTableModel, list[Camada], bool]] = []
+        any_change = False
+        for cell in target_cells:
+            laminate = self._ensure_unique_laminate_for_cell(cell)
+            model = self._stacking_model_for(laminate)
+            if model is None:
+                continue
+            current_layers = model.layers()
+            new_layers = self._build_symmetry_layout(current_layers)
+            changed = [id(layer) for layer in new_layers] != [id(layer) for layer in current_layers]
+            planned.append((laminate, model, new_layers, changed))
+            any_change = any_change or changed
+
+        if not planned:
+            return
+        if not any_change:
+            QtWidgets.QMessageBox.information(
+                self,
+                "Reorganizar por Simetria",
+                "As sequencias ja estao organizadas por simetria.",
+            )
+            return
+
+        self._push_virtual_snapshot()
+        changed_names: list[str] = []
+        for laminate, model, new_layers, changed in planned:
+            if not changed:
+                continue
+            model.update_layers(new_layers)
+            laminate.camadas = model.layers()
+            self._after_laminate_changed(laminate)
+            changed_names.append(laminate.nome)
+
+        self._rebuild_view()
+        self._check_symmetry()
+        if changed_names:
+            self._notify_changes(changed_names)
 
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:  # noqa: N802
         super().closeEvent(event)
