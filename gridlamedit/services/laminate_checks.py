@@ -46,6 +46,15 @@ class LaminateSymmetryEvaluation:
 
 
 @dataclass
+class LaminateBalanceEvaluation:
+    """Detailed balance result for a single laminate following Classical Lamination Theory (CLT)."""
+
+    is_balanced: bool
+    unbalanced_angles: List[float] = field(default_factory=list)
+    angle_pairs: Dict[float, Tuple[int, int]] = field(default_factory=dict)  # angle -> (count_pos, count_neg)
+
+
+@dataclass
 class ChecksReport:
     """Aggregate for all laminate checks."""
 
@@ -259,6 +268,80 @@ def evaluate_symmetry_for_layers(layers: Sequence[Camada]) -> LaminateSymmetryEv
     )
 
 
+def evaluate_laminate_balance_clt(layers: Sequence[Camada]) -> LaminateBalanceEvaluation:
+    """
+    Evaluate laminate balance according to Classical Lamination Theory (CLT).
+    
+    A laminate is considered balanced if, for each orientation angle |θ| ≠ 0° and 90°,
+    the number (or sum of thicknesses) of +θ plies equals the number of −θ plies.
+    
+    Angles 0° and 90° are not required to be balanced - they can exist in any quantity.
+    
+    Args:
+        layers: Sequence of Camada objects with orientacao and ply_type fields
+    
+    Returns:
+        LaminateBalanceEvaluation with is_balanced flag and details of any unbalanced angles
+    """
+    # Group layers by absolute angle, counting +θ and −θ separately
+    angle_counts: Dict[float, Tuple[int, int]] = {}  # |angle| -> (count_positive, count_negative)
+    
+    for camada in layers:
+        # Skip non-structural plies (e.g., those marked as symmetry placeholders)
+        ply_type = normalize_ply_type_label(getattr(camada, "ply_type", DEFAULT_PLY_TYPE))
+        if ply_type == PLY_TYPE_OPTIONS[1]:  # Skip marked as "Don't consider"
+            continue
+        
+        orientation = getattr(camada, "orientacao", None)
+        if orientation is None:
+            continue
+        
+        try:
+            angle = normalize_angle(orientation)
+        except Exception:
+            continue
+        
+        # Skip 0° and 90° (they don't need to be balanced)
+        abs_angle = abs(angle)
+        if math.isclose(abs_angle, 0.0, abs_tol=1e-6) or math.isclose(abs_angle, 90.0, abs_tol=1e-6):
+            continue
+        
+        # Normalize angle to absolute value (0° to 90°)
+        normalized_abs_angle = abs_angle
+        while normalized_abs_angle > 90.0:
+            normalized_abs_angle -= 90.0
+        
+        # Ensure we're always in the 0-90 range for grouping
+        if normalized_abs_angle > 45.0:
+            normalized_abs_angle = 90.0 - normalized_abs_angle
+        
+        if normalized_abs_angle not in angle_counts:
+            angle_counts[normalized_abs_angle] = (0, 0)
+        
+        # Check sign of angle: positive or negative
+        if angle >= 0:
+            pos_count, neg_count = angle_counts[normalized_abs_angle]
+            angle_counts[normalized_abs_angle] = (pos_count + 1, neg_count)
+        else:
+            pos_count, neg_count = angle_counts[normalized_abs_angle]
+            angle_counts[normalized_abs_angle] = (pos_count, neg_count + 1)
+    
+    # Check if balanced: for each angle, +θ count must equal −θ count
+    is_balanced = True
+    unbalanced_angles: List[float] = []
+    
+    for abs_angle, (pos_count, neg_count) in angle_counts.items():
+        if not math.isclose(pos_count, neg_count, abs_tol=1e-6):
+            is_balanced = False
+            unbalanced_angles.append(abs_angle)
+    
+    return LaminateBalanceEvaluation(
+        is_balanced=is_balanced,
+        unbalanced_angles=sorted(unbalanced_angles),
+        angle_pairs=angle_counts,
+    )
+
+
 def _orientation_token(value: float | None) -> str:
     if value is None:
         return "none"
@@ -318,10 +401,12 @@ def _stacking_signature(layers: Sequence[Camada]) -> str:
 __all__ = [
     "SymmetryResult",
     "LaminateSymmetryEvaluation",
+    "LaminateBalanceEvaluation",
     "DuplicateGroup",
     "ChecksReport",
     "run_all_checks",
     "check_symmetry",
     "check_duplicates",
     "evaluate_symmetry_for_layers",
+    "evaluate_laminate_balance_clt",
 ]

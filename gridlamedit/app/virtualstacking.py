@@ -44,6 +44,7 @@ from gridlamedit.app.delegates import (
 from gridlamedit.services.laminate_checks import (
     LaminateSymmetryEvaluation,
     evaluate_symmetry_for_layers,
+    evaluate_laminate_balance_clt,
 )
 from gridlamedit.services.laminate_service import auto_name_for_laminate, sync_material_by_sequence
 from gridlamedit.core.paths import package_path
@@ -155,6 +156,68 @@ class _RemoveLayerCommand(QtGui.QUndoCommand):
         self._laminate.camadas = self._model.layers()
 
 
+class VirtualStackingHeaderView(WordWrapHeader):
+    """Extended header view with buttons to show orientation details."""
+    
+    orientation_info_requested = QtCore.Signal(int)  # Emits cell_index
+    
+    def __init__(self, orientation: QtCore.Qt.Orientation, parent=None):
+        super().__init__(orientation, parent)
+        self._laminate_column_offset = 5  # Will be set later
+        self.viewport().setMouseTracking(True)
+        self._hovered_section = -1
+    
+    def set_laminate_column_offset(self, offset: int) -> None:
+        """Set the offset where laminate columns start."""
+        self._laminate_column_offset = offset
+    
+    def mousePressEvent(self, event):
+        """Handle mouse press to detect click on info button area."""
+        logical_index = self.logicalIndexAt(event.pos())
+        
+        # Check if clicking in the info button area (right side of header cell)
+        if logical_index >= self._laminate_column_offset:
+            rect = self.sectionRect(logical_index)
+            button_area = QtCore.QRect(rect.right() - 30, rect.top(), 30, rect.height())
+            
+            if button_area.contains(event.pos()):
+                print(f"[DEBUG] Info button clicked for section {logical_index}")
+                cell_index = logical_index - self._laminate_column_offset
+                self.orientation_info_requested.emit(cell_index)
+                return
+        
+        # Otherwise, handle normally
+        super().mousePressEvent(event)
+    
+    def paintSection(self, painter, rect, logicalIndex):
+        """Override to paint section and draw info button indicator for laminate columns."""
+        # Paint the standard header first
+        super().paintSection(painter, rect, logicalIndex)
+        
+        # Draw info button indicator for laminate columns
+        if self.orientation() == QtCore.Qt.Horizontal and logicalIndex >= self._laminate_column_offset:
+            # Draw a small button indicator in the top-right
+            button_size = 20
+            button_x = rect.right() - button_size - 3
+            button_y = rect.top() + (rect.height() - button_size) // 2
+            button_rect = QtCore.QRect(button_x, button_y, button_size, button_size)
+            
+            # Draw button background
+            painter.save()
+            painter.setBrush(QtGui.QBrush(QtGui.QColor(200, 220, 255)))
+            painter.setPen(QtGui.QPen(QtGui.QColor(100, 150, 200), 1))
+            painter.drawRoundedRect(button_rect, 3, 3)
+            
+            # Draw "i" text
+            painter.setPen(QtGui.QPen(QtGui.QColor(0, 0, 0)))
+            font = painter.font()
+            font.setPointSize(8)
+            font.setBold(True)
+            painter.setFont(font)
+            painter.drawText(button_rect, QtCore.Qt.AlignCenter, "i")
+            painter.restore()
+
+
 class VirtualStackingModel(QtCore.QAbstractTableModel):
     """Qt model responsible for exposing Virtual Stacking data."""
 
@@ -240,16 +303,12 @@ class VirtualStackingModel(QtCore.QAbstractTableModel):
                 cell = self.cells[cell_index]
                 laminate = cell.laminate
                 lam_name = (getattr(laminate, "nome", "") or "").strip() or cell.cell_id
-                tag_text = (getattr(laminate, "tag", "") or "").strip()
-                display_name = lam_name or cell.cell_id
-                if tag_text:
-                    tag_suffix = f"({tag_text})"
-                    if tag_suffix not in display_name:
-                        display_name = f"{display_name}{tag_suffix}"
-                label = f"#\n{cell.cell_id} | {display_name}"
+                # Display format: C2 | L7 on first line, Total: X on second line
+                label = f"{cell.cell_id} | {lam_name}"
                 if 0 <= cell_index < len(self._column_summaries):
                     summary = self._column_summaries[cell_index].strip()
                     if summary:
+                        # Summary contains "Total: X" - append it on a new line
                         label = f"{label}\n{summary}"
                 return label
         elif orientation == QtCore.Qt.Vertical:
@@ -771,8 +830,10 @@ class VirtualStackingWindow(QtWidgets.QDialog):
         )
         self.table = QtWidgets.QTableView(self)
         self.table.setModel(self.model)
-        header = WordWrapHeader(QtCore.Qt.Horizontal, self.table)
+        header = VirtualStackingHeaderView(QtCore.Qt.Horizontal, self.table)
         header.setDefaultAlignment(QtCore.Qt.AlignCenter)
+        header.set_laminate_column_offset(self.model.LAMINATE_COLUMN_OFFSET)
+        header.orientation_info_requested.connect(self._on_orientation_button_clicked)
         self.table.setHorizontalHeader(header)
         header.setSectionResizeMode(QtWidgets.QHeaderView.Interactive)
         header.setSectionsMovable(True)
@@ -989,6 +1050,29 @@ class VirtualStackingWindow(QtWidgets.QDialog):
         else:
             self._selected_cell_ids = {cell_id}
         self._apply_column_selection()
+
+    def _on_orientation_button_clicked(self, cell_index: int) -> None:
+        """Handle click on the orientation info button in header."""
+        print(f"[DEBUG] Button clicked! cell_index={cell_index}, total_cells={len(self._cells)}")
+        if not (0 <= cell_index < len(self._cells)):
+            print(f"[DEBUG] Invalid cell index!")
+            return
+        
+        header = self.table.horizontalHeader()
+        print(f"[DEBUG] Header type: {type(header)}")
+        if isinstance(header, VirtualStackingHeaderView):
+            # Get the global position of the button
+            logical_index = cell_index + self.model.LAMINATE_COLUMN_OFFSET
+            rect = header.sectionRect(logical_index)
+            
+            # Calculate global position for menu
+            global_pos = header.mapToGlobal(QtCore.QPoint(rect.right() - 25, rect.bottom()))
+            print(f"[DEBUG] Showing menu at position {global_pos}")
+            
+            # Show the menu
+            self.show_orientation_menu(cell_index, global_pos)
+        else:
+            print(f"[DEBUG] Header is not VirtualStackingHeaderView!")
 
     def _selected_column_indexes(self) -> list[int]:
         columns: list[int] = []
@@ -1665,27 +1749,109 @@ class VirtualStackingWindow(QtWidgets.QDialog):
         return rows
 
     def _summary_for_laminate(self, laminate: Optional[Laminado]) -> str:
+        """Return only the total layer count in the format 'Total: X' for the header."""
         if laminate is None:
             return ""
         layers = getattr(laminate, "camadas", [])
-        orientations = Counter()
         oriented_count = 0
         for camada in layers:
             token = self._orientation_token(getattr(camada, "orientacao", None))
             if token is None:
                 continue
             oriented_count += 1
+        return f"Total: {oriented_count}"
+
+    def _get_orientation_summary_for_laminate(self, laminate: Optional[Laminado]) -> str:
+        """
+        Build a detailed orientation summary for a laminate.
+        Returns text with orientation sequence and totals by angle.
+        """
+        if laminate is None:
+            return ""
+        
+        layers = getattr(laminate, "camadas", [])
+        if not layers:
+            return "No layers"
+        
+        # Collect orientation sequence and counts
+        orientation_sequence = []
+        orientation_counts: Counter = Counter()
+        
+        for camada in layers:
+            token = self._orientation_token(getattr(camada, "orientacao", None))
+            if token is None:
+                continue
             label = format_orientation_value(token)
-            orientations[label] += 1
-        parts = [f"Total: {oriented_count}"]
-        if orientations:
-            ordered = sorted(
-                orientations.items(),
-                key=lambda pair: self._orientation_token(pair[0]) or 0.0,
-            )
-            ori_parts = [f"{label} [{count}]" for label, count in ordered]
-            parts.extend(ori_parts)
-        return "\n".join(parts)
+            orientation_sequence.append(label)
+            orientation_counts[label] += 1
+        
+        if not orientation_sequence:
+            return "No oriented layers"
+        
+        # Build summary text
+        lines = []
+        lines.append("Orientation Sequence:")
+        lines.append(" → ".join(orientation_sequence))
+        lines.append("")
+        lines.append("Orientation Totals:")
+        
+        # Sort by angle value for consistent display
+        sorted_orientations = sorted(
+            orientation_counts.items(),
+            key=lambda pair: self._orientation_token(pair[0]) or 0.0,
+        )
+        
+        for label, count in sorted_orientations:
+            lines.append(f"  {label}: {count} layer(s)")
+        
+        return "\n".join(lines)
+
+    def show_orientation_menu(self, cell_index: int, button_pos: QtCore.QPoint) -> None:
+        """
+        Show a dialog with orientation details for a specific laminate column.
+        
+        Args:
+            cell_index: Index into self._cells
+            button_pos: Global position where to show the dialog
+        """
+        print(f"[DEBUG] show_orientation_menu called with cell_index={cell_index}")
+        if not (0 <= cell_index < len(self._cells)):
+            print(f"[DEBUG] Invalid cell index in show_orientation_menu!")
+            return
+        
+        cell = self._cells[cell_index]
+        laminate = cell.laminate
+        print(f"[DEBUG] Cell: {cell.cell_id}, Laminate: {laminate.nome if hasattr(laminate, 'nome') else 'N/A'}")
+        
+        # Get summary text
+        summary_text = self._get_orientation_summary_for_laminate(laminate)
+        print(f"[DEBUG] Summary text length: {len(summary_text)}")
+        
+        # Create a dialog for better text display with newlines
+        dialog = QtWidgets.QDialog(self)
+        dialog.setWindowTitle(f"Orientations: {cell.cell_id}")
+        dialog.setMinimumWidth(400)
+        dialog.setMinimumHeight(300)
+        
+        layout = QtWidgets.QVBoxLayout(dialog)
+        
+        # Add summary text in a text edit (read-only)
+        text_edit = QtWidgets.QTextEdit()
+        text_edit.setPlainText(summary_text)
+        text_edit.setReadOnly(True)
+        layout.addWidget(text_edit)
+        
+        # Add close button
+        close_button = QtWidgets.QPushButton("Close")
+        close_button.clicked.connect(dialog.accept)
+        layout.addWidget(close_button)
+        
+        # Position dialog near the button position
+        screen_pos = button_pos
+        dialog.move(screen_pos.x() - 200, screen_pos.y() + 20)
+        print(f"[DEBUG] Showing dialog at {screen_pos}")
+        dialog.exec()
+        print(f"[DEBUG] Dialog closed")
 
     def _update_summary_row(self) -> None:
         # Gera resumos e injeta no cabeçalho das colunas de laminados.
@@ -1769,7 +1935,7 @@ class VirtualStackingWindow(QtWidgets.QDialog):
 
     def _check_symmetry(self) -> None:
         """
-        Check for unbalanced columns.
+        Check for unbalanced columns using Classical Lamination Theory (CLT) criterion.
         Note: Green borders for symmetric central layers are now controlled
         by the explicit "Analisar Simetria" button, not by this method.
         Red cells are no longer used in symmetry analysis.
@@ -1780,17 +1946,14 @@ class VirtualStackingWindow(QtWidgets.QDialog):
 
         for col, cell in enumerate(self._cells):
             laminate = cell.laminate
-            evaluation = evaluate_symmetry_for_layers(getattr(laminate, "camadas", []))
+            layers = getattr(laminate, "camadas", [])
+            evaluation = evaluate_symmetry_for_layers(layers)
             evaluations[id(laminate)] = evaluation
 
-            # Check for unbalanced columns
-            if evaluation.centers:
-                if self._is_unbalanced(
-                    getattr(laminate, "camadas", []),
-                    evaluation.structural_rows,
-                    evaluation.centers,
-                ):
-                    unbalanced_columns.add(col + self.model.LAMINATE_COLUMN_OFFSET)
+            # Check for unbalanced columns using CLT criterion
+            balance_evaluation = evaluate_laminate_balance_clt(layers)
+            if not balance_evaluation.is_balanced:
+                unbalanced_columns.add(col + self.model.LAMINATE_COLUMN_OFFSET)
 
         self._symmetry_evaluations = evaluations
         # No red cells - only unbalanced columns
@@ -1803,27 +1966,12 @@ class VirtualStackingWindow(QtWidgets.QDialog):
         structural_rows: list[int],
         center_rows: list[int],
     ) -> bool:
-        if not structural_rows or not center_rows:
-            return False
-        center_min = min(center_rows)
-        center_set = set(center_rows)
-        pos45 = 0
-        neg45 = 0
-        for row in structural_rows:
-            if row in center_set:
-                continue
-            if row > center_min:
-                continue
-            if not (0 <= row < len(layers)):
-                continue
-            orientation = self._orientation_token(getattr(layers[row], "orientacao", None))
-            if orientation is None:
-                continue
-            if math.isclose(orientation, 45.0, abs_tol=1e-6):
-                pos45 += 1
-            elif math.isclose(orientation, -45.0, abs_tol=1e-6):
-                neg45 += 1
-        return pos45 != neg45
+        """
+        Deprecated: Use evaluate_laminate_balance_clt() instead.
+        Kept for backward compatibility.
+        """
+        balance_evaluation = evaluate_laminate_balance_clt(layers)
+        return not balance_evaluation.is_balanced
 
     def _targets_for_insertion(
         self, index: Optional[QtCore.QModelIndex] = None
@@ -2463,12 +2611,9 @@ class VirtualStackingWindow(QtWidgets.QDialog):
         Analisa a simetria de cada coluna (laminado).
         
         Nova lógica:
-        - Compara camadas das extremidades (topo vs fundo) em direção ao centro
-        - Ignora automaticamente camadas Empty (sem orientação) avançando os índices
-        - Quando ambas as pontas têm orientação válida, compara orientação e material
-        - Se encontrar diferença, marca como assimétrico
-        - Se chegar ao centro sem diferenças, marca como simétrico
-        - Marca as camadas centrais com borda verde se simétrico
+        - Utiliza a função evaluate_symmetry_for_layers() para determinar o eixo de simetria
+        - Marca as células/camadas que pertencem ao eixo de simetria com borda verde
+        - Independentemente da posição no laminado (não precisa estar no centro estrutural)
         """
         if self._project is None or not self._cells:
             return
@@ -2484,89 +2629,17 @@ class VirtualStackingWindow(QtWidgets.QDialog):
             if not layers:
                 continue
             
-            # Inicializar índices para comparação das extremidades
-            top_index = 0
-            bottom_index = len(layers) - 1
-            is_symmetric = True
+            # Usar a função de simetria CLT para obter a avaliação
+            evaluation = evaluate_symmetry_for_layers(layers)
             
-            # Comparar das extremidades para o centro
-            while top_index < bottom_index:
-                # Proteção contra loop infinito - se ambos os índices ultrapassam limite
-                if top_index >= len(layers):
-                    break
-                if bottom_index < 0:
-                    break
-                
-                # Obter orientação das camadas atuais
-                top_orientation = self._get_layer_orientation(layers, top_index)
-                bottom_orientation = self._get_layer_orientation(layers, bottom_index)
-                
-                # Se camada do topo é Empty, pular para a próxima
-                if top_orientation is None:
-                    top_index += 1
-                    continue
-                
-                # Se camada do fundo é Empty, pular para a anterior
-                if bottom_orientation is None:
-                    bottom_index -= 1
-                    continue
-                
-                # Ambas as camadas têm orientação válida, comparar
-                # Comparar orientação
-                if top_orientation != bottom_orientation:
-                    is_symmetric = False
-                    break
-                
-                # Comparar material
-                top_material = self._get_layer_material(layers, top_index)
-                bottom_material = self._get_layer_material(layers, bottom_index)
-                
-                if top_material != bottom_material:
-                    is_symmetric = False
-                    break
-                
-                # Camadas são iguais, avançar para o centro
-                top_index += 1
-                bottom_index -= 1
-            
-            # Se simétrico, identificar e marcar as camadas centrais com borda verde
-            if is_symmetric:
+            # Se é simétrico, marcar as camadas de simetria com borda verde
+            if evaluation.is_symmetric and evaluation.centers:
                 column_idx = cell_idx + self.model.LAMINATE_COLUMN_OFFSET
                 
-                # Coletar apenas índices de camadas com orientação definida
-                indices_with_orientation = []
-                for idx, layer in enumerate(layers):
-                    orientation = self._get_layer_orientation(layers, idx)
-                    if orientation is not None:
-                        indices_with_orientation.append(idx)
-                
-                # Se há camadas com orientação, identificar as centrais
-                if indices_with_orientation:
-                    num_oriented = len(indices_with_orientation)
-                    if num_oriented % 2 == 1:
-                        # Ímpar: 1 camada central
-                        center_pos = num_oriented // 2
-                        center_indices = [indices_with_orientation[center_pos]]
-                    else:
-                        # Par: 2 camadas centrais
-                        center_left_pos = (num_oriented // 2) - 1
-                        center_right_pos = num_oriented // 2
-                        center_indices = [
-                            indices_with_orientation[center_left_pos],
-                            indices_with_orientation[center_right_pos]
-                        ]
-                    
-                    # Verificar se todas as camadas centrais estão dentro das sequências de simetria (salmon)
-                    # Se ao menos uma não estiver, considerar como assimétrico
-                    symmetry_rows = self.model.symmetry_rows or set()
-                    all_centers_in_symmetry = all(
-                        center_row in symmetry_rows for center_row in center_indices
-                    )
-                    
-                    # Só marcar com borda verde se todas as centrais estiverem nas sequências de simetria
-                    if all_centers_in_symmetry:
-                        for center_row in center_indices:
-                            self.model._symmetric_cells.add((center_row, column_idx))
+                # Marcar todas as camadas que representam o eixo de simetria
+                # com borda verde, independentemente da sua posição no laminado
+                for center_row in evaluation.centers:
+                    self.model._symmetric_cells.add((center_row, column_idx))
         
         # Atualizar a visualização para mostrar as bordas verdes
         if self.model.layers:
@@ -2576,45 +2649,6 @@ class VirtualStackingWindow(QtWidgets.QDialog):
                 self.model.columnCount() - 1
             )
             self.model.dataChanged.emit(top_left, bottom_right, [ORIENTATION_SYMMETRY_ROLE])
-
-    def _get_layer_orientation(self, layers: list[Camada], index: int) -> Optional[float]:
-        """
-        Obtém a orientação normalizada de uma camada.
-        Retorna None para camadas vazias (Empty).
-        """
-        if index < 0 or index >= len(layers):
-            return None
-        
-        layer = layers[index]
-        orientation = getattr(layer, "orientacao", None)
-        
-        if orientation is None or orientation == "" or str(orientation).strip().lower() == "empty":
-            return None
-        
-        try:
-            # Normalizar o ângulo
-            return normalize_angle(orientation)
-        except Exception:
-            return None
-
-    def _get_layer_material(self, layers: list[Camada], index: int) -> str:
-        """
-        Obtém o material normalizado de uma camada.
-        """
-        if index < 0 or index >= len(layers):
-            return ""
-        
-        layer = layers[index]
-        material = getattr(layer, "material", "")
-        
-        # Normalizar material (remover espaços extras, converter para minúsculas)
-        if material is None:
-            return ""
-        
-        material_str = str(material).strip()
-        # Colapsar múltiplos espaços em um único espaço
-        material_normalized = " ".join(material_str.split())
-        return material_normalized.lower()
 
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:  # noqa: N802
         super().closeEvent(event)
