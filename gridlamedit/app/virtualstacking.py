@@ -1307,13 +1307,10 @@ class VirtualStackingWindow(QtWidgets.QDialog):
                 )
             )
 
-        symmetry_rows: set[int] = set()
         for lam in laminates:
             evaluation = evaluate_symmetry_for_layers(getattr(lam, "camadas", []))
             evaluations[id(lam)] = evaluation
-            symmetry_rows.update(evaluation.centers)
-        if not symmetry_rows:
-            symmetry_rows = self._compute_symmetry_axis_from_layers(layers)
+        symmetry_rows = self._compute_symmetry_axis_from_layers(layers)
         return layers, cells, symmetry_rows, evaluations
 
     def _refresh_stacking_models(self, cells: list[VirtualStackingCell]) -> None:
@@ -1780,13 +1777,11 @@ class VirtualStackingWindow(QtWidgets.QDialog):
         # No more red cells for symmetry analysis
         unbalanced_columns: set[int] = set()
         evaluations: dict[int, LaminateSymmetryEvaluation] = {}
-        centers_union: set[int] = set()
 
         for col, cell in enumerate(self._cells):
             laminate = cell.laminate
             evaluation = evaluate_symmetry_for_layers(getattr(laminate, "camadas", []))
             evaluations[id(laminate)] = evaluation
-            centers_union.update(evaluation.centers)
 
             # Check for unbalanced columns
             if evaluation.centers:
@@ -1798,7 +1793,6 @@ class VirtualStackingWindow(QtWidgets.QDialog):
                     unbalanced_columns.add(col + self.model.LAMINATE_COLUMN_OFFSET)
 
         self._symmetry_evaluations = evaluations
-        self._update_symmetry_rows_from_union(centers_union)
         # No red cells - only unbalanced columns
         self.model.set_highlights(set(), set())
         self.model.set_unbalanced_columns(unbalanced_columns)
@@ -1948,22 +1942,22 @@ class VirtualStackingWindow(QtWidgets.QDialog):
         self._after_laminate_changed(laminate)
         self._notify_changes([laminate.nome])
 
-    def _add_sequence_below_row(self, row: int) -> None:
+    def _add_sequence_at_position(self, row: int, insert_below: bool) -> None:
         if row < 0 or not self._cells:
             return
         self._push_virtual_snapshot()
         changed: list[str] = []
+        insert_at = row + (1 if insert_below else 0)
         for cell in self._cells:
             laminate = self._ensure_unique_laminate_for_cell(cell)
             stacking_model = self._stacking_model_for(laminate)
             if stacking_model is None:
                 continue
-            # Garante que a linha alvo existe antes de inserir abaixo.
             try:
                 self.model._ensure_row_exists(stacking_model, row, laminate)
             except Exception:
                 pass
-            insert_at = min(row + 1, stacking_model.rowCount())
+            target_row = max(0, min(insert_at, stacking_model.rowCount()))
             new_layer = Camada(
                 idx=0,
                 material="",
@@ -1973,12 +1967,18 @@ class VirtualStackingWindow(QtWidgets.QDialog):
                 ply_type=DEFAULT_PLY_TYPE,
                 rosette=DEFAULT_ROSETTE_LABEL,
             )
-            stacking_model.insert_layer(insert_at, new_layer)
+            stacking_model.insert_layer(target_row, new_layer)
             laminate.camadas = stacking_model.layers()
             self._after_laminate_changed(laminate)
             changed.append(laminate.nome)
         if changed:
             self._notify_changes(changed)
+
+    def _add_sequence_above_row(self, row: int) -> None:
+        self._add_sequence_at_position(row, insert_below=False)
+
+    def _add_sequence_below_row(self, row: int) -> None:
+        self._add_sequence_at_position(row, insert_below=True)
 
     def _delete_sequence_row(self, row: int) -> None:
         if row < 0 or not self._cells:
@@ -2006,40 +2006,44 @@ class VirtualStackingWindow(QtWidgets.QDialog):
         if changed:
             self._notify_changes(changed)
 
+    def _insert_layer_for_cell(self, index: QtCore.QModelIndex, insert_at: int) -> None:
+        if not index.isValid() or index.column() < self.model.LAMINATE_COLUMN_OFFSET:
+            return
+        cell_idx = index.column() - self.model.LAMINATE_COLUMN_OFFSET
+        if not (0 <= cell_idx < len(self._cells)):
+            return
+        current_cell = self._cells[cell_idx]
+        laminate = self._ensure_unique_laminate_for_cell(current_cell)
+        stacking_model = self._stacking_model_for(laminate)
+        if stacking_model is None:
+            return
+        target_pos = max(0, min(insert_at, stacking_model.rowCount()))
+        default_material = self._most_used_material() or ""
+        command = _InsertLayerCommand(
+            stacking_model,
+            laminate,
+            [target_pos],
+            default_material=default_material,
+        )
+        self._execute_command(command)
+        laminate.camadas = stacking_model.layers()
+        try:
+            self.model._auto_fill_material_if_missing(laminate, stacking_model, target_pos)
+        except Exception:
+            pass
+        self._after_laminate_changed(laminate)
+        self._notify_changes([laminate.nome])
+
+    def _add_layer_above(self, index: QtCore.QModelIndex) -> None:
+        self._insert_layer_for_cell(index, index.row())
+
+    def _add_layer_below(self, index: QtCore.QModelIndex) -> None:
+        self._insert_layer_for_cell(index, index.row() + 1)
+
     def _insert_layer(self, index: Optional[QtCore.QModelIndex] = None) -> None:
         # If a specific cell was clicked, handle that single insertion directly.
         if index is not None and index.isValid() and index.column() >= self.model.LAMINATE_COLUMN_OFFSET:
-            # Ensure this cell has a unique laminate before inserting the layer
-            # to prevent affecting other cells that might share the same laminate
-            cell_idx = index.column() - self.model.LAMINATE_COLUMN_OFFSET
-            if 0 <= cell_idx < len(self._cells):
-                current_cell = self._cells[cell_idx]
-                laminate = self._ensure_unique_laminate_for_cell(current_cell)
-                stacking_model = self._stacking_model_for(laminate)
-                if stacking_model is None:
-                    return
-            else:
-                entry = self._stacking_entry_for_index(index)
-                if entry is None:
-                    return
-                laminate, stacking_model, row = entry
-            
-            insert_at = max(0, min(index.row(), stacking_model.rowCount()))
-            default_material = self._most_used_material() or ""
-            command = _InsertLayerCommand(
-                stacking_model,
-                laminate,
-                [insert_at],
-                default_material=default_material,
-            )
-            self._execute_command(command)
-            laminate.camadas = stacking_model.layers()
-            try:
-                self.model._auto_fill_material_if_missing(laminate, stacking_model, insert_at)
-            except Exception:
-                pass
-            self._after_laminate_changed(laminate)
-            self._notify_changes([laminate.nome])
+            self._insert_layer_for_cell(index, index.row())
             return
 
         targets = self._targets_for_insertion(index)
@@ -2114,24 +2118,39 @@ class VirtualStackingWindow(QtWidgets.QDialog):
             return
         self.table.setCurrentIndex(index)
         menu = QtWidgets.QMenu(self)
-        add_sequence_action = menu.addAction("Adicionar nova sequência")
+        add_sequence_above_action = menu.addAction(
+            "Adicionar sequência acima da sequência selecionada"
+        )
+        add_sequence_below_action = menu.addAction(
+            "Adicionar sequência abaixo da sequência selecionada"
+        )
         delete_sequence_action = menu.addAction("Deletar sequência selecionada")
 
         is_sequence_column = index.column() < self.model.LAMINATE_COLUMN_OFFSET
         if not is_sequence_column:
             menu.addSeparator()
-            above_action = menu.addAction("Adicionar camada")
+            add_layer_above_action = menu.addAction(
+                "Adicionar camada acima da camada selecionada"
+            )
+            add_layer_below_action = menu.addAction(
+                "Adicionar camada abaixo da camada selecionada"
+            )
+            menu.addSeparator()
             edit_action = menu.addAction("Editar orientacao...")
             clear_action = menu.addAction("Limpar orientacao")
             remove_action = menu.addAction("Remover camada")
         chosen = menu.exec(self.table.viewport().mapToGlobal(pos))
-        if chosen == add_sequence_action:
+        if chosen == add_sequence_above_action:
+            self._add_sequence_above_row(index.row())
+        elif chosen == add_sequence_below_action:
             self._add_sequence_below_row(index.row())
         elif chosen == delete_sequence_action:
             self._delete_sequence_row(index.row())
         elif not is_sequence_column:
-            if chosen == above_action:
-                self._insert_layer(index=index)
+            if chosen == add_layer_above_action:
+                self._add_layer_above(index)
+            elif chosen == add_layer_below_action:
+                self._add_layer_below(index)
             elif chosen == edit_action:
                 self._edit_orientation_at(index)
             elif chosen == clear_action:
@@ -2153,16 +2172,13 @@ class VirtualStackingWindow(QtWidgets.QDialog):
         return None
 
     def _compute_symmetry_axis_from_layers(self, layers: list[VirtualStackingLayer]) -> set[int]:
-        considered_rows = self._considered_sequence_rows_from_layers(layers)
-        count = len(considered_rows)
-        if count == 0:
+        total = len(layers)
+        if total <= 0:
             return set()
-        if count % 2 == 1:
-            mid = considered_rows[count // 2]
-            return {mid}
-        mid1 = considered_rows[count // 2 - 1]
-        mid2 = considered_rows[count // 2]
-        return {mid1, mid2}
+        if total % 2 == 1:
+            return {total // 2}
+        lower = total // 2 - 1
+        return {lower, lower + 1}
 
     def _compute_sorted_cell_ids(self, project: Optional[GridModel]) -> list[str]:
         """
