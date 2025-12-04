@@ -188,10 +188,9 @@ def sync_material_by_sequence(
     ] = None,
 ) -> list[Laminado]:
     """
-    Apply ``material`` to the same ``row`` across all laminates that have orientation.
+    Apply ``material`` to the same ``row`` across all laminates.
 
-    Laminates with empty orientation on that row keep the material empty. Returns the
-    list of laminates that were changed.
+    Returns the list of laminates that were changed.
     """
 
     if model is None or row < 0:
@@ -204,9 +203,8 @@ def sync_material_by_sequence(
         if row >= len(layers):
             continue
         target_layer = layers[row]
-        orientation = getattr(target_layer, "orientacao", None)
-        target_value = new_material if orientation is not None else ""
-        if getattr(target_layer, "material", "") == target_value:
+        target_value = new_material
+        if str(getattr(target_layer, "material", "") or "").strip() == target_value:
             continue
 
         stacking_model = stacking_model_provider(laminate) if stacking_model_provider else None

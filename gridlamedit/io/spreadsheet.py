@@ -888,8 +888,6 @@ class StackingTableModel(QAbstractTableModel):
                 setattr(camada, "_auto_symmetry_backup", normalized_type)
         elif column == self.COL_MATERIAL:
             new_material = str(value or "").strip()
-            if new_material and camada.orientacao is None:
-                return False
             camada.material = new_material
             material_lower = new_material.lower()
             if material_lower and "foil" in material_lower:
@@ -927,9 +925,6 @@ class StackingTableModel(QAbstractTableModel):
                             return False
             current_ply_type = normalize_ply_type_label(getattr(camada, "ply_type", DEFAULT_PLY_TYPE))
             if camada.orientacao is None:
-                if camada.material:
-                    camada.material = ""
-                    extra_columns.append(self.COL_MATERIAL)
                 if manual_symmetry and current_ply_type == PLY_TYPE_OPTIONS[1]:
                     pass
                 else:
@@ -1029,8 +1024,8 @@ class StackingTableModel(QAbstractTableModel):
         camada.ply_label = str(getattr(camada, "ply_label", "") or "")
         rosette_value = str(getattr(camada, "rosette", "") or "").strip()
         camada.rosette = rosette_value or DEFAULT_ROSETTE_LABEL
-        if getattr(camada, "orientacao", None) is None:
-            camada.material = ""
+        material_value = getattr(camada, "material", "")
+        camada.material = "" if material_value is None else str(material_value)
         if hasattr(camada, "nao_estrutural"):
             try:
                 delattr(camada, "nao_estrutural")

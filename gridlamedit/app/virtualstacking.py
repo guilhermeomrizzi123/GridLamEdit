@@ -81,7 +81,7 @@ class _InsertLayerCommand(QtGui.QUndoCommand):
         laminate: Laminado,
         positions: list[int],
         default_material: str = "",
-        default_orientation: float = 0.0,
+        default_orientation: float | None = None,
     ) -> None:
         super().__init__("Inserir camada")
         self._model = model
@@ -438,7 +438,7 @@ class VirtualStackingModel(QtCore.QAbstractTableModel):
                     Camada(
                         idx=0,
                         material=default_material,
-                        orientacao=0.0,
+                        orientacao=None,
                         ativo=True,
                         simetria=False,
                         ply_type=DEFAULT_PLY_TYPE,
@@ -529,13 +529,6 @@ class VirtualStackingModel(QtCore.QAbstractTableModel):
                     continue
                 layers = self._ensure_row_exists(stacking_model, row, laminate)
                 if row >= len(layers):
-                    continue
-                target_layer = layers[row]
-                if target_layer.orientacao is None:
-                    if target_layer.material:
-                        idx = stacking_model.index(row, StackingTableModel.COL_MATERIAL)
-                        if idx.isValid() and stacking_model.setData(idx, "", QtCore.Qt.EditRole):
-                            changed.append(laminate)
                     continue
                 idx = stacking_model.index(row, StackingTableModel.COL_MATERIAL)
                 if idx.isValid() and stacking_model.setData(idx, new_material, QtCore.Qt.EditRole):
@@ -2052,7 +2045,6 @@ class VirtualStackingWindow(QtWidgets.QDialog):
         index = self.table.indexAt(pos)
         if (
             not index.isValid()
-            or index.column() < self.model.LAMINATE_COLUMN_OFFSET
             or index.row() < 0
             or index.row() >= self.model.rowCount()
         ):
@@ -2061,24 +2053,28 @@ class VirtualStackingWindow(QtWidgets.QDialog):
         menu = QtWidgets.QMenu(self)
         add_sequence_action = menu.addAction("Adicionar nova sequência")
         delete_sequence_action = menu.addAction("Deletar sequência selecionada")
-        menu.addSeparator()
-        above_action = menu.addAction("Adicionar camada")
-        edit_action = menu.addAction("Editar orientacao...")
-        clear_action = menu.addAction("Limpar orientacao")
-        remove_action = menu.addAction("Remover camada")
+
+        is_sequence_column = index.column() < self.model.LAMINATE_COLUMN_OFFSET
+        if not is_sequence_column:
+            menu.addSeparator()
+            above_action = menu.addAction("Adicionar camada")
+            edit_action = menu.addAction("Editar orientacao...")
+            clear_action = menu.addAction("Limpar orientacao")
+            remove_action = menu.addAction("Remover camada")
         chosen = menu.exec(self.table.viewport().mapToGlobal(pos))
         if chosen == add_sequence_action:
             self._add_sequence_below_row(index.row())
         elif chosen == delete_sequence_action:
             self._delete_sequence_row(index.row())
-        elif chosen == above_action:
-            self._insert_layer(index=index)
-        elif chosen == edit_action:
-            self._edit_orientation_at(index)
-        elif chosen == clear_action:
-            self._clear_orientation_at(index)
-        elif chosen == remove_action:
-            self._remove_layer_at(index)
+        elif not is_sequence_column:
+            if chosen == above_action:
+                self._insert_layer(index=index)
+            elif chosen == edit_action:
+                self._edit_orientation_at(index)
+            elif chosen == clear_action:
+                self._clear_orientation_at(index)
+            elif chosen == remove_action:
+                self._remove_layer_at(index)
 
     def _laminate_for_cell(
         self, model: GridModel, cell_id: str

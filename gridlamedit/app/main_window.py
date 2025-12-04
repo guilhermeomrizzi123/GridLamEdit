@@ -7,6 +7,7 @@ import copy
 import os
 import re
 import secrets
+import math
 from collections import Counter, OrderedDict
 from dataclasses import dataclass
 from enum import Enum, auto
@@ -796,7 +797,9 @@ class MainWindow(QMainWindow):
         else:
             laminate = self._current_laminate_instance()
         self._apply_auto_rename_if_needed(laminate)
+        self.check_symmetry()
         self._refresh_virtual_stacking_view()
+        self.check_symmetry()
 
     def _on_virtual_stacking_changed(self, laminate_names: list[str]) -> None:
         if self._grid_model is None:
@@ -1286,14 +1289,6 @@ class MainWindow(QMainWindow):
             self._on_move_down_clicked,
             "Mover camada para baixo",
             QStyle.SP_ArrowDown,
-        )
-
-        self.symmetry_button = make_button(
-            "symmetry.svg",
-            "Verificar simetria",
-            self.check_symmetry,
-            "Verificar simetria",
-            QStyle.SP_BrowserReload,
         )
 
         self.delete_layers_button = make_button(
@@ -2384,202 +2379,144 @@ class MainWindow(QMainWindow):
         if self.statusBar():
             self.statusBar().showMessage("TODO: implementar acao.", 2000)
 
-    def check_symmetry(self) -> None:
-        """Verifica se o laminado atual e simetrico considerando apenas camadas \"Considerar\"."""
+    def _stacking_orientation_token(self, value: object) -> Optional[float]:
+        if value is None:
+            return None
+        try:
+            return normalize_angle(value)
+        except Exception:
+            try:
+                return normalize_angle(str(value))
+            except Exception:
+                return None
+
+    def _stacking_orientations_match(
+        self, left: Optional[float], right: Optional[float]
+    ) -> bool:
+        if left is None and right is None:
+            return True
+        if left is None or right is None:
+            return False
+        return math.isclose(left, right, abs_tol=1e-6)
+
+    def _stacking_structural_rows(self, layers: list[Camada]) -> list[int]:
+        return [
+            idx
+            for idx, camada in enumerate(layers)
+            if getattr(camada, "orientacao", None) is not None
+            and is_structural_ply_label(getattr(camada, "ply_type", DEFAULT_PLY_TYPE))
+        ]
+
+    def _stacking_is_unbalanced(
+        self, layers: list[Camada], centers: list[int]
+    ) -> bool:
+        if not centers:
+            return False
+        structural_rows = self._stacking_structural_rows(layers)
+        center_min = min(centers)
+        center_set = set(centers)
+        pos45 = 0
+        neg45 = 0
+        for row in structural_rows:
+            if row in center_set:
+                continue
+            if row > center_min:
+                continue
+            orientation = self._stacking_orientation_token(
+                getattr(layers[row], "orientacao", None)
+            )
+            if orientation is None:
+                continue
+            if math.isclose(orientation, 45.0, abs_tol=1e-6):
+                pos45 += 1
+            elif math.isclose(orientation, -45.0, abs_tol=1e-6):
+                neg45 += 1
+        return pos45 != neg45
+
+    def check_symmetry(self, *, show_messages: bool = False) -> None:
+        """
+        Atualiza o estado visual de simetria do laminado atual.
+
+        A logica replica o comportamento do Virtual Stacking: destaca pares
+        quebrados em vermelho, centros simetricos em verde e exibe o alerta de
+        balanceamento quando aplicavel. Nenhum dialogo modal e exibido durante
+        as atualizacoes automaticas.
+        """
         _, model = self._get_stacking_view_and_model()
         if model is None:
-            self._info("Tabela de camadas indisponivel para verificar a simetria.")
             return
         if hasattr(model, "clear_all_highlights"):
             model.clear_all_highlights()
 
         try:
-            wanted_headers = ["#", "Simetria", "Ply Type", "Material", "Orientacao", "Orientation"]
-            colmap = self._column_map_by_header(model, wanted_headers)
-        except ValueError as exc:
-            logger.warning("Falha ao mapear colunas da tabela: %s", exc)
-            self._info(
-                "Nao foi possivel verificar a simetria porque as colunas esperadas nao estao disponiveis."
-            )
-            return
-
-        missing: list[str] = []
-        if "#" not in colmap:
-            missing.append("#")
-        if "Simetria" not in colmap and "Ply Type" not in colmap:
-            missing.append("Simetria")
-        if "Material" not in colmap:
-            missing.append("Material")
-        if "Orientacao" not in colmap and "Orientation" not in colmap:
-            missing.append("Orientacao/Orientation")
-        if missing:
-            self._info(
-                "Nao foi possivel verificar a simetria. Colunas ausentes: "
-                + ", ".join(missing)
-                + "."
-            )
-            return
-
-        col_num = colmap["#"]
-        col_ply = colmap.get("Simetria") or colmap.get("Ply Type")
-        if col_ply is None:
-            self._info("Nao foi possivel localizar a coluna de Simetria para a verificacao.")
-            return
-        col_mat = colmap["Material"]
-        if "Orientacao" in colmap:
-            col_ori = colmap["Orientacao"]
-        else:
-            col_ori = colmap["Orientation"]
-
-        row_count = model.rowCount()
-
-        def is_structural(row: int) -> bool:
-            value = self._data_str(model, row, col_ply)
-            return is_structural_ply_label(value)
-
-        structural_rows = [r for r in range(row_count) if is_structural(r)]
-        count_struct = len(structural_rows)
-        if count_struct == 0:
-            self._info("Laminado simetrico (0 ou 1 camada marcada como 'Considerar').")
-            return
-        if count_struct == 1:
-            if hasattr(model, "add_green_rows"):
-                model.add_green_rows(structural_rows)
-            self._scroll_to_rows(structural_rows)
-            self._info("Laminado simetrico (0 ou 1 camada estrutural).")
-            return
-
-        i, j = 0, count_struct - 1
-        while i < j:
-            r_top = structural_rows[i]
-            r_bot = structural_rows[j]
-
-            mat_top = self._data_str(model, r_top, col_mat)
-            mat_bot = self._data_str(model, r_bot, col_mat)
-            ori_top = self._normalize_orientation(self._data_str(model, r_top, col_ori))
-            ori_bot = self._normalize_orientation(self._data_str(model, r_bot, col_ori))
-
-            if not (self._eq(mat_top, mat_bot) and self._eq(ori_top, ori_bot)):
-                layer_num = self._data_str(model, r_top, col_num) or str(r_top + 1)
-                pair_rows = [r_top, r_bot]
-                if hasattr(model, "add_red_rows"):
-                    model.add_red_rows(pair_rows)
-                self._scroll_to_rows(pair_rows)
-                self._warn_asymmetry(layer_num, mat_top, ori_top, mat_bot, ori_bot)
-                return
-
-            i += 1
-            j -= 1
-
-        if count_struct % 2 == 1:
-            center_rows = [structural_rows[count_struct // 2]]
-        else:
-            center_rows = [
-                structural_rows[count_struct // 2 - 1],
-                structural_rows[count_struct // 2],
-            ]
-        if hasattr(model, "add_green_rows"):
-            model.add_green_rows(center_rows)
-        self._scroll_to_rows(center_rows)
-        self._info(
-            f"Laminado simetrico considerando apenas camadas 'Considerar' ({count_struct} camadas)."
-        )
-
-    def _scroll_to_rows(self, rows: Iterable[int]) -> None:
-        rows_list = sorted({r for r in rows if isinstance(r, int) and r >= 0})
-        if not rows_list:
-            return
-        view, model = self._get_stacking_view_and_model()
-        if view is None or model is None:
-            return
-        first = rows_list[0]
-        index = model.index(first, 0)
-        if not index.isValid():
-            return
-        view.scrollTo(index, QAbstractItemView.PositionAtCenter)
-        view.selectRow(first)
-
-    def _column_map_by_header(
-        self, model, wanted_names: list[str]
-    ) -> dict[str, int]:
-        if not hasattr(model, "columnCount") or not callable(model.columnCount):
-            raise ValueError("Modelo invalido para leitura de colunas.")
-        column_count = model.columnCount()
-        headers: dict[str, int] = {}
-        for column in range(column_count):
-            header = model.headerData(column, Qt.Horizontal, Qt.DisplayRole)
-            if header is None:
-                continue
-            text = str(header).strip()
-            if not text:
-                continue
-            headers[text] = column
-            headers[text.lower()] = column
-
-        mapping: dict[str, int] = {}
-        for name in wanted_names:
-            candidates = [name, name.lower()]
-            if name.lower() == "orientacao":
-                candidates.extend(["Orientation", "orientation"])
-            if name.lower() == "orientation":
-                candidates.extend(["Orientacao", "orientacao"])
-            for candidate in candidates:
-                if candidate in headers:
-                    mapping[name] = headers[candidate]
-                    break
-        return mapping
-
-    def _data_str(self, model, row: int, column: int) -> str:
-        index = model.index(row, column)
-        if not index.isValid():
-            return ""
-        value = model.data(index, Qt.DisplayRole)
-        if value is None:
-            return ""
-        return str(value).strip()
-
-    def _normalize_orientation(self, raw: str) -> str:
-        text = (raw or "").strip()
-        if not text:
-            return ""
-        try:
-            angle = normalize_angle(text)
+            layers = model.layers()  # type: ignore[assignment]
         except Exception:
-            cleaned = (
-                text.replace("\N{DEGREE SIGN}", "")
-                .replace("\u00ba", "")
-                .replace("deg", "")
-                .replace("DEG", "")
-                .strip()
-            )
-            filtered = "".join(ch for ch in cleaned if ch.isdigit() or ch in "+-.")
-            if not filtered:
-                return text
-            if filtered[0] not in "+-":
-                filtered = f"+{filtered}"
-            return filtered
-        return format_orientation_value(angle)
+            layers = []
 
-    def _eq(self, left: str, right: str) -> bool:
-        return (left or "").strip().lower() == (right or "").strip().lower()
+        centers: list[int] = []
+        status_text = ""
+        symmetric = True
 
-    def _info(self, message: str) -> None:
-        QMessageBox.information(self, "Verificar simetria", message)
+        structural_rows = self._stacking_structural_rows(layers)
+        count_struct = len(structural_rows)
 
-    def _warn_asymmetry(
-        self,
-        layer_num: str,
-        mat_top: str,
-        ori_top: str,
-        mat_bot: str,
-        ori_bot: str,
-    ) -> None:
-        message = (
-            f"Quebra de simetria a partir da camada # {layer_num}.\n"
-            f"Topo:   Material={mat_top or '-'}, Orientacao={ori_top or '-'}\n"
-            f"Base:   Material={mat_bot or '-'}, Orientacao={ori_bot or '-'}"
-        )
-        QMessageBox.warning(self, "Verificar simetria", message)
+        if count_struct == 0:
+            symmetric = False
+            status_text = "Laminado sem camadas estruturais para verificar simetria."
+        elif count_struct == 1:
+            centers = structural_rows[:1]
+            if hasattr(model, "add_green_rows"):
+                model.add_green_rows(centers)
+            status_text = "Laminado simetrico (1 camada estrutural)."
+        else:
+            i, j = 0, count_struct - 1
+            while i < j:
+                r_top = structural_rows[i]
+                r_bot = structural_rows[j]
+                camada_top = layers[r_top]
+                camada_bot = layers[r_bot]
+                mat_top = (getattr(camada_top, "material", "") or "").strip().lower()
+                mat_bot = (getattr(camada_bot, "material", "") or "").strip().lower()
+                ori_top = self._stacking_orientation_token(
+                    getattr(camada_top, "orientacao", None)
+                )
+                ori_bot = self._stacking_orientation_token(
+                    getattr(camada_bot, "orientacao", None)
+                )
+                if not (mat_top == mat_bot and self._stacking_orientations_match(ori_top, ori_bot)):
+                    symmetric = False
+                    if hasattr(model, "add_red_rows"):
+                        model.add_red_rows([r_top, r_bot])
+                    status_text = (
+                        f"Quebra de simetria nas camadas {r_top + 1} e {r_bot + 1}."
+                    )
+                    break
+                i += 1
+                j -= 1
+            if symmetric:
+                if count_struct % 2 == 1:
+                    centers = [structural_rows[count_struct // 2]]
+                else:
+                    centers = [
+                        structural_rows[count_struct // 2 - 1],
+                        structural_rows[count_struct // 2],
+                    ]
+                if hasattr(model, "add_green_rows"):
+                    model.add_green_rows(centers)
+                status_text = (
+                    f"Laminado simetrico com {count_struct} camadas estruturais."
+                )
+
+        if hasattr(model, "set_unbalanced_warning"):
+            try:
+                model.set_unbalanced_warning(self._stacking_is_unbalanced(layers, centers) if symmetric else False)
+            except Exception:
+                model.set_unbalanced_warning(False)
+
+        if show_messages and status_text:
+            QMessageBox.information(self, "Verificar simetria", status_text)
+        elif status_text and self.statusBar():
+            self.statusBar().showMessage(status_text, 4000)
 
     def on_new_laminate_from_paste(self) -> None:
         binding, model, laminate = self._stacking_binding_context()
