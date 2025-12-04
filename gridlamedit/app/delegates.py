@@ -317,11 +317,13 @@ class OrientationComboDelegate(QStyledItemDelegate):
         super().paint(painter, option, index)
         if not bool(index.data(ORIENTATION_SYMMETRY_ROLE)):
             return
-        pen = QPen(QColor("orange"))
-        pen.setStyle(Qt.DashLine)
+        # Draw green border for symmetric central layers
+        pen = QPen(QColor(0, 200, 0))  # Green color
+        pen.setWidth(3)  # Thicker border for visibility
+        pen.setStyle(Qt.SolidLine)  # Solid line instead of dashed
         painter.save()
         painter.setPen(pen)
-        rect = option.rect.adjusted(1, 1, -1, -1)
+        rect = option.rect.adjusted(2, 2, -2, -2)
         painter.drawRect(rect)
         painter.restore()
 

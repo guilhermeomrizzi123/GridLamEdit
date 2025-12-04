@@ -188,6 +188,7 @@ class VirtualStackingModel(QtCore.QAbstractTableModel):
         self._material_sync_handler = material_sync_handler
         self._red_cells: set[tuple[int, int]] = set()
         self._green_cells: set[tuple[int, int]] = set()
+        self._symmetric_cells: set[tuple[int, int]] = set()
         self._unbalanced_columns: set[int] = set()
         self._warning_icon = QtGui.QIcon()
         self._selected_columns: set[int] = set()
@@ -342,7 +343,7 @@ class VirtualStackingModel(QtCore.QAbstractTableModel):
             return QtCore.Qt.AlignCenter
 
         if role == ORIENTATION_SYMMETRY_ROLE and column >= self.LAMINATE_COLUMN_OFFSET:
-            if (row, column) in self._green_cells:
+            if (row, column) in self._symmetric_cells:
                 return True
 
         return None
@@ -593,6 +594,7 @@ class VirtualStackingModel(QtCore.QAbstractTableModel):
             self.symmetry_row_index = min(self.symmetry_rows) if self.symmetry_rows else None
         self._red_cells.clear()
         self._green_cells.clear()
+        self._symmetric_cells.clear()
         self._unbalanced_columns.clear()
         self.endResetModel()
 
@@ -641,14 +643,15 @@ class VirtualStackingModel(QtCore.QAbstractTableModel):
             self.headerDataChanged.emit(QtCore.Qt.Horizontal, first, last)
 
     def clear_highlights(self) -> None:
-        if not (self._red_cells or self._green_cells):
+        if not (self._red_cells or self._green_cells or self._symmetric_cells):
             return
         self._red_cells.clear()
         self._green_cells.clear()
+        self._symmetric_cells.clear()
         if self.layers:
             top_left = self.createIndex(0, 0)
             bottom_right = self.createIndex(len(self.layers) - 1, self.columnCount() - 1)
-            self.dataChanged.emit(top_left, bottom_right, [QtCore.Qt.BackgroundRole])
+            self.dataChanged.emit(top_left, bottom_right, [QtCore.Qt.BackgroundRole, ORIENTATION_SYMMETRY_ROLE])
 
     def set_highlights(
         self,
@@ -1139,6 +1142,15 @@ class VirtualStackingWindow(QtWidgets.QDialog):
         )
         self.btn_reorganize.clicked.connect(self._reorganize_sequences_by_neighbors)
         toolbar.addWidget(self.btn_reorganize)
+
+        # Novo botão: analisar simetria
+        self.btn_analyze_symmetry = QtWidgets.QToolButton(self)
+        self.btn_analyze_symmetry.setText("Analisar Simetria")
+        self.btn_analyze_symmetry.setToolTip(
+            "Analisa a simetria de cada coluna, ignorando camadas centrais, e marca com borda verde as camadas centrais de laminados simétricos."
+        )
+        self.btn_analyze_symmetry.clicked.connect(self._analyze_symmetry)
+        toolbar.addWidget(self.btn_analyze_symmetry)
 
         # Controles de movimentação.
         self.btn_move_left = QtWidgets.QToolButton(self)
@@ -1759,8 +1771,13 @@ class VirtualStackingWindow(QtWidgets.QDialog):
                 pass
 
     def _check_symmetry(self) -> None:
-        red_cells: set[tuple[int, int]] = set()
-        green_cells: set[tuple[int, int]] = set()
+        """
+        Check for unbalanced columns.
+        Note: Green borders for symmetric central layers are now controlled
+        by the explicit "Analisar Simetria" button, not by this method.
+        Red cells are no longer used in symmetry analysis.
+        """
+        # No more red cells for symmetry analysis
         unbalanced_columns: set[int] = set()
         evaluations: dict[int, LaminateSymmetryEvaluation] = {}
         centers_union: set[int] = set()
@@ -1771,16 +1788,8 @@ class VirtualStackingWindow(QtWidgets.QDialog):
             evaluations[id(laminate)] = evaluation
             centers_union.update(evaluation.centers)
 
-            if not evaluation.is_symmetric and evaluation.first_mismatch is not None:
-                col_idx = col + self.model.LAMINATE_COLUMN_OFFSET
-                left_row, right_row = evaluation.first_mismatch
-                red_cells.add((left_row, col_idx))
-                red_cells.add((right_row, col_idx))
-
+            # Check for unbalanced columns
             if evaluation.centers:
-                if evaluation.is_symmetric:
-                    for row in evaluation.centers:
-                        green_cells.add((row, col + self.model.LAMINATE_COLUMN_OFFSET))
                 if self._is_unbalanced(
                     getattr(laminate, "camadas", []),
                     evaluation.structural_rows,
@@ -1790,7 +1799,8 @@ class VirtualStackingWindow(QtWidgets.QDialog):
 
         self._symmetry_evaluations = evaluations
         self._update_symmetry_rows_from_union(centers_union)
-        self.model.set_highlights(red_cells, green_cells)
+        # No red cells - only unbalanced columns
+        self.model.set_highlights(set(), set())
         self.model.set_unbalanced_columns(unbalanced_columns)
 
     def _is_unbalanced(
@@ -2429,6 +2439,166 @@ class VirtualStackingWindow(QtWidgets.QDialog):
             self.model.set_virtual_stacking(self._layers, self._cells, self._symmetry_rows or self._symmetry_row_index)
             self._rebuild_view()
             self._check_symmetry()
+
+    # ---------------------------------------------------------------
+    # Nova funcionalidade: analisar simetria
+    def _analyze_symmetry(self) -> None:
+        """
+        Analisa a simetria de cada coluna (laminado).
+        
+        Nova lógica:
+        - Compara camadas das extremidades (topo vs fundo) em direção ao centro
+        - Ignora automaticamente camadas Empty (sem orientação) avançando os índices
+        - Quando ambas as pontas têm orientação válida, compara orientação e material
+        - Se encontrar diferença, marca como assimétrico
+        - Se chegar ao centro sem diferenças, marca como simétrico
+        - Marca as camadas centrais com borda verde se simétrico
+        """
+        if self._project is None or not self._cells:
+            return
+
+        # Limpar todas as bordas verdes de simetria existentes
+        self.model._symmetric_cells.clear()
+
+        # Para cada coluna (cada célula/laminado)
+        for cell_idx, cell in enumerate(self._cells):
+            laminate = cell.laminate
+            layers = getattr(laminate, "camadas", [])
+            
+            if not layers:
+                continue
+            
+            # Inicializar índices para comparação das extremidades
+            top_index = 0
+            bottom_index = len(layers) - 1
+            is_symmetric = True
+            
+            # Comparar das extremidades para o centro
+            while top_index < bottom_index:
+                # Proteção contra loop infinito - se ambos os índices ultrapassam limite
+                if top_index >= len(layers):
+                    break
+                if bottom_index < 0:
+                    break
+                
+                # Obter orientação das camadas atuais
+                top_orientation = self._get_layer_orientation(layers, top_index)
+                bottom_orientation = self._get_layer_orientation(layers, bottom_index)
+                
+                # Se camada do topo é Empty, pular para a próxima
+                if top_orientation is None:
+                    top_index += 1
+                    continue
+                
+                # Se camada do fundo é Empty, pular para a anterior
+                if bottom_orientation is None:
+                    bottom_index -= 1
+                    continue
+                
+                # Ambas as camadas têm orientação válida, comparar
+                # Comparar orientação
+                if top_orientation != bottom_orientation:
+                    is_symmetric = False
+                    break
+                
+                # Comparar material
+                top_material = self._get_layer_material(layers, top_index)
+                bottom_material = self._get_layer_material(layers, bottom_index)
+                
+                if top_material != bottom_material:
+                    is_symmetric = False
+                    break
+                
+                # Camadas são iguais, avançar para o centro
+                top_index += 1
+                bottom_index -= 1
+            
+            # Se simétrico, identificar e marcar as camadas centrais com borda verde
+            if is_symmetric:
+                column_idx = cell_idx + self.model.LAMINATE_COLUMN_OFFSET
+                
+                # Coletar apenas índices de camadas com orientação definida
+                indices_with_orientation = []
+                for idx, layer in enumerate(layers):
+                    orientation = self._get_layer_orientation(layers, idx)
+                    if orientation is not None:
+                        indices_with_orientation.append(idx)
+                
+                # Se há camadas com orientação, identificar as centrais
+                if indices_with_orientation:
+                    num_oriented = len(indices_with_orientation)
+                    if num_oriented % 2 == 1:
+                        # Ímpar: 1 camada central
+                        center_pos = num_oriented // 2
+                        center_indices = [indices_with_orientation[center_pos]]
+                    else:
+                        # Par: 2 camadas centrais
+                        center_left_pos = (num_oriented // 2) - 1
+                        center_right_pos = num_oriented // 2
+                        center_indices = [
+                            indices_with_orientation[center_left_pos],
+                            indices_with_orientation[center_right_pos]
+                        ]
+                    
+                    # Verificar se todas as camadas centrais estão dentro das sequências de simetria (salmon)
+                    # Se ao menos uma não estiver, considerar como assimétrico
+                    symmetry_rows = self.model.symmetry_rows or set()
+                    all_centers_in_symmetry = all(
+                        center_row in symmetry_rows for center_row in center_indices
+                    )
+                    
+                    # Só marcar com borda verde se todas as centrais estiverem nas sequências de simetria
+                    if all_centers_in_symmetry:
+                        for center_row in center_indices:
+                            self.model._symmetric_cells.add((center_row, column_idx))
+        
+        # Atualizar a visualização para mostrar as bordas verdes
+        if self.model.layers:
+            top_left = self.model.createIndex(0, self.model.LAMINATE_COLUMN_OFFSET)
+            bottom_right = self.model.createIndex(
+                len(self.model.layers) - 1,
+                self.model.columnCount() - 1
+            )
+            self.model.dataChanged.emit(top_left, bottom_right, [ORIENTATION_SYMMETRY_ROLE])
+
+    def _get_layer_orientation(self, layers: list[Camada], index: int) -> Optional[float]:
+        """
+        Obtém a orientação normalizada de uma camada.
+        Retorna None para camadas vazias (Empty).
+        """
+        if index < 0 or index >= len(layers):
+            return None
+        
+        layer = layers[index]
+        orientation = getattr(layer, "orientacao", None)
+        
+        if orientation is None or orientation == "" or str(orientation).strip().lower() == "empty":
+            return None
+        
+        try:
+            # Normalizar o ângulo
+            return normalize_angle(orientation)
+        except Exception:
+            return None
+
+    def _get_layer_material(self, layers: list[Camada], index: int) -> str:
+        """
+        Obtém o material normalizado de uma camada.
+        """
+        if index < 0 or index >= len(layers):
+            return ""
+        
+        layer = layers[index]
+        material = getattr(layer, "material", "")
+        
+        # Normalizar material (remover espaços extras, converter para minúsculas)
+        if material is None:
+            return ""
+        
+        material_str = str(material).strip()
+        # Colapsar múltiplos espaços em um único espaço
+        material_normalized = " ".join(material_str.split())
+        return material_normalized.lower()
 
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:  # noqa: N802
         super().closeEvent(event)
