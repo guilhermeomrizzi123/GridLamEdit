@@ -106,6 +106,8 @@ from gridlamedit.io.spreadsheet import (
     format_orientation_value,
     load_grid_spreadsheet,
     normalize_angle,
+    normalize_ply_type_label,
+    PLY_TYPE_OPTIONS,
     orientation_highlight_color,
     count_oriented_layers,
 )
@@ -115,7 +117,11 @@ from gridlamedit.services.project_query import (
     project_distinct_orientations,
     project_most_used_material,
 )
-from gridlamedit.services.laminate_checks import ChecksReport, run_all_checks
+from gridlamedit.services.laminate_checks import (
+    ChecksReport,
+    evaluate_symmetry_for_layers,
+    run_all_checks,
+)
 from gridlamedit.services.laminate_service import (
     auto_name_for_laminate,
     auto_name_for_layers,
@@ -2403,16 +2409,15 @@ class MainWindow(QMainWindow):
         return [
             idx
             for idx, camada in enumerate(layers)
-            if getattr(camada, "orientacao", None) is not None
-            and is_structural_ply_label(getattr(camada, "ply_type", DEFAULT_PLY_TYPE))
+            if normalize_ply_type_label(getattr(camada, "ply_type", DEFAULT_PLY_TYPE)) != PLY_TYPE_OPTIONS[1]
         ]
 
     def _stacking_is_unbalanced(
-        self, layers: list[Camada], centers: list[int]
+        self, layers: list[Camada], centers: list[int], structural_rows: Optional[list[int]] = None
     ) -> bool:
         if not centers:
             return False
-        structural_rows = self._stacking_structural_rows(layers)
+        structural_rows = structural_rows or self._stacking_structural_rows(layers)
         center_min = min(centers)
         center_set = set(centers)
         pos45 = 0
@@ -2453,63 +2458,36 @@ class MainWindow(QMainWindow):
         except Exception:
             layers = []
 
-        centers: list[int] = []
+        evaluation = evaluate_symmetry_for_layers(layers)
+        centers = evaluation.centers
+        structural_rows = evaluation.structural_rows
+        symmetric = evaluation.is_symmetric
         status_text = ""
-        symmetric = True
 
-        structural_rows = self._stacking_structural_rows(layers)
-        count_struct = len(structural_rows)
-
-        if count_struct == 0:
+        if not structural_rows:
             symmetric = False
-            status_text = "Laminado sem camadas estruturais para verificar simetria."
-        elif count_struct == 1:
-            centers = structural_rows[:1]
+            status_text = "Laminado sem sequencias validas para verificar simetria."
+        elif symmetric:
             if hasattr(model, "add_green_rows"):
                 model.add_green_rows(centers)
-            status_text = "Laminado simetrico (1 camada estrutural)."
+            status_text = (
+                f"Laminado simetrico com {len(structural_rows)} sequencias consideradas."
+            )
         else:
-            i, j = 0, count_struct - 1
-            while i < j:
-                r_top = structural_rows[i]
-                r_bot = structural_rows[j]
-                camada_top = layers[r_top]
-                camada_bot = layers[r_bot]
-                mat_top = (getattr(camada_top, "material", "") or "").strip().lower()
-                mat_bot = (getattr(camada_bot, "material", "") or "").strip().lower()
-                ori_top = self._stacking_orientation_token(
-                    getattr(camada_top, "orientacao", None)
-                )
-                ori_bot = self._stacking_orientation_token(
-                    getattr(camada_bot, "orientacao", None)
-                )
-                if not (mat_top == mat_bot and self._stacking_orientations_match(ori_top, ori_bot)):
-                    symmetric = False
-                    if hasattr(model, "add_red_rows"):
-                        model.add_red_rows([r_top, r_bot])
-                    status_text = (
-                        f"Quebra de simetria nas camadas {r_top + 1} e {r_bot + 1}."
-                    )
-                    break
-                i += 1
-                j -= 1
-            if symmetric:
-                if count_struct % 2 == 1:
-                    centers = [structural_rows[count_struct // 2]]
-                else:
-                    centers = [
-                        structural_rows[count_struct // 2 - 1],
-                        structural_rows[count_struct // 2],
-                    ]
-                if hasattr(model, "add_green_rows"):
-                    model.add_green_rows(centers)
+            mismatch = evaluation.first_mismatch
+            if mismatch is not None and hasattr(model, "add_red_rows"):
+                model.add_red_rows(list(mismatch))
                 status_text = (
-                    f"Laminado simetrico com {count_struct} camadas estruturais."
+                    f"Quebra de simetria nas camadas {mismatch[0] + 1} e {mismatch[1] + 1}."
                 )
+            elif structural_rows:
+                status_text = "Quebra de simetria detectada."
 
         if hasattr(model, "set_unbalanced_warning"):
             try:
-                model.set_unbalanced_warning(self._stacking_is_unbalanced(layers, centers) if symmetric else False)
+                model.set_unbalanced_warning(
+                    self._stacking_is_unbalanced(layers, centers, structural_rows) if symmetric else False
+                )
             except Exception:
                 model.set_unbalanced_warning(False)
 

@@ -3,15 +3,17 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, Iterable, List, Sequence
+from typing import Any, Dict, Iterable, List, Sequence, Tuple
 
 import math
 
 from gridlamedit.io.spreadsheet import (
     Camada,
+    DEFAULT_PLY_TYPE,
     Laminado,
-    is_structural_ply_label,
+    PLY_TYPE_OPTIONS,
     normalize_angle,
+    normalize_ply_type_label,
     ply_type_signature_token,
 )
 
@@ -31,6 +33,16 @@ class DuplicateGroup:
     signature: str
     summary: str
     laminates: List[str]
+
+
+@dataclass
+class LaminateSymmetryEvaluation:
+    """Detailed symmetry result for a single laminate."""
+
+    structural_rows: List[int]
+    centers: List[int]
+    is_symmetric: bool
+    first_mismatch: Tuple[int, int] | None = None
 
 
 @dataclass
@@ -63,7 +75,8 @@ def check_symmetry(laminates: Sequence[Laminado]) -> SymmetryResult:
     not_symmetric: list[str] = []
 
     for laminado in laminates:
-        if _is_laminate_symmetric(laminado):
+        evaluation = evaluate_symmetry_for_layers(laminado.camadas)
+        if evaluation.is_symmetric:
             symmetric.append(laminado.nome)
         else:
             not_symmetric.append(laminado.nome)
@@ -104,38 +117,7 @@ def check_duplicates(laminates: Sequence[Laminado]) -> List[DuplicateGroup]:
 
 
 def _is_laminate_symmetric(laminado: Laminado) -> bool:
-    structural_layers = [
-        layer
-        for layer in laminado.camadas
-        if _is_structural(layer) and getattr(layer, "orientacao", None) is not None
-    ]
-    count = len(structural_layers)
-    if count <= 1:
-        return True
-
-    i, j = 0, count - 1
-    while i < j:
-        top = structural_layers[i]
-        bottom = structural_layers[j]
-        if not _layers_match(top, bottom):
-            return False
-        i += 1
-        j -= 1
-    return True
-
-
-def _layers_match(top: Camada, bottom: Camada) -> bool:
-    if _normalize_material(top.material) != _normalize_material(bottom.material):
-        return False
-    top_orientation = _normalize_orientation(top.orientacao)
-    bottom_orientation = _normalize_orientation(bottom.orientacao)
-    if top_orientation is None or bottom_orientation is None:
-        return top_orientation is None and bottom_orientation is None
-    return math.isclose(top_orientation, bottom_orientation, rel_tol=0.0, abs_tol=1e-9)
-
-
-def _is_structural(layer: Camada) -> bool:
-    return is_structural_ply_label(getattr(layer, "ply_type", ""))
+    return evaluate_symmetry_for_layers(laminado.camadas).is_symmetric
 
 
 def _normalize_material(value: object) -> str:
@@ -152,6 +134,129 @@ def _normalize_orientation(value: object) -> float | None:
             return normalize_angle(str(value))
         except Exception:
             return None
+
+
+def _normalized_orientation_token(value: object) -> float | None:
+    """Normalize orientation returning ``None`` for blanks or invalid values."""
+    try:
+        return normalize_angle(value)
+    except Exception:
+        try:
+            text = str(value).strip()
+        except Exception:
+            return None
+        if not text:
+            return None
+        try:
+            return normalize_angle(text)
+        except Exception:
+            return None
+
+
+def _normalized_material_token(value: object) -> str:
+    text = str(value or "").strip()
+    return " ".join(text.split()).lower()
+
+
+def _rows_match(
+    layers: Sequence[Camada], left_idx: int, right_idx: int
+) -> tuple[bool, tuple[int, int] | None]:
+    """
+    Compare two rows for symmetry (orientation + material).
+
+    Missing rows are treated as empty. Empty only matches empty.
+    """
+    left_layer = layers[left_idx] if 0 <= left_idx < len(layers) else None
+    right_layer = layers[right_idx] if 0 <= right_idx < len(layers) else None
+
+    left_orientation = (
+        _normalized_orientation_token(getattr(left_layer, "orientacao", None))
+        if left_layer
+        else None
+    )
+    right_orientation = (
+        _normalized_orientation_token(getattr(right_layer, "orientacao", None))
+        if right_layer
+        else None
+    )
+    if left_orientation is None or right_orientation is None:
+        if not (left_orientation is None and right_orientation is None):
+            return False, (left_idx, right_idx)
+    elif not math.isclose(left_orientation, right_orientation, abs_tol=1e-6):
+        return False, (left_idx, right_idx)
+
+    left_material = (
+        _normalized_material_token(getattr(left_layer, "material", "") if left_layer else "")
+    )
+    right_material = (
+        _normalized_material_token(getattr(right_layer, "material", "") if right_layer else "")
+    )
+    if left_material or right_material:
+        if left_material != right_material:
+            return False, (left_idx, right_idx)
+
+    return True, None
+
+
+def evaluate_symmetry_for_layers(layers: Sequence[Camada]) -> LaminateSymmetryEvaluation:
+    """
+    Evaluate laminate symmetry based on valid sequences (ply_type != ``PLY_TYPE_OPTIONS[1]``).
+    """
+    structural_rows: list[int] = [
+        idx
+        for idx, camada in enumerate(layers)
+        if normalize_ply_type_label(getattr(camada, "ply_type", DEFAULT_PLY_TYPE)) != PLY_TYPE_OPTIONS[1]
+    ]
+    centers: list[int] = []
+    mismatch: tuple[int, int] | None = None
+    symmetric = False
+
+    count = len(structural_rows)
+    if count == 0:
+        return LaminateSymmetryEvaluation(
+            structural_rows=structural_rows,
+            centers=centers,
+            is_symmetric=False,
+            first_mismatch=None,
+        )
+
+    if count % 2 == 1:
+        mid = count // 2
+        centers = [structural_rows[mid]]
+        symmetric = True
+        for offset in range(1, mid + 1):
+            left = structural_rows[mid - offset]
+            right = structural_rows[mid + offset]
+            matches, bad_pair = _rows_match(layers, left, right)
+            if not matches:
+                symmetric = False
+                mismatch = bad_pair
+                break
+    else:
+        mid_left = count // 2 - 1
+        mid_right = count // 2
+        centers = [structural_rows[mid_left], structural_rows[mid_right]]
+        symmetric = True
+        for offset in range(0, mid_left + 1):
+            left = structural_rows[mid_left - offset]
+            right = structural_rows[mid_right + offset]
+            matches, bad_pair = _rows_match(layers, left, right)
+            if not matches:
+                symmetric = False
+                mismatch = bad_pair
+                break
+        if symmetric:
+            matches, bad_pair = _rows_match(layers, centers[0], centers[1])
+            if not matches:
+                symmetric = False
+                mismatch = bad_pair
+
+    return LaminateSymmetryEvaluation(
+        structural_rows=structural_rows,
+        centers=centers,
+        is_symmetric=symmetric,
+        first_mismatch=mismatch,
+    )
 
 
 def _orientation_token(value: float | None) -> str:
@@ -212,9 +317,11 @@ def _stacking_signature(layers: Sequence[Camada]) -> str:
 
 __all__ = [
     "SymmetryResult",
+    "LaminateSymmetryEvaluation",
     "DuplicateGroup",
     "ChecksReport",
     "run_all_checks",
     "check_symmetry",
     "check_duplicates",
+    "evaluate_symmetry_for_layers",
 ]

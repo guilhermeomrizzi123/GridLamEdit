@@ -41,6 +41,10 @@ from gridlamedit.app.delegates import (
     OrientationComboDelegate,
     PlyTypeComboDelegate,
 )
+from gridlamedit.services.laminate_checks import (
+    LaminateSymmetryEvaluation,
+    evaluate_symmetry_for_layers,
+)
 from gridlamedit.services.laminate_service import auto_name_for_laminate, sync_material_by_sequence
 from gridlamedit.core.paths import package_path
 from gridlamedit.services.project_query import (
@@ -605,6 +609,17 @@ class VirtualStackingModel(QtCore.QAbstractTableModel):
             bottom_right = self.createIndex(len(self.layers) - 1, self.columnCount() - 1)
             self.dataChanged.emit(top_left, bottom_right, [QtCore.Qt.BackgroundRole])
 
+    def set_symmetry_rows(self, rows: Iterable[int] | None) -> None:
+        new_rows = {row for row in rows} if rows is not None else set()
+        if new_rows == self.symmetry_rows:
+            return
+        self.symmetry_rows = new_rows
+        self.symmetry_row_index = min(new_rows) if new_rows else None
+        if self.layers:
+            top_left = self.createIndex(0, 0)
+            bottom_right = self.createIndex(len(self.layers) - 1, self.columnCount() - 1)
+            self.dataChanged.emit(top_left, bottom_right, [QtCore.Qt.BackgroundRole])
+
     def set_unbalanced_columns(self, columns: Iterable[int]) -> None:
         new_columns = {col for col in columns}
         if new_columns == self._unbalanced_columns:
@@ -702,6 +717,7 @@ class VirtualStackingWindow(QtWidgets.QDialog):
         self._cells: list[VirtualStackingCell] = []
         self._symmetry_row_index: int | None = None
         self._symmetry_rows: set[int] = set()
+        self._symmetry_evaluations: dict[int, LaminateSymmetryEvaluation] = {}
         self._project: Optional[GridModel] = None
         self._sorted_cell_ids: list[str] = []
         self._initial_sort_done = False
@@ -1182,9 +1198,10 @@ class VirtualStackingWindow(QtWidgets.QDialog):
             self._update_summary_row()
             return
 
-        layers, cells, symmetry_index = self._collect_virtual_data(self._project)
+        layers, cells, symmetry_index, evaluations = self._collect_virtual_data(self._project)
         self._layers = layers
         self._cells = cells
+        self._symmetry_evaluations = evaluations
         if isinstance(symmetry_index, set):
             self._symmetry_rows = symmetry_index
             self._symmetry_row_index = min(symmetry_index) if symmetry_index else None
@@ -1207,7 +1224,12 @@ class VirtualStackingWindow(QtWidgets.QDialog):
 
     def _collect_virtual_data(
         self, project: GridModel
-    ) -> tuple[list[VirtualStackingLayer], list[VirtualStackingCell], set[int] | int | None]:
+    ) -> tuple[
+        list[VirtualStackingLayer],
+        list[VirtualStackingCell],
+        set[int] | int | None,
+        dict[int, LaminateSymmetryEvaluation],
+    ]:
         cells: list[VirtualStackingCell] = []
         laminates: list[Laminado] = []
         for cell_id in project.celulas_ordenadas:
@@ -1227,6 +1249,7 @@ class VirtualStackingWindow(QtWidgets.QDialog):
             order = {cell_id: pos for pos, cell_id in enumerate(self._sorted_cell_ids)}
             cells.sort(key=lambda c: order.get(c.cell_id, len(order)))
         laminates = [cell.laminate for cell in cells]
+        evaluations: dict[int, LaminateSymmetryEvaluation] = {}
 
         max_layers = max((len(lam.camadas) for lam in laminates), default=0)
         layers: list[VirtualStackingLayer] = []
@@ -1272,8 +1295,14 @@ class VirtualStackingWindow(QtWidgets.QDialog):
                 )
             )
 
-        symmetry_rows = self._compute_symmetry_axis_from_layers(layers)
-        return layers, cells, symmetry_rows
+        symmetry_rows: set[int] = set()
+        for lam in laminates:
+            evaluation = evaluate_symmetry_for_layers(getattr(lam, "camadas", []))
+            evaluations[id(lam)] = evaluation
+            symmetry_rows.update(evaluation.centers)
+        if not symmetry_rows:
+            symmetry_rows = self._compute_symmetry_axis_from_layers(layers)
+        return layers, cells, symmetry_rows, evaluations
 
     def _refresh_stacking_models(self, cells: list[VirtualStackingCell]) -> None:
         active_ids = {id(cell.laminate) for cell in cells}
@@ -1717,26 +1746,50 @@ class VirtualStackingWindow(QtWidgets.QDialog):
             return False
         return math.isclose(left, right, abs_tol=1e-6)
 
+    def _update_symmetry_rows_from_union(self, rows: set[int]) -> None:
+        new_rows = set(rows)
+        if new_rows == self._symmetry_rows:
+            return
+        self._symmetry_rows = new_rows
+        self._symmetry_row_index = min(new_rows) if new_rows else None
+        if hasattr(self, "model"):
+            try:
+                self.model.set_symmetry_rows(new_rows)
+            except Exception:
+                pass
+
     def _check_symmetry(self) -> None:
         red_cells: set[tuple[int, int]] = set()
         green_cells: set[tuple[int, int]] = set()
         unbalanced_columns: set[int] = set()
-        considered_rows = self._considered_sequence_rows_from_layers(self._layers)
-        pairings: list[tuple[int, int]] = []
-        centers: list[int] = []
-        if considered_rows:
-            if len(considered_rows) % 2 == 1:
-                mid_idx = len(considered_rows) // 2
-                centers = [considered_rows[mid_idx]]
-            else:
-                centers = [considered_rows[len(considered_rows) // 2 - 1], considered_rows[len(considered_rows) // 2]]
-            for i in range(len(considered_rows) // 2):
-                pairings.append((considered_rows[i], considered_rows[-(i + 1)]))
+        evaluations: dict[int, LaminateSymmetryEvaluation] = {}
+        centers_union: set[int] = set()
+
         for col, cell in enumerate(self._cells):
             laminate = cell.laminate
-            layers = getattr(laminate, "camadas", [])
-            if centers and self._is_unbalanced(layers, considered_rows, centers):
-                unbalanced_columns.add(col + self.model.LAMINATE_COLUMN_OFFSET)
+            evaluation = evaluate_symmetry_for_layers(getattr(laminate, "camadas", []))
+            evaluations[id(laminate)] = evaluation
+            centers_union.update(evaluation.centers)
+
+            if not evaluation.is_symmetric and evaluation.first_mismatch is not None:
+                col_idx = col + self.model.LAMINATE_COLUMN_OFFSET
+                left_row, right_row = evaluation.first_mismatch
+                red_cells.add((left_row, col_idx))
+                red_cells.add((right_row, col_idx))
+
+            if evaluation.centers:
+                if evaluation.is_symmetric:
+                    for row in evaluation.centers:
+                        green_cells.add((row, col + self.model.LAMINATE_COLUMN_OFFSET))
+                if self._is_unbalanced(
+                    getattr(laminate, "camadas", []),
+                    evaluation.structural_rows,
+                    evaluation.centers,
+                ):
+                    unbalanced_columns.add(col + self.model.LAMINATE_COLUMN_OFFSET)
+
+        self._symmetry_evaluations = evaluations
+        self._update_symmetry_rows_from_union(centers_union)
         self.model.set_highlights(red_cells, green_cells)
         self.model.set_unbalanced_columns(unbalanced_columns)
 

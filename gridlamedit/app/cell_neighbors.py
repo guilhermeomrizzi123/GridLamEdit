@@ -48,10 +48,20 @@ try:
         ORIENTATION_HIGHLIGHT_COLORS,
         DEFAULT_ORIENTATION_HIGHLIGHT,
     )
+    from gridlamedit.services.laminate_checks import evaluate_symmetry_for_layers
 except Exception:  # pragma: no cover - optional import for loose coupling
     GridModel = object  # type: ignore
     ORIENTATION_HIGHLIGHT_COLORS = {45.0: QColor(193, 174, 255), 90.0: QColor(160, 196, 255), -45.0: QColor(176, 230, 176), 0.0: QColor(230, 230, 230)}
     DEFAULT_ORIENTATION_HIGHLIGHT = QColor(255, 236, 200)
+
+    def evaluate_symmetry_for_layers(layers):  # type: ignore
+        class _Eval:
+            structural_rows: list[int] = []
+            centers: list[int] = []
+            is_symmetric: bool = False
+            first_mismatch = None
+
+        return _Eval()
 
 
 CELL_SIZE = 80.0
@@ -69,7 +79,10 @@ COLOR_TEXT = QColor(248, 249, 250)  # Light gray text
 COLOR_PLUS = QColor(108, 117, 125)  # Steel gray
 COLOR_PLUS_HOVER = QColor(173, 181, 189)  # Light steel on hover
 COLOR_DASH = QColor(134, 142, 150)  # Medium steel gray lines
+COLOR_CENTER_BORDER = QColor(250, 128, 114)  # Salmon highlight for central sequences
 
+BASE_BORDER_WIDTH = 2
+CENTER_BORDER_WIDTH = 4
 
 DIR_OFFSETS: dict[str, tuple[int, int]] = {
     "up": (0, -1),
@@ -304,7 +317,7 @@ class CellNodeItem(QGraphicsRectItem):
         
         # Modern glowing border
         pen = QPen(COLOR_CELL_BORDER)
-        pen.setWidth(2)
+        pen.setWidth(BASE_BORDER_WIDTH)
         self.setPen(pen)
         # Hover events disabled to preserve orientation colors
         self.setAcceptHoverEvents(False)
@@ -390,6 +403,14 @@ class CellNodeItem(QGraphicsRectItem):
         chosen = light if luminance < 150 else dark
         self._label.setBrush(chosen)
         self._orientation_label.setBrush(chosen)
+
+    def set_border_highlight(self, color: Optional[QColor], width: int) -> None:
+        """Apply a border style keeping rounded corners."""
+        pen_color = COLOR_CELL_BORDER if color is None else color
+        pen = QPen(pen_color)
+        pen.setWidth(width)
+        pen.setJoinStyle(Qt.RoundJoin)
+        self.setPen(pen)
 
     def _create_plus_buttons(self) -> None:
         """Create plus buttons and dashed lines from cell edge (not center) to button center."""
@@ -707,6 +728,12 @@ class CellNeighborsWindow(QDialog):
             self._current_sequence_index = combo_index  # 1-based sequence
         self.update_cell_colors_for_sequence(self._current_sequence_index)
 
+    def _apply_border_highlight(self, item: CellNodeItem, highlighted: bool) -> None:
+        if highlighted:
+            item.set_border_highlight(COLOR_CENTER_BORDER, CENTER_BORDER_WIDTH)
+        else:
+            item.set_border_highlight(None, BASE_BORDER_WIDTH)
+
     def update_cell_colors_for_sequence(self, sequence_index: Optional[int]) -> None:
         """Apply orientation-based colours to each cell for the given sequence.
 
@@ -714,12 +741,15 @@ class CellNeighborsWindow(QDialog):
         Rule: same orientation => same colour (reuses global orientation mapping).
         Cells lacking a layer at that sequence or orientation => reset to neutral brush.
         """
+        symmetry_cache: dict[int, object] = {}
         for record in self._nodes_by_grid.values():
             item = record.item
             # Reset when no sequence selected
             if sequence_index is None or not record.cell_id or self._model is None:
                 item.setBrush(item._normal_brush)
                 item._orientation_label.setText("")
+                self._apply_border_highlight(item, False)
+                item._recenter_label()
                 continue
             # Resolve laminate for cell
             try:
@@ -728,16 +758,30 @@ class CellNeighborsWindow(QDialog):
                 camadas = getattr(laminado, "camadas", []) if laminado else []
             except Exception:
                 camadas = []
+                laminado = None
+            evaluation = None
+            if laminado is not None:
+                cache_key = id(laminado)
+                evaluation = symmetry_cache.get(cache_key)
+                if evaluation is None:
+                    evaluation = evaluate_symmetry_for_layers(getattr(laminado, "camadas", []))
+                    symmetry_cache[cache_key] = evaluation
+            central_rows = set(getattr(evaluation, "centers", []) or [])
             layer_idx = sequence_index - 1
+            is_center_sequence = layer_idx in central_rows
             if layer_idx < 0 or layer_idx >= len(camadas):
                 item.setBrush(item._normal_brush)
                 item._orientation_label.setText("")
+                self._apply_border_highlight(item, False)
+                item._recenter_label()
                 continue
             camada = camadas[layer_idx]
             orient = getattr(camada, "orientacao", None)
             if orient is None:
                 item.setBrush(item._normal_brush)
                 item._orientation_label.setText("")
+                self._apply_border_highlight(item, is_center_sequence)
+                item._recenter_label()
                 continue
             # Use exact match first, else fallback default highlight
             color = ORIENTATION_HIGHLIGHT_COLORS.get(float(orient), DEFAULT_ORIENTATION_HIGHLIGHT)
@@ -751,6 +795,7 @@ class CellNeighborsWindow(QDialog):
                 label = str(orient)
             item._orientation_label.setText(label)
             item._recenter_label()
+            self._apply_border_highlight(item, is_center_sequence)
 
     def _save_to_project(self) -> None:
         """Save current neighbors mapping to the project (manual save)."""
