@@ -156,66 +156,69 @@ class _RemoveLayerCommand(QtGui.QUndoCommand):
         self._laminate.camadas = self._model.layers()
 
 
+class _MoveColumnCommand(QtGui.QUndoCommand):
+    """Undoable movement of laminate column (reorder cells)."""
+
+    def __init__(
+        self,
+        cells: list[VirtualStackingCell],
+        old_index: int,
+        new_index: int,
+    ) -> None:
+        direction = "esquerda" if new_index < old_index else "direita"
+        super().__init__(f"Mover coluna {direction}")
+        self._cells_ref = cells
+        self._old_index = old_index
+        self._new_index = new_index
+
+    def redo(self) -> None:
+        if 0 <= self._old_index < len(self._cells_ref) and 0 <= self._new_index < len(self._cells_ref):
+            cell = self._cells_ref.pop(self._old_index)
+            self._cells_ref.insert(self._new_index, cell)
+
+    def undo(self) -> None:
+        if 0 <= self._new_index < len(self._cells_ref) and 0 <= self._old_index < len(self._cells_ref):
+            cell = self._cells_ref.pop(self._new_index)
+            self._cells_ref.insert(self._old_index, cell)
+
+
+class _ChangeOrientationCommand(QtGui.QUndoCommand):
+    """Undoable change of orientation for a specific cell and row."""
+
+    def __init__(
+        self,
+        laminate: Laminado,
+        row: int,
+        old_value: object,
+        new_value: object,
+    ) -> None:
+        super().__init__("Alterar orientação")
+        self._laminate = laminate
+        self._row = row
+        self._old_value = old_value
+        self._new_value = new_value
+
+    def redo(self) -> None:
+        layers = getattr(self._laminate, "camadas", [])
+        if 0 <= self._row < len(layers):
+            layers[self._row].orientacao = self._new_value
+
+    def undo(self) -> None:
+        layers = getattr(self._laminate, "camadas", [])
+        if 0 <= self._row < len(layers):
+            layers[self._row].orientacao = self._old_value
+
+
 class VirtualStackingHeaderView(WordWrapHeader):
-    """Extended header view with buttons to show orientation details."""
-    
-    orientation_info_requested = QtCore.Signal(int)  # Emits cell_index
+    """Extended header view for laminate columns."""
     
     def __init__(self, orientation: QtCore.Qt.Orientation, parent=None):
         super().__init__(orientation, parent)
         self._laminate_column_offset = 5  # Will be set later
-        self.viewport().setMouseTracking(True)
-        self._hovered_section = -1
     
     def set_laminate_column_offset(self, offset: int) -> None:
         """Set the offset where laminate columns start."""
         self._laminate_column_offset = offset
-    
-    def mousePressEvent(self, event):
-        """Handle mouse press to detect click on info button area."""
-        logical_index = self.logicalIndexAt(event.pos())
-        
-        # Check if clicking in the info button area (right side of header cell)
-        if logical_index >= self._laminate_column_offset:
-            rect = self.sectionRect(logical_index)
-            button_area = QtCore.QRect(rect.right() - 30, rect.top(), 30, rect.height())
-            
-            if button_area.contains(event.pos()):
-                print(f"[DEBUG] Info button clicked for section {logical_index}")
-                cell_index = logical_index - self._laminate_column_offset
-                self.orientation_info_requested.emit(cell_index)
-                return
-        
-        # Otherwise, handle normally
-        super().mousePressEvent(event)
-    
-    def paintSection(self, painter, rect, logicalIndex):
-        """Override to paint section and draw info button indicator for laminate columns."""
-        # Paint the standard header first
-        super().paintSection(painter, rect, logicalIndex)
-        
-        # Draw info button indicator for laminate columns
-        if self.orientation() == QtCore.Qt.Horizontal and logicalIndex >= self._laminate_column_offset:
-            # Draw a small button indicator in the top-right
-            button_size = 20
-            button_x = rect.right() - button_size - 3
-            button_y = rect.top() + (rect.height() - button_size) // 2
-            button_rect = QtCore.QRect(button_x, button_y, button_size, button_size)
-            
-            # Draw button background
-            painter.save()
-            painter.setBrush(QtGui.QBrush(QtGui.QColor(200, 220, 255)))
-            painter.setPen(QtGui.QPen(QtGui.QColor(100, 150, 200), 1))
-            painter.drawRoundedRect(button_rect, 3, 3)
-            
-            # Draw "i" text
-            painter.setPen(QtGui.QPen(QtGui.QColor(0, 0, 0)))
-            font = painter.font()
-            font.setPointSize(8)
-            font.setBold(True)
-            painter.setFont(font)
-            painter.drawText(button_rect, QtCore.Qt.AlignCenter, "i")
-            painter.restore()
 
 
 class VirtualStackingModel(QtCore.QAbstractTableModel):
@@ -833,14 +836,13 @@ class VirtualStackingWindow(QtWidgets.QDialog):
         header = VirtualStackingHeaderView(QtCore.Qt.Horizontal, self.table)
         header.setDefaultAlignment(QtCore.Qt.AlignCenter)
         header.set_laminate_column_offset(self.model.LAMINATE_COLUMN_OFFSET)
-        header.orientation_info_requested.connect(self._on_orientation_button_clicked)
         self.table.setHorizontalHeader(header)
         header.setSectionsClickable(True)
         header.setSectionResizeMode(QtWidgets.QHeaderView.Interactive)
         header.setSectionsMovable(True)
         header.setStretchLastSection(False)
-        # Aumenta a altura do cabeçalho para acomodar nome + resumo multilinha.
-        header.setFixedHeight(max(header.sizeHint().height(), 150))
+        # Reduz altura do cabeçalho mantendo espaço para nome + resumo de 2 linhas (compacto)
+        header.setFixedHeight(max(header.sizeHint().height(), 80))
         header.sectionResized.connect(lambda *_: self._resize_summary_columns())
         header.sectionMoved.connect(self._on_header_section_moved)
         header.sectionClicked.connect(self._on_header_section_clicked)
@@ -1052,29 +1054,6 @@ class VirtualStackingWindow(QtWidgets.QDialog):
             self._selected_cell_ids = {cell_id}
         self._apply_column_selection()
 
-    def _on_orientation_button_clicked(self, cell_index: int) -> None:
-        """Handle click on the orientation info button in header."""
-        print(f"[DEBUG] Button clicked! cell_index={cell_index}, total_cells={len(self._cells)}")
-        if not (0 <= cell_index < len(self._cells)):
-            print(f"[DEBUG] Invalid cell index!")
-            return
-        
-        header = self.table.horizontalHeader()
-        print(f"[DEBUG] Header type: {type(header)}")
-        if isinstance(header, VirtualStackingHeaderView):
-            # Get the global position of the button
-            logical_index = cell_index + self.model.LAMINATE_COLUMN_OFFSET
-            rect = header.sectionRect(logical_index)
-            
-            # Calculate global position for menu
-            global_pos = header.mapToGlobal(QtCore.QPoint(rect.right() - 25, rect.bottom()))
-            print(f"[DEBUG] Showing menu at position {global_pos}")
-            
-            # Show the menu
-            self.show_orientation_menu(cell_index, global_pos)
-        else:
-            print(f"[DEBUG] Header is not VirtualStackingHeaderView!")
-
     def _selected_column_indexes(self) -> list[int]:
         columns: list[int] = []
         for idx, cell in enumerate(self._cells):
@@ -1166,6 +1145,13 @@ class VirtualStackingWindow(QtWidgets.QDialog):
         self._apply_column_selection()
 
     def _on_undo_stack_changed(self) -> None:
+        # Sincronizar todos os stacking models com os dados dos laminados
+        for lam_id, model in list(self._stacking_models.items()):
+            for cell in self._cells:
+                if id(cell.laminate) == lam_id:
+                    model.update_layers(list(getattr(cell.laminate, "camadas", [])))
+                    break
+        
         for cell in getattr(self, "_cells", []):
             self._auto_rename_if_enabled(cell.laminate)
         self._rebuild_view()
@@ -1841,53 +1827,6 @@ class VirtualStackingWindow(QtWidgets.QDialog):
 
         return "\n".join(lines)
 
-    def show_orientation_menu(self, cell_index: int, button_pos: QtCore.QPoint) -> None:
-        """
-        Show a dialog with orientation details for a specific laminate column.
-        
-        Args:
-            cell_index: Index into self._cells
-            button_pos: Global position where to show the dialog
-        """
-        print(f"[DEBUG] show_orientation_menu called with cell_index={cell_index}")
-        if not (0 <= cell_index < len(self._cells)):
-            print(f"[DEBUG] Invalid cell index in show_orientation_menu!")
-            return
-        
-        cell = self._cells[cell_index]
-        laminate = cell.laminate
-        print(f"[DEBUG] Cell: {cell.cell_id}, Laminate: {laminate.nome if hasattr(laminate, 'nome') else 'N/A'}")
-        
-        # Get summary text
-        summary_text = self._get_orientation_summary_for_laminate(laminate)
-        print(f"[DEBUG] Summary text length: {len(summary_text)}")
-        
-        # Create a dialog for better text display with newlines
-        dialog = QtWidgets.QDialog(self)
-        dialog.setWindowTitle(f"Orientations: {cell.cell_id}")
-        dialog.setMinimumWidth(400)
-        dialog.setMinimumHeight(300)
-        
-        layout = QtWidgets.QVBoxLayout(dialog)
-        
-        # Add summary text in a text edit (read-only)
-        text_edit = QtWidgets.QTextEdit()
-        text_edit.setPlainText(summary_text)
-        text_edit.setReadOnly(True)
-        layout.addWidget(text_edit)
-        
-        # Add close button
-        close_button = QtWidgets.QPushButton("Close")
-        close_button.clicked.connect(dialog.accept)
-        layout.addWidget(close_button)
-        
-        # Position dialog near the button position
-        screen_pos = button_pos
-        dialog.move(screen_pos.x() - 200, screen_pos.y() + 20)
-        print(f"[DEBUG] Showing dialog at {screen_pos}")
-        dialog.exec()
-        print(f"[DEBUG] Dialog closed")
-
     def _update_summary_row(self) -> None:
         # Gera resumos e injeta no cabeçalho das colunas de laminados.
         column_count = self.model.columnCount()
@@ -2128,6 +2067,10 @@ class VirtualStackingWindow(QtWidgets.QDialog):
     def _add_sequence_at_position(self, row: int, insert_below: bool) -> None:
         if row < 0 or not self._cells:
             return
+        
+        # Create undo/redo command
+        before_state = self._capture_virtual_snapshot()
+        
         self._push_virtual_snapshot()
         changed: list[str] = []
         insert_at = row + (1 if insert_below else 0)
@@ -2301,6 +2244,8 @@ class VirtualStackingWindow(QtWidgets.QDialog):
             return
         self.table.setCurrentIndex(index)
         menu = QtWidgets.QMenu(self)
+        
+        # Add sequence actions
         add_sequence_above_action = menu.addAction(
             "Adicionar sequência acima da sequência selecionada"
         )
@@ -2311,6 +2256,7 @@ class VirtualStackingWindow(QtWidgets.QDialog):
 
         is_sequence_column = index.column() < self.model.LAMINATE_COLUMN_OFFSET
         if not is_sequence_column:
+            # Add layer actions for laminate columns
             menu.addSeparator()
             add_layer_above_action = menu.addAction(
                 "Adicionar camada acima da camada selecionada"
@@ -2322,6 +2268,7 @@ class VirtualStackingWindow(QtWidgets.QDialog):
             edit_action = menu.addAction("Editar orientacao...")
             clear_action = menu.addAction("Limpar orientacao")
             remove_action = menu.addAction("Remover camada")
+        
         chosen = menu.exec(self.table.viewport().mapToGlobal(pos))
         if chosen == add_sequence_above_action:
             self._add_sequence_above_row(index.row())
@@ -2340,6 +2287,68 @@ class VirtualStackingWindow(QtWidgets.QDialog):
                 self._clear_orientation_at(index)
             elif chosen == remove_action:
                 self._remove_layer_at(index)
+
+    def _move_column_left(self, column: int) -> None:
+        """Move a laminate column one position to the left."""
+        if column < self.model.LAMINATE_COLUMN_OFFSET:
+            return  # Not a laminate column
+        
+        cell_idx = column - self.model.LAMINATE_COLUMN_OFFSET
+        if cell_idx <= 0 or cell_idx >= len(self._cells):
+            return  # Already at the left or invalid index
+        
+        # Record before state
+        self._push_virtual_snapshot()
+        
+        # Swap cells in the list
+        old_index = cell_idx
+        new_index = cell_idx - 1
+        command = _MoveColumnCommand(self._cells, old_index, new_index)
+        self.undo_stack.push(command)
+        
+        # Update the sorted cell IDs order
+        if len(self._cells) >= 2 and new_index >= 0:
+            self._sorted_cell_ids = [cell.cell_id for cell in self._cells]
+            if self._project is not None:
+                remaining = [cid for cid in self._project.celulas_ordenadas if cid not in self._sorted_cell_ids]
+                self._project.celulas_ordenadas = self._sorted_cell_ids + remaining
+        
+        # Rebuild view and update UI
+        self._rebuild_view()
+        self._check_symmetry()
+        self._mark_project_dirty()
+        self._notify_changes([cell.laminate.nome for cell in self._cells])
+
+    def _move_column_right(self, column: int) -> None:
+        """Move a laminate column one position to the right."""
+        if column < self.model.LAMINATE_COLUMN_OFFSET:
+            return  # Not a laminate column
+        
+        cell_idx = column - self.model.LAMINATE_COLUMN_OFFSET
+        if cell_idx < 0 or cell_idx >= len(self._cells) - 1:
+            return  # Already at the right or invalid index
+        
+        # Record before state
+        self._push_virtual_snapshot()
+        
+        # Swap cells in the list
+        old_index = cell_idx
+        new_index = cell_idx + 1
+        command = _MoveColumnCommand(self._cells, old_index, new_index)
+        self.undo_stack.push(command)
+        
+        # Update the sorted cell IDs order
+        if len(self._cells) >= 2 and new_index < len(self._cells):
+            self._sorted_cell_ids = [cell.cell_id for cell in self._cells]
+            if self._project is not None:
+                remaining = [cid for cid in self._project.celulas_ordenadas if cid not in self._sorted_cell_ids]
+                self._project.celulas_ordenadas = self._sorted_cell_ids + remaining
+        
+        # Rebuild view and update UI
+        self._rebuild_view()
+        self._check_symmetry()
+        self._mark_project_dirty()
+        self._notify_changes([cell.laminate.nome for cell in self._cells])
 
     def _laminate_for_cell(
         self, model: GridModel, cell_id: str
