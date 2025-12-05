@@ -835,6 +835,7 @@ class VirtualStackingWindow(QtWidgets.QDialog):
         header.set_laminate_column_offset(self.model.LAMINATE_COLUMN_OFFSET)
         header.orientation_info_requested.connect(self._on_orientation_button_clicked)
         self.table.setHorizontalHeader(header)
+        header.setSectionsClickable(True)
         header.setSectionResizeMode(QtWidgets.QHeaderView.Interactive)
         header.setSectionsMovable(True)
         header.setStretchLastSection(False)
@@ -1734,6 +1735,56 @@ class VirtualStackingWindow(QtWidgets.QDialog):
             except Exception:
                 return None
 
+    def _orientation_bucket(self, value: object) -> Optional[str]:
+        token = self._orientation_token(value)
+        if token is None:
+            return None
+        angle = float(token)
+        candidates = [
+            (0.0, "0"),
+            (45.0, "+45"),
+            (-45.0, "-45"),
+            (90.0, "90"),
+            (-90.0, "90"),
+            (180.0, "0"),
+            (-180.0, "0"),
+        ]
+        closest = min(candidates, key=lambda item: abs(angle - item[0]))
+        if abs(angle - closest[0]) <= 10.0:
+            return closest[1]
+        return "other"
+
+    def _orientation_counts_for_laminate(
+        self, laminate: Optional[Laminado]
+    ) -> tuple[Counter[str], int]:
+        counts: Counter[str] = Counter()
+        if laminate is None:
+            return counts, 0
+        for camada in getattr(laminate, "camadas", []):
+            bucket = self._orientation_bucket(getattr(camada, "orientacao", None))
+            if bucket is None:
+                continue
+            counts[bucket] += 1
+        total = sum(counts.values())
+        return counts, total
+
+    def _classify_laminate_type(self, counts: Counter[str], total: int) -> tuple[str, float]:
+        if total <= 0:
+            return "-", 0.0
+
+        pct_zero = counts.get("0", 0) / total
+        pct_45 = (counts.get("+45", 0) + counts.get("-45", 0)) / total
+        pct_90 = counts.get("90", 0) / total
+
+        threshold = 0.45
+        if pct_zero >= threshold and pct_zero >= pct_45 and pct_zero >= pct_90:
+            return "Hard", pct_zero
+        if pct_45 >= threshold and pct_45 >= pct_zero and pct_45 >= pct_90:
+            return "Soft", pct_45
+
+        dominant_pct = max(pct_zero, pct_45, pct_90)
+        return "Quasi-isotropic", dominant_pct
+
     def _row_considered(self, row: int) -> bool:
         if not (0 <= row < len(self._layers)):
             return True
@@ -1749,61 +1800,45 @@ class VirtualStackingWindow(QtWidgets.QDialog):
         return rows
 
     def _summary_for_laminate(self, laminate: Optional[Laminado]) -> str:
-        """Return only the total layer count in the format 'Total: X' for the header."""
-        if laminate is None:
-            return ""
-        layers = getattr(laminate, "camadas", [])
-        oriented_count = 0
-        for camada in layers:
-            token = self._orientation_token(getattr(camada, "orientacao", None))
-            if token is None:
-                continue
-            oriented_count += 1
-        return f"Total: {oriented_count}"
+        """Return total layer count plus laminate type for the header."""
+        counts, total = self._orientation_counts_for_laminate(laminate)
+        laminate_type, dominant_pct = self._classify_laminate_type(counts, total)
+
+        lines = [f"Total: {total}"]
+        if total > 0:
+            pct_text = f" ({dominant_pct * 100:.0f}%)" if dominant_pct > 0 else ""
+            lines.append(f"Tipo: {laminate_type}{pct_text}")
+        else:
+            lines.append("Tipo: -")
+
+        return "\n".join(lines)
 
     def _get_orientation_summary_for_laminate(self, laminate: Optional[Laminado]) -> str:
-        """
-        Build a detailed orientation summary for a laminate.
-        Returns text with orientation sequence and totals by angle.
-        """
-        if laminate is None:
-            return ""
-        
-        layers = getattr(laminate, "camadas", [])
-        if not layers:
-            return "No layers"
-        
-        # Collect orientation sequence and counts
-        orientation_sequence = []
-        orientation_counts: Counter = Counter()
-        
-        for camada in layers:
-            token = self._orientation_token(getattr(camada, "orientacao", None))
-            if token is None:
-                continue
-            label = format_orientation_value(token)
-            orientation_sequence.append(label)
-            orientation_counts[label] += 1
-        
-        if not orientation_sequence:
-            return "No oriented layers"
-        
-        # Build summary text
-        lines = []
-        lines.append("Orientation Sequence:")
-        lines.append(" → ".join(orientation_sequence))
+        """Build a compact summary with counts by orientation and laminate type."""
+        counts, total = self._orientation_counts_for_laminate(laminate)
+        laminate_type, dominant_pct = self._classify_laminate_type(counts, total)
+
+        lines: list[str] = []
+        lines.append(f"Total de camadas orientadas: {total}")
+        if total > 0:
+            pct_text = f" ({dominant_pct * 100:.0f}%)" if dominant_pct > 0 else ""
+            lines.append(f"Tipo predominante: {laminate_type}{pct_text}")
+        else:
+            lines.append("Tipo predominante: -")
+
         lines.append("")
-        lines.append("Orientation Totals:")
-        
-        # Sort by angle value for consistent display
-        sorted_orientations = sorted(
-            orientation_counts.items(),
-            key=lambda pair: self._orientation_token(pair[0]) or 0.0,
-        )
-        
-        for label, count in sorted_orientations:
-            lines.append(f"  {label}: {count} layer(s)")
-        
+        lines.append("Quantidade por orientacao:")
+        for key, title in [
+            ("0", "0 deg"),
+            ("+45", "+45 deg"),
+            ("-45", "-45 deg"),
+            ("90", "90 deg"),
+        ]:
+            lines.append(f"  {title}: {counts.get(key, 0)}")
+        other = counts.get("other", 0)
+        if other:
+            lines.append(f"  Outras: {other}")
+
         return "\n".join(lines)
 
     def show_orientation_menu(self, cell_index: int, button_pos: QtCore.QPoint) -> None:
