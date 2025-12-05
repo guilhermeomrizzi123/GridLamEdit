@@ -750,6 +750,43 @@ class CellNeighborsWindow(QDialog):
         self.redo_button.setEnabled(self._undo_stack.canRedo())
 
     # ---------- Sequence colouring ----------
+    def _find_center_sequence_indices(self, max_layers: int) -> set[int]:
+        """Collect 1-based center sequence indices for laminates used by current cells."""
+        centers: set[int] = set()
+        if self._model is None or max_layers <= 0:
+            return centers
+
+        # Limit to laminates actually referenced by the current grid cells to mirror the UI highlight.
+        try:
+            cell_to_laminate = getattr(self._model, "cell_to_laminate", {}) or {}
+        except Exception:
+            cell_to_laminate = {}
+        used_laminate_names = {
+            cell_to_laminate.get(cell_id)
+            for cell_id in self._cells
+            if cell_id in cell_to_laminate
+        }
+        try:
+            laminados = getattr(self._model, "laminados", {}) or {}
+        except Exception:
+            laminados = {}
+
+        for name in used_laminate_names:
+            if not name:
+                continue
+            laminado = laminados.get(name)
+            if laminado is None:
+                continue
+            try:
+                evaluation = evaluate_symmetry_for_layers(getattr(laminado, "camadas", []) or [])
+                for idx in getattr(evaluation, "centers", []) or []:
+                    seq_number = idx + 1  # 0-based -> 1-based
+                    if 1 <= seq_number <= max_layers:
+                        centers.add(seq_number)
+            except Exception:
+                continue
+        return centers
+
     def _populate_sequence_combo(self) -> None:
         """Fill the sequence combo with available sequence numbers based on current model.
         Always keeps 'Nenhuma' as first option."""
@@ -765,8 +802,10 @@ class CellNeighborsWindow(QDialog):
                     max_layers = max(max_layers, len(getattr(laminado, "camadas", [])))
             except Exception:
                 max_layers = 0
+        center_sequences = self._find_center_sequence_indices(max_layers)
         for i in range(1, max_layers + 1):
-            self.sequence_combo.addItem(str(i))
+            label = f"{i} Center Sequence" if i in center_sequences else str(i)
+            self.sequence_combo.addItem(label)
         # Reset selection & colours
         self.sequence_combo.setCurrentIndex(0)
         self._current_sequence_index = None
