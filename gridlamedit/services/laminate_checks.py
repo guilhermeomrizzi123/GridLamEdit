@@ -207,18 +207,39 @@ def _rows_match(
     return True, None
 
 
+def _is_empty_orientation(layers: Sequence[Camada], index: int) -> bool:
+    """Return True when the given layer has an empty/placeholder orientation."""
+    if not (0 <= index < len(layers)):
+        return True
+    try:
+        orientation = getattr(layers[index], "orientacao", None)
+    except Exception:
+        return True
+    if orientation is None:
+        return True
+    try:
+        text = str(orientation).strip().lower()
+    except Exception:
+        return False
+    return text == "" or text == "empty"
+
+
 def evaluate_symmetry_for_layers(layers: Sequence[Camada]) -> LaminateSymmetryEvaluation:
     """
-    Evaluate laminate symmetry based on valid sequences (ply_type != ``PLY_TYPE_OPTIONS[1]``).
+    Evaluate laminate symmetry based on valid sequences (ply_type != ``PLY_TYPE_OPTIONS[1]``),
+    ignoring layers whose orientation is marked as "Empty".
     """
     structural_rows: list[int] = [
         idx
         for idx, camada in enumerate(layers)
         if normalize_ply_type_label(getattr(camada, "ply_type", DEFAULT_PLY_TYPE)) != PLY_TYPE_OPTIONS[1]
     ]
+    usable_rows: list[int] = [
+        idx for idx in structural_rows if not _is_empty_orientation(layers, idx)
+    ]
     centers: list[int] = []
     mismatch: tuple[int, int] | None = None
-    symmetric = False
+    symmetric = True
 
     count = len(structural_rows)
     if count == 0:
@@ -229,36 +250,35 @@ def evaluate_symmetry_for_layers(layers: Sequence[Camada]) -> LaminateSymmetryEv
             first_mismatch=None,
         )
 
-    if count % 2 == 1:
-        mid = count // 2
-        centers = [structural_rows[mid]]
-        symmetric = True
-        for offset in range(1, mid + 1):
-            left = structural_rows[mid - offset]
-            right = structural_rows[mid + offset]
-            matches, bad_pair = _rows_match(layers, left, right)
-            if not matches:
-                symmetric = False
-                mismatch = bad_pair
-                break
-    else:
-        mid_left = count // 2 - 1
-        mid_right = count // 2
-        centers = [structural_rows[mid_left], structural_rows[mid_right]]
-        symmetric = True
-        for offset in range(0, mid_left + 1):
-            left = structural_rows[mid_left - offset]
-            right = structural_rows[mid_right + offset]
-            matches, bad_pair = _rows_match(layers, left, right)
-            if not matches:
-                symmetric = False
-                mismatch = bad_pair
-                break
-        if symmetric:
-            matches, bad_pair = _rows_match(layers, centers[0], centers[1])
-            if not matches:
-                symmetric = False
-                mismatch = bad_pair
+    left_ptr = 0
+    right_ptr = count - 1
+
+    while left_ptr < right_ptr:
+        left_idx = structural_rows[left_ptr]
+        right_idx = structural_rows[right_ptr]
+
+        if _is_empty_orientation(layers, left_idx):
+            left_ptr += 1
+            continue
+        if _is_empty_orientation(layers, right_idx):
+            right_ptr -= 1
+            continue
+
+        matches, bad_pair = _rows_match(layers, left_idx, right_idx)
+        if not matches:
+            symmetric = False
+            mismatch = bad_pair
+            break
+
+        left_ptr += 1
+        right_ptr -= 1
+
+    if usable_rows:
+        mid = len(usable_rows) // 2
+        if len(usable_rows) % 2 == 1:
+            centers = [usable_rows[mid]]
+        else:
+            centers = [usable_rows[mid - 1], usable_rows[mid]]
 
     return LaminateSymmetryEvaluation(
         structural_rows=structural_rows,
