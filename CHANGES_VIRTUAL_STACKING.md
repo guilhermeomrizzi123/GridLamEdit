@@ -120,9 +120,8 @@ move_right_action = menu.addAction("Mover coluna para direita")
 **`_VirtualStackingSnapshotCommand`** (linhas ~2525-2545)
 - Captura estado completo antes e depois de operações
 - Usado para:
-  - Adicionar/remover sequências
-  - Mover colunas
-  - Reorganizar por vizinhança
+   - Adicionar/remover sequências
+   - Mover colunas
 - Permite undo/redo de operações complexas
 
 #### Funções de Suporte:
@@ -144,7 +143,6 @@ move_right_action = menu.addAction("Mover coluna para direita")
 ✅ **Inserir sequência** - via `_push_virtual_snapshot()`
 ✅ **Remover sequência** - via `_push_virtual_snapshot()`
 ✅ **Mover coluna esquerda/direita** - via `_MoveColumnCommand`
-✅ **Reorganizar por vizinhança** - via `_push_virtual_snapshot()`
 
 ### Como Funciona:
 
