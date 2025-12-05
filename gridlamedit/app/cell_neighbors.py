@@ -13,6 +13,7 @@ which returns the current neighbor map in memory.
 
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass
 from typing import Dict, Optional, Tuple
 
@@ -47,12 +48,16 @@ try:
         GridModel,
         ORIENTATION_HIGHLIGHT_COLORS,
         DEFAULT_ORIENTATION_HIGHLIGHT,
+        normalize_angle,
     )
     from gridlamedit.services.laminate_checks import evaluate_symmetry_for_layers
 except Exception:  # pragma: no cover - optional import for loose coupling
     GridModel = object  # type: ignore
     ORIENTATION_HIGHLIGHT_COLORS = {45.0: QColor(193, 174, 255), 90.0: QColor(160, 196, 255), -45.0: QColor(176, 230, 176), 0.0: QColor(230, 230, 230)}
     DEFAULT_ORIENTATION_HIGHLIGHT = QColor(255, 236, 200)
+
+    def normalize_angle(value):  # type: ignore
+        return float(value)
 
     def evaluate_symmetry_for_layers(layers):  # type: ignore
         class _Eval:
@@ -80,6 +85,17 @@ COLOR_PLUS = QColor(108, 117, 125)  # Steel gray
 COLOR_PLUS_HOVER = QColor(173, 181, 189)  # Light steel on hover
 COLOR_DASH = QColor(134, 142, 150)  # Medium steel gray lines
 COLOR_CENTER_BORDER = QColor(250, 128, 114)  # Salmon highlight for central sequences
+
+COLOR_AML_SOFT = QColor(78, 153, 223)  # Clear blue for Soft
+COLOR_AML_QUASI = QColor(147, 112, 219)  # Purple for Quasi-iso
+COLOR_AML_HARD = QColor(240, 148, 69)  # Amber for Hard
+COLOR_AML_UNKNOWN = QColor(108, 117, 125)  # Neutral gray fallback
+
+AML_TYPE_COLORS = {
+    "Soft": COLOR_AML_SOFT,
+    "Quasi-iso": COLOR_AML_QUASI,
+    "Hard": COLOR_AML_HARD,
+}
 
 BASE_BORDER_WIDTH = 2
 CENTER_BORDER_WIDTH = 4
@@ -328,6 +344,13 @@ class CellNodeItem(QGraphicsRectItem):
         f.setPointSize(f.pointSize() + 2)
         self._label.setFont(f)
         self._label.setBrush(COLOR_TEXT)
+        # AML type overlay at top-center
+        self._aml_label = QGraphicsSimpleTextItem("", self)
+        af: QFont = self._aml_label.font()
+        af.setBold(True)
+        af.setPointSize(max(8, af.pointSize() - 1))
+        self._aml_label.setFont(af)
+        self._aml_label.setBrush(COLOR_TEXT)
         # Orientation overlay in bottom-right
         self._orientation_label = QGraphicsSimpleTextItem("", self)
         of: QFont = self._orientation_label.font()
@@ -394,6 +417,11 @@ class CellNodeItem(QGraphicsRectItem):
             rect.right() - ob.width() - margin,
             rect.bottom() - ob.height() - margin,
         )
+        ab = self._aml_label.boundingRect()
+        self._aml_label.setPos(
+            rect.x() + (rect.width() - ab.width()) / 2,
+            rect.y() + margin,
+        )
 
     def _update_text_contrast(self, base_color: QColor) -> None:
         r, g, b = base_color.red(), base_color.green(), base_color.blue()
@@ -403,6 +431,7 @@ class CellNodeItem(QGraphicsRectItem):
         chosen = light if luminance < 150 else dark
         self._label.setBrush(chosen)
         self._orientation_label.setBrush(chosen)
+        self._aml_label.setBrush(chosen)
 
     def set_border_highlight(self, color: Optional[QColor], width: int) -> None:
         """Apply a border style keeping rounded corners."""
@@ -566,11 +595,20 @@ class CellNeighborsWindow(QDialog):
         self.sequence_combo.currentIndexChanged.connect(self._on_sequence_changed)
         toolbar.addWidget(self.sequence_combo)
 
+        # AML type highlight toggle
+        self.aml_toggle_button = QPushButton("Tipo AML", self)
+        self.aml_toggle_button.setCheckable(True)
+        self.aml_toggle_button.setToolTip("Colorir células pelo tipo de AML (Soft, Quasi-iso, Hard)")
+        self.aml_toggle_button.toggled.connect(self._on_aml_toggle)
+        toolbar.addWidget(self.aml_toggle_button)
+
         self._current_sequence_index: Optional[int] = None  # 1-based; None => no colouring
+        self._aml_highlight_enabled = False
+        self._previous_sequence_index_for_aml: int = 0
         
         # Connect undo stack signals
-        self._undo_stack.canUndoChanged.connect(self.undo_button.setEnabled)
-        self._undo_stack.canRedoChanged.connect(self.redo_button.setEnabled)
+        self._undo_stack.canUndoChanged.connect(self._update_command_buttons)
+        self._undo_stack.canRedoChanged.connect(self._update_command_buttons)
         self._undo_stack.indexChanged.connect(self._mark_as_modified)
         
         main_layout.addWidget(toolbar)
@@ -658,6 +696,8 @@ class CellNeighborsWindow(QDialog):
         """Populate the window with cells from the project and load existing neighbors."""
         self._model = model
         self._project_manager = project_manager
+        # Always start with AML highlight disabled for a fresh load
+        self.aml_toggle_button.setChecked(False)
         cells = []
         if model is not None:
             try:
@@ -681,6 +721,7 @@ class CellNeighborsWindow(QDialog):
         self._update_all_plus_buttons_visibility()
         # Populate sequence combo (max layers among laminados)
         self._populate_sequence_combo()
+        self._update_command_buttons()
         # Center view on cells after loading
         self._center_view_on_cells()
 
@@ -695,7 +736,18 @@ class CellNeighborsWindow(QDialog):
     def _mark_as_modified(self) -> None:
         """Mark that there are unsaved changes."""
         self._has_unsaved_changes = True
-        self.save_button.setEnabled(True)
+        self._update_command_buttons()
+
+    def _update_command_buttons(self, *args) -> None:
+        """Enable/disable Save/Undo/Redo respecting AML lock state."""
+        if self._aml_highlight_enabled:
+            self.save_button.setEnabled(False)
+            self.undo_button.setEnabled(False)
+            self.redo_button.setEnabled(False)
+            return
+        self.save_button.setEnabled(self._has_unsaved_changes)
+        self.undo_button.setEnabled(self._undo_stack.canUndo())
+        self.redo_button.setEnabled(self._undo_stack.canRedo())
 
     # ---------- Sequence colouring ----------
     def _populate_sequence_combo(self) -> None:
@@ -718,15 +770,63 @@ class CellNeighborsWindow(QDialog):
         # Reset selection & colours
         self.sequence_combo.setCurrentIndex(0)
         self._current_sequence_index = None
-        self.update_cell_colors_for_sequence(None)
+        if self._aml_highlight_enabled:
+            self.update_cell_colors_for_aml()
+        else:
+            self.update_cell_colors_for_sequence(None)
+        self._update_command_buttons()
 
     def _on_sequence_changed(self, combo_index: int) -> None:
         """Handle combo change: index 0 => no sequence colouring, else 1-based sequence number."""
+        if self._aml_highlight_enabled:
+            # Keep AML mode locked to the base ("Nenhuma") sequence
+            if combo_index != 0:
+                self.sequence_combo.blockSignals(True)
+                self.sequence_combo.setCurrentIndex(0)
+                self.sequence_combo.blockSignals(False)
+            self._current_sequence_index = None
+            self.update_cell_colors_for_aml()
+            return
         if combo_index <= 0:
             self._current_sequence_index = None
         else:
             self._current_sequence_index = combo_index  # 1-based sequence
         self.update_cell_colors_for_sequence(self._current_sequence_index)
+
+    def _on_aml_toggle(self, enabled: bool) -> None:
+        if enabled:
+            self._activate_aml_highlight()
+        else:
+            self._deactivate_aml_highlight()
+
+    def _activate_aml_highlight(self) -> None:
+        if self._aml_highlight_enabled:
+            return
+        self._aml_highlight_enabled = True
+        self._previous_sequence_index_for_aml = self.sequence_combo.currentIndex()
+        self.sequence_combo.blockSignals(True)
+        self.sequence_combo.setCurrentIndex(0)
+        self.sequence_combo.blockSignals(False)
+        self._current_sequence_index = None
+        self.sequence_combo.setEnabled(False)
+        self.sequence_label.setEnabled(False)
+        self._update_command_buttons()
+        self.update_cell_colors_for_aml()
+
+    def _deactivate_aml_highlight(self) -> None:
+        if not self._aml_highlight_enabled:
+            return
+        self._aml_highlight_enabled = False
+        self.sequence_combo.setEnabled(True)
+        self.sequence_label.setEnabled(True)
+        restore_index = self._previous_sequence_index_for_aml
+        if restore_index < 0 or restore_index >= self.sequence_combo.count():
+            restore_index = 0
+        self.sequence_combo.blockSignals(True)
+        self.sequence_combo.setCurrentIndex(restore_index)
+        self.sequence_combo.blockSignals(False)
+        self._update_command_buttons()
+        self._on_sequence_changed(self.sequence_combo.currentIndex())
 
     def _apply_border_highlight(self, item: CellNodeItem, highlighted: bool) -> None:
         if highlighted:
@@ -741,9 +841,13 @@ class CellNeighborsWindow(QDialog):
         Rule: same orientation => same colour (reuses global orientation mapping).
         Cells lacking a layer at that sequence or orientation => reset to neutral brush.
         """
+        if self._aml_highlight_enabled:
+            self.update_cell_colors_for_aml()
+            return
         symmetry_cache: dict[int, object] = {}
         for record in self._nodes_by_grid.values():
             item = record.item
+            item._aml_label.setText("")
             # Reset when no sequence selected
             if sequence_index is None or not record.cell_id or self._model is None:
                 item.setBrush(item._normal_brush)
@@ -797,8 +901,85 @@ class CellNeighborsWindow(QDialog):
             item._recenter_label()
             self._apply_border_highlight(item, is_center_sequence)
 
+    # ---------- AML colouring ----------
+    def _aml_orientation_bucket(self, value: object) -> Optional[str]:
+        if value is None:
+            return None
+        try:
+            angle = float(normalize_angle(value))
+        except Exception:
+            return None
+        candidates = [
+            (0.0, "0"),
+            (45.0, "+45"),
+            (-45.0, "-45"),
+            (90.0, "90"),
+            (-90.0, "90"),
+            (180.0, "0"),
+            (-180.0, "0"),
+        ]
+        closest = min(candidates, key=lambda item: abs(angle - item[0]))
+        if abs(angle - closest[0]) <= 10.0:
+            return closest[1]
+        return "other"
+
+    def _classify_laminate_aml_type(self, laminado: Optional[object]) -> Optional[str]:
+        if laminado is None:
+            return None
+        counts: Counter[str] = Counter()
+        for camada in getattr(laminado, "camadas", []) or []:
+            bucket = self._aml_orientation_bucket(getattr(camada, "orientacao", None))
+            if bucket is None:
+                continue
+            counts[bucket] += 1
+        total = sum(counts.values())
+        if total <= 0:
+            return None
+        pct_zero = counts.get("0", 0) / total
+        pct_45 = (counts.get("+45", 0) + counts.get("-45", 0)) / total
+        pct_90 = counts.get("90", 0) / total
+        threshold = 0.45
+        if pct_zero >= threshold and pct_zero >= pct_45 and pct_zero >= pct_90:
+            return "Hard"
+        if pct_45 >= threshold and pct_45 >= pct_zero and pct_45 >= pct_90:
+            return "Soft"
+        return "Quasi-iso"
+
+    def update_cell_colors_for_aml(self) -> None:
+        """Colour cells by AML type and show the label on top."""
+        # Command buttons stay locked while AML highlighting is active
+        self._update_command_buttons()
+        for record in self._nodes_by_grid.values():
+            item = record.item
+            item._orientation_label.setText("")
+            if not record.cell_id or self._model is None:
+                item.setBrush(item._normal_brush)
+                item._aml_label.setText("")
+                self._apply_border_highlight(item, False)
+                item._recenter_label()
+                continue
+
+            laminate_name = self._model.cell_to_laminate.get(record.cell_id)
+            laminado = self._model.laminados.get(laminate_name) if laminate_name else None
+            aml_type = self._classify_laminate_aml_type(laminado)
+
+            if aml_type is None:
+                item.setBrush(item._normal_brush)
+                item._aml_label.setText("")
+                self._apply_border_highlight(item, False)
+                item._recenter_label()
+                continue
+
+            color = AML_TYPE_COLORS.get(aml_type, COLOR_AML_UNKNOWN)
+            item.setBrush(QBrush(color))
+            item._aml_label.setText(aml_type)
+            self._apply_border_highlight(item, False)
+            item._recenter_label()
+
     def _save_to_project(self) -> None:
         """Save current neighbors mapping to the project (manual save)."""
+        if self._aml_highlight_enabled:
+            return
         # Check for disconnected blocks before saving
         if not self._check_and_handle_disconnected_blocks():
             return  # User cancelled or no valid blocks
@@ -813,7 +994,7 @@ class CellNeighborsWindow(QDialog):
                         self._project_manager.save()
                     # Mark as saved
                     self._has_unsaved_changes = False
-                    self.save_button.setEnabled(False)
+                    self._update_command_buttons()
                 except Exception as e:
                     import logging
                     logger = logging.getLogger(__name__)
@@ -924,6 +1105,7 @@ class CellNeighborsWindow(QDialog):
                             btn.setVisible(has_available)
                         if line:
                             line.setVisible(has_available)
+        self._update_command_buttons()
 
     def _delete_cell(self, record: _NodeRecord) -> None:
         """Delete a cell from the scene and update all neighbors."""
