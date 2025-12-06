@@ -1205,6 +1205,15 @@ class VirtualStackingWindow(QtWidgets.QDialog):
 
         toolbar.addStretch()
 
+        # Reorganizar por Vizinhança
+        self.btn_reorganize_neighbors = QtWidgets.QToolButton(self)
+        self.btn_reorganize_neighbors.setText("Reorganizar por Vizinhança")
+        self.btn_reorganize_neighbors.setToolTip(
+            "Reorganiza as sequências com base nas regras de vizinhança e simetria"
+        )
+        self.btn_reorganize_neighbors.clicked.connect(self.on_reorganizar_por_vizinhanca_clicked)
+        toolbar.addWidget(self.btn_reorganize_neighbors)
+
         # Novo botão: analisar simetria
         self.btn_analyze_symmetry = QtWidgets.QToolButton(self)
         self.btn_analyze_symmetry.setText("Analisar Simetria")
@@ -2430,6 +2439,244 @@ class VirtualStackingWindow(QtWidgets.QDialog):
 
         self.undo_stack.push(_VirtualStackingSnapshotCommand(before_state))
         self._update_undo_buttons()
+
+    # ---------------------------------------------------------------
+    # Reorganizar por vizinhança
+    def on_reorganizar_por_vizinhanca_clicked(self) -> None:
+        """Slot conectado ao botão da toolbar."""
+        self.reorganizar_por_vizinhanca()
+
+    def _neighbors_adjacency(self) -> dict[str, set[str]]:
+        """Converte o mapeamento de vizinhos do projeto em um grafo não direcionado."""
+        cell_ids = [cell.cell_id for cell in self._cells]
+        adjacency: dict[str, set[str]] = {cid: set() for cid in cell_ids}
+        mapping = getattr(self._project, "cell_neighbors", {}) if self._project is not None else {}
+        for src, neighbors in mapping.items():
+            if src not in adjacency:
+                continue
+            for dst in (neighbors or {}).values():
+                if not dst:
+                    continue
+                if dst not in adjacency:
+                    continue
+                adjacency[src].add(dst)
+                adjacency.setdefault(dst, set()).add(src)
+        return adjacency
+
+    def _normalize_orientation_value(self, value: object) -> object:
+        """Normaliza orientação para float quando possível, mantendo o valor bruto em caso de falha."""
+        try:
+            return normalize_angle(value)
+        except Exception:
+            try:
+                return normalize_angle(str(value))
+            except Exception:
+                return value
+
+    def _layer_for_cell(self, cell_layers: dict[str, list[Camada]], cell_id: str, row_idx: int) -> Camada:
+        layers = cell_layers.get(cell_id, [])
+        if 0 <= row_idx < len(layers):
+            return copy.deepcopy(layers[row_idx])
+        return Camada(
+            idx=0,
+            material="",
+            orientacao=None,
+            ativo=True,
+            simetria=False,
+            ply_type=DEFAULT_PLY_TYPE,
+            ply_label="",
+            sequence="",
+            rosette=DEFAULT_ROSETTE_LABEL,
+        )
+
+    def _build_row_groups(
+        self,
+        row_idx: int,
+        adjacency: dict[str, set[str]],
+        cell_layers: dict[str, list[Camada]],
+        cell_order: list[str],
+        order_index: dict[str, int],
+    ) -> list[dict[str, object]]:
+        """Agrupa células com orientação preenchida por conectividade e orientação."""
+        oriented: dict[str, object] = {}
+        for cid in cell_order:
+            layer = self._layer_for_cell(cell_layers, cid, row_idx)
+            if getattr(layer, "orientacao", None) is None:
+                continue
+            oriented[cid] = self._normalize_orientation_value(getattr(layer, "orientacao", None))
+
+        visited: set[str] = set()
+        groups: list[tuple[int, dict[str, object]]] = []
+        for cid in cell_order:
+            if cid in visited or cid not in oriented:
+                continue
+            component: set[str] = set()
+            stack = [cid]
+            visited.add(cid)
+            while stack:
+                current = stack.pop()
+                component.add(current)
+                for neighbor in adjacency.get(current, ()):  # Only consider oriented neighbors
+                    if neighbor in oriented and neighbor not in visited:
+                        visited.add(neighbor)
+                        stack.append(neighbor)
+            orientation_groups: dict[object, set[str]] = {}
+            for cell_id in component:
+                ori = oriented[cell_id]
+                orientation_groups.setdefault(ori, set()).add(cell_id)
+            for ori, cells in orientation_groups.items():
+                anchor = min(order_index.get(c, len(order_index)) for c in cells)
+                groups.append((anchor, {"cells": set(cells), "orientation": ori}))
+        groups.sort(key=lambda entry: entry[0])
+        return [item for _, item in groups]
+
+    def _build_row_snapshot(
+        self,
+        row_idx: int,
+        group: Optional[dict[str, object]],
+        cell_layers: dict[str, list[Camada]],
+        cell_order: list[str],
+        *,
+        use_original_when_empty: bool = False,
+    ) -> dict[str, Camada]:
+        """Gera uma linha virtual com base em um grupo específico ou mantém original."""
+        snapshot: dict[str, Camada] = {}
+        for cid in cell_order:
+            base_layer = self._layer_for_cell(cell_layers, cid, row_idx)
+            layer_copy = copy.deepcopy(base_layer)
+            if group is None:
+                if use_original_when_empty:
+                    snapshot[cid] = layer_copy
+                else:
+                    layer_copy.orientacao = None
+                    snapshot[cid] = layer_copy
+                continue
+            if cid in group.get("cells", set()):
+                layer_copy.orientacao = group.get("orientation")
+            else:
+                layer_copy.orientacao = None
+            snapshot[cid] = layer_copy
+        return snapshot
+
+    def _rows_for_side(
+        self,
+        row_idx: int,
+        groups: list[dict[str, object]],
+        slot_count: int,
+        cell_layers: dict[str, list[Camada]],
+        cell_order: list[str],
+        *,
+        preserve_when_empty: bool,
+    ) -> list[dict[str, Camada]]:
+        rows: list[dict[str, Camada]] = []
+        for pos in range(slot_count):
+            group = groups[pos] if pos < len(groups) else None
+            keep_original = preserve_when_empty and group is None and not groups and pos == 0
+            rows.append(
+                self._build_row_snapshot(
+                    row_idx,
+                    group,
+                    cell_layers,
+                    cell_order,
+                    use_original_when_empty=keep_original,
+                )
+            )
+        return rows
+
+    def _apply_virtual_rows_to_laminates(self, rows: list[dict[str, Camada]]) -> None:
+        if not rows:
+            return
+        new_layers_by_cell: dict[str, list[Camada]] = {cell.cell_id: [] for cell in self._cells}
+        for idx, row in enumerate(rows):
+            for cid, layer in row.items():
+                layer.idx = idx
+                new_layers_by_cell.setdefault(cid, []).append(layer)
+        for cell in self._cells:
+            layers = new_layers_by_cell.get(cell.cell_id, [])
+            cell.laminate.camadas = layers
+            model = self._stacking_model_for(cell.laminate)
+            if model is not None:
+                model.update_layers(copy.deepcopy(layers))
+            self._after_laminate_changed(cell.laminate)
+
+    def reorganizar_por_vizinhanca(self) -> None:
+        """Aplica as regras de agrupamento por vizinhança e simetria."""
+        if self._project is None or not self._cells:
+            return
+
+        # Habilitar desfazer
+        self._push_virtual_snapshot()
+
+        # Garantir laminado único por célula para evitar efeitos colaterais
+        for cell in self._cells:
+            self._ensure_unique_laminate_for_cell(cell)
+
+        adjacency = self._neighbors_adjacency()
+        cell_order = [cell.cell_id for cell in self._cells]
+        order_index = {cid: idx for idx, cid in enumerate(cell_order)}
+        cell_layers: dict[str, list[Camada]] = {
+            cell.cell_id: copy.deepcopy(getattr(cell.laminate, "camadas", []))
+            for cell in self._cells
+        }
+
+        total_rows = max((len(layers) for layers in cell_layers.values()), default=0)
+        if total_rows == 0:
+            return
+
+        top = 0
+        bottom = total_rows - 1
+        front_rows: list[dict[str, Camada]] = []
+        back_rows: list[list[dict[str, Camada]]] = []
+
+        while top < bottom:
+            top_groups = self._build_row_groups(top, adjacency, cell_layers, cell_order, order_index)
+            bottom_groups = self._build_row_groups(bottom, adjacency, cell_layers, cell_order, order_index)
+            slot_count = max(len(top_groups), len(bottom_groups), 1)
+
+            top_rows = self._rows_for_side(
+                top,
+                top_groups,
+                slot_count,
+                cell_layers,
+                cell_order,
+                preserve_when_empty=not bool(top_groups),
+            )
+            bottom_rows = self._rows_for_side(
+                bottom,
+                bottom_groups,
+                slot_count,
+                cell_layers,
+                cell_order,
+                preserve_when_empty=not bool(bottom_groups),
+            )
+
+            front_rows.extend(top_rows)
+            back_rows.append(bottom_rows)
+            top += 1
+            bottom -= 1
+
+        center_rows: list[dict[str, Camada]] = []
+        if top == bottom:
+            # Sequência central permanece como está para preservar o eixo
+            center_rows.append(
+                self._build_row_snapshot(
+                    top,
+                    None,
+                    cell_layers,
+                    cell_order,
+                    use_original_when_empty=True,
+                )
+            )
+
+        final_rows: list[dict[str, Camada]] = []
+        final_rows.extend(front_rows)
+        final_rows.extend(center_rows)
+        for bottom_rows in reversed(back_rows):
+            for row in reversed(bottom_rows):
+                final_rows.append(row)
+
+        self._apply_virtual_rows_to_laminates(final_rows)
+        self._notify_changes([cell.laminate.nome for cell in self._cells])
 
     # ---------------------------------------------------------------
     # Nova funcionalidade: analisar simetria
