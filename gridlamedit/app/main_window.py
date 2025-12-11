@@ -23,10 +23,12 @@ from PySide6.QtCore import (
     QByteArray,
     QSettings,
     QThread,
+    QUrl,
     Signal,
     Slot,
 )
 from PySide6.QtGui import (
+    QDesktopServices,
     QAction,
     QCloseEvent,
     QIcon,
@@ -112,6 +114,11 @@ from gridlamedit.io.spreadsheet import (
     count_oriented_layers,
 )
 from gridlamedit.services.excel_io import export_grid_xlsx
+from gridlamedit.services.laminate_batch_import import (
+    BatchLaminateInput,
+    create_blank_batch_template,
+    parse_batch_template,
+)
 from gridlamedit.services.project_query import (
     project_distinct_materials,
     project_distinct_orientations,
@@ -331,6 +338,13 @@ class MainWindow(QMainWindow):
                 None,
             ),
             (
+                "batch_import_action",
+                "Importar Laminados em Lote",
+                self._on_batch_import_laminates,
+                "Preencher e importar laminados usando o template Excel.",
+                None,
+            ),
+            (
                 "save_action",
                 "Salvar",
                 self._on_save_triggered,
@@ -388,6 +402,7 @@ class MainWindow(QMainWindow):
         file_menu = menu_bar.addMenu("Arquivo")
         file_menu.addAction(self.open_project_action)
         file_menu.addAction(self.load_spreadsheet_action)
+        file_menu.addAction(self.batch_import_action)
         file_menu.addSeparator()
         file_menu.addAction(self.save_action)
         file_menu.addAction(self.save_as_action)
@@ -2893,6 +2908,262 @@ class MainWindow(QMainWindow):
                 "Movimento invalido",
                 "Nao foi possivel mover a camada selecionada.",
             )
+
+    # Batch laminate import ----------------------------------------------------
+
+    def _batch_template_path(self) -> Path:
+        base_candidates = [
+            package_path("..", "Template for Batch Upload.xlsx"),
+            package_path("Template for Batch Upload.xlsx"),
+            Path(__file__).resolve().parents[2] / "Template for Batch Upload.xlsx",
+        ]
+        for candidate in base_candidates:
+            try:
+                resolved = candidate.resolve()
+            except Exception:
+                resolved = candidate
+            if resolved.exists():
+                return resolved
+        raise FileNotFoundError("Template for Batch Upload.xlsx nao encontrado.")
+
+    def _open_with_default_app(self, path: Path) -> None:
+        try:
+            os.startfile(path)  # type: ignore[attr-defined]
+            return
+        except Exception:
+            pass
+        try:
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
+        except Exception:
+            logger.warning("Nao foi possivel abrir o arquivo %s automaticamente.", path)
+
+    def _prompt_batch_import_choice(self, temp_path: Path) -> tuple[Optional[str], Optional[Path]]:
+        box = QMessageBox(self)
+        box.setWindowTitle("Importar laminados em lote")
+        box.setText(
+            "O template em branco foi aberto. Preencha, salve e feche o arquivo antes de importar."
+        )
+        import_now = box.addButton("Importar agora", QMessageBox.AcceptRole)
+        choose_file = box.addButton(
+            "Selecionar arquivo preenchido", QMessageBox.ActionRole
+        )
+        save_template = box.addButton("Salvar template", QMessageBox.ActionRole)
+        box.addButton(QMessageBox.Cancel)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked is import_now:
+            return "import", temp_path
+        if clicked is choose_file:
+            return "choose", None
+        if clicked is save_template:
+            return "save", None
+        return None, None
+
+    def _save_blank_batch_template(self, base_template: Path) -> None:
+        options = self._file_dialog_options()
+        dest, _ = QFileDialog.getSaveFileName(
+            self,
+            "Salvar template de lote",
+            "Template for Batch Upload.xlsx",
+            "Planilhas Excel (*.xlsx);;Todos os arquivos (*)",
+            options=options,
+        )
+        if not dest:
+            return
+        try:
+            create_blank_batch_template(base_template, destination=Path(dest), sheet_name="Sheet1")
+        except Exception as exc:
+            logger.error("Falha ao salvar template de lote: %s", exc, exc_info=True)
+            QMessageBox.critical(
+                self,
+                "Erro",
+                "Nao foi possivel salvar o template em branco.",
+            )
+            return
+        QMessageBox.information(
+            self,
+            "Template salvo",
+            f"Modelo salvo em '{Path(dest).name}'.",
+        )
+
+    def _select_filled_batch_file(self) -> Optional[Path]:
+        options = self._file_dialog_options()
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Selecionar template preenchido",
+            "",
+            "Planilhas Excel (*.xlsx *.xls);;Todos os arquivos (*)",
+            options=options,
+        )
+        return Path(path) if path else None
+
+    def _build_layers_from_batch_entry(self, entry: BatchLaminateInput) -> list[Camada]:
+        if not entry.orientations:
+            return []
+        base = list(entry.orientations)
+        if entry.is_symmetric:
+            mirror_source = base[:-1] if entry.center_is_single else base
+            mirrored = list(reversed(mirror_source))
+            full_stack = base + mirrored
+        else:
+            full_stack = base
+        layers: list[Camada] = []
+        for idx, angle in enumerate(full_stack):
+            layers.append(
+                Camada(
+                    idx=idx,
+                    material="",
+                    orientacao=angle if angle is not None else None,
+                    ativo=True,
+                    simetria=False,
+                    ply_type=DEFAULT_PLY_TYPE,
+                    ply_label=f"Ply.{idx + 1}",
+                    sequence=f"Seq.{idx + 1}",
+                )
+            )
+        return layers
+
+    def _apply_batch_entries(self, entries: list[BatchLaminateInput]) -> list[str]:
+        if self._grid_model is None:
+            self._grid_model = GridModel()
+        created: list[str] = []
+        for entry in entries:
+            layers = self._build_layers_from_batch_entry(entry)
+            if not layers:
+                continue
+            laminate = Laminado(
+                nome="",
+                tipo="SS",
+                color_index=DEFAULT_COLOR_INDEX,
+                tag=str(entry.tag or ""),
+                celulas=[],
+                camadas=layers,
+            )
+            laminate.auto_rename_enabled = True
+            laminate.nome = _build_auto_name_from_layers(
+                layers,
+                model=self._grid_model,
+                tag=laminate.tag,
+                target=laminate,
+            )
+            self._grid_model.laminados[laminate.nome] = laminate
+            self._ensure_unique_laminate_color(laminate)
+            self._apply_auto_rename_if_needed(laminate, force=True)
+            created.append(laminate.nome)
+
+        if created:
+            self._refresh_after_batch_import(created)
+        return created
+
+    def _refresh_after_batch_import(self, laminate_names: list[str]) -> None:
+        if self._grid_model is None:
+            return
+        if self.ui_state == UiState.CREATING:
+            self._exit_creating_mode()
+
+        self._clear_undo_history()
+        bind_model_to_ui(self._grid_model, self)
+        binding = getattr(self, "_grid_binding", None)
+        if binding is not None:
+            self._configure_stacking_table(binding)
+        self._sync_all_auto_renamed_laminates()
+        bind_cells_to_ui(self._grid_model, self)
+
+        target_name = laminate_names[0] if laminate_names else None
+        if target_name:
+            combo = getattr(self, "laminate_name_combo", None)
+            if isinstance(combo, QComboBox):
+                idx = combo.findText(target_name)
+                if idx >= 0:
+                    combo.setCurrentIndex(idx)
+            if binding is not None and hasattr(binding, "_apply_laminate"):
+                try:
+                    binding._apply_laminate(target_name)  # type: ignore[attr-defined]
+                except Exception:
+                    logger.debug("Nao foi possivel aplicar laminado importado.", exc_info=True)
+
+        self._refresh_virtual_stacking_view()
+        self.project_manager.capture_from_model(
+            self._grid_model, self._collect_ui_state()
+        )
+        self.project_manager.mark_dirty(True)
+        self._update_save_actions_enabled()
+        self._update_window_title()
+
+    def _import_batch_from_path(self, target_path: Path) -> None:
+        try:
+            entries = parse_batch_template(target_path)
+        except Exception as exc:
+            logger.error("Falha ao ler template de lote: %s", exc, exc_info=True)
+            QMessageBox.critical(
+                self,
+                "Erro ao ler planilha",
+                str(exc),
+            )
+            return
+
+        if not entries:
+            QMessageBox.information(
+                self,
+                "Nenhum laminado encontrado",
+                "O arquivo informado nao contem laminados preenchidos.",
+            )
+            return
+
+        total = len(entries)
+        confirm = QMessageBox.question(
+            self,
+            "Confirmar importacao",
+            f"{total} laminados encontrados. Deseja importar?",
+            QMessageBox.Yes | QMessageBox.No,
+        )
+        if confirm != QMessageBox.Yes:
+            return
+
+        created = self._apply_batch_entries(entries)
+        QMessageBox.information(
+            self,
+            "Importacao concluida",
+            f"{len(created)} laminados importados.",
+        )
+
+    def _on_batch_import_laminates(self, checked: bool = False) -> None:  # noqa: ARG002
+        try:
+            template_path = self._batch_template_path()
+        except FileNotFoundError as exc:
+            QMessageBox.critical(self, "Template ausente", str(exc))
+            return
+
+        try:
+            temp_copy = create_blank_batch_template(
+                template_path, sheet_name="Sheet1"
+            )
+        except Exception as exc:
+            logger.error("Falha ao preparar template em branco: %s", exc, exc_info=True)
+            QMessageBox.critical(
+                self,
+                "Erro",
+                "Nao foi possivel preparar o template de lote.",
+            )
+            return
+
+        self._open_with_default_app(temp_copy)
+        choice, target = self._prompt_batch_import_choice(temp_copy)
+        if choice is None:
+            return
+        if choice == "save":
+            self._save_blank_batch_template(template_path)
+            return
+        if choice == "choose":
+            selected = self._select_filled_batch_file()
+            if selected is None:
+                return
+            target = selected
+
+        if target is None:
+            return
+
+        self._import_batch_from_path(target)
 
 
     def _load_spreadsheet(self, checked: bool = False) -> None:  # noqa: ARG002
