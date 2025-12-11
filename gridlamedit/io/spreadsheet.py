@@ -667,13 +667,21 @@ def save_grid_spreadsheet(path: str, model: GridModel) -> None:
         rows.append(["Stacking"])
 
         for camada in laminado.camadas:
-            material_text = (camada.material or "").strip()
-            has_orientation = camada.orientacao is not None
-            if not material_text and not has_orientation:
+            orientation_raw = getattr(camada, "orientacao", None)
+            if orientation_raw is None:
                 continue
-            orientation_value = (
-                camada.orientacao if camada.orientacao is not None else ""
-            )
+            if isinstance(orientation_raw, str):
+                orientation_text = orientation_raw.strip()
+                if not orientation_text or orientation_text.lower() == "empty":
+                    continue
+                orientation_value = orientation_text
+            else:
+                orientation_value = orientation_raw
+
+            material_text = (camada.material or "").strip()
+            if not material_text:
+                continue
+
             rows.append(
                 [
                     camada.material,

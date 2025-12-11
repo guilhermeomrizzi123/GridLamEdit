@@ -552,6 +552,12 @@ class CellNeighborsWindow(QDialog):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Cell Neighbors")
+        self.setWindowFlags(
+            self.windowFlags()
+            | Qt.WindowMinMaxButtonsHint
+            | Qt.WindowSystemMenuHint
+        )
+        self.setWindowFlag(Qt.Window, True)
         self.resize(1100, 720)
 
         self._model: Optional[GridModel] = None

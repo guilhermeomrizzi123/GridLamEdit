@@ -336,7 +336,7 @@ class MainWindow(QMainWindow):
             ),
             (
                 "load_spreadsheet_action",
-                "Load Spreadsheet",
+                "Load Grid Spreadsheet",
                 self._load_spreadsheet,
                 "Import a Grid Design spreadsheet.",
                 None,
@@ -364,7 +364,7 @@ class MainWindow(QMainWindow):
             ),
             (
                 "export_excel_action",
-                "Export Spreadsheet",
+                "Export Grid Spreadsheet",
                 self._on_export_excel,
                 "Export an Excel spreadsheet with the current changes.",
                 QKeySequence("Ctrl+E"),
@@ -706,7 +706,7 @@ class MainWindow(QMainWindow):
         self._update_window_title()
 
     def _refresh_cells_list_labels(self) -> None:
-        """Atualiza os rótulos das células para refletir nomes atuais dos laminados."""
+        """Atualiza os r├│tulos das c├®lulas para refletir nomes atuais dos laminados."""
         if self._grid_model is None:
             return
         list_widget = getattr(self, "lstCelulas", None)
@@ -1005,8 +1005,8 @@ class MainWindow(QMainWindow):
         if not cells:
             QMessageBox.warning(
                 self,
-                "Células indisponíveis",
-                "Nenhuma célula foi carregada para associar ao novo laminado.",
+                "C├®lulas indispon├¡veis",
+                "Nenhuma c├®lula foi carregada para associar ao novo laminado.",
             )
             return
         dialog = self._get_new_laminate_dialog()
@@ -1127,7 +1127,7 @@ class MainWindow(QMainWindow):
             "Ply",
             "Simetria",
             "Material",
-            "Orientação",
+            "Orienta├º├úo",
         ]
         self._band_labels = []
         for title in titles:
@@ -1302,10 +1302,10 @@ class MainWindow(QMainWindow):
         )
         self.btn_bulk_change_orientation.setIconSize(QSize(24, 24))
         self.btn_bulk_change_orientation.setToolTip(
-            "Trocar orientação das camadas selecionadas"
+            "Trocar orienta├º├úo das camadas selecionadas"
         )
         self.btn_bulk_change_orientation.setAccessibleName(
-            "Trocar orientação das camadas selecionadas"
+            "Trocar orienta├º├úo das camadas selecionadas"
         )
         self.btn_bulk_change_orientation.clicked.connect(
             self.on_bulk_change_orientation
@@ -1349,9 +1349,9 @@ class MainWindow(QMainWindow):
 
         self.clear_selection_button = make_button(
             None,
-            "Limpar seleção",
+            "Limpar sele├º├úo",
             self._on_clear_selection_clicked,
-            "Limpar seleção",
+            "Limpar sele├º├úo",
             QStyle.SP_DialogResetButton,
             tool_button_style=Qt.ToolButtonTextBesideIcon,
         )
@@ -2314,8 +2314,8 @@ class MainWindow(QMainWindow):
         
         # If select_name is provided, select it.
         # Otherwise, default to "--" (index 0).
-        # The user requirement says: "O valor exibido no QComboBox deve ser “--” por padrão sempre ao carregar a janela."
-        # But also: "O texto não deve exibir automaticamente o nome do laminado da célula — isso virá apenas após a seleção do usuário."
+        # The user requirement says: "O valor exibido no QComboBox deve ser ÔÇ£--ÔÇØ por padr├úo sempre ao carregar a janela."
+        # But also: "O texto n├úo deve exibir automaticamente o nome do laminado da c├®lula ÔÇö isso vir├í apenas ap├│s a sele├º├úo do usu├írio."
         # However, if we are refreshing the list because we added a laminate or renamed it, we might want to keep selection?
         # The requirement seems to imply that this combo is purely for *changing* the laminate, not for *displaying* the current one.
         # So we should probably always reset to "--" unless specifically asked to select something (e.g. after creating a new laminate).
@@ -2637,12 +2637,12 @@ class MainWindow(QMainWindow):
         if not changes:
             QMessageBox.information(
                 self,
-                "Renumerar sequência",
-                "A sequência já está atualizada.",
+                "Renumerar sequ├¬ncia",
+                "A sequ├¬ncia j├í est├í atualizada.",
             )
             return
         command = BulkLayerEditCommand(
-            model, laminate, changes, "Renumerar sequência"
+            model, laminate, changes, "Renumerar sequ├¬ncia"
         )
         self.undo_stack.push(command)
         self._update_save_actions_enabled()
@@ -2653,7 +2653,7 @@ class MainWindow(QMainWindow):
         if not rows:
             QMessageBox.information(
                 self,
-                "Seleção necessária",
+                "Sele├º├úo necess├íria",
                 "Selecione pelo menos uma camada para trocar o material.",
             )
             return
@@ -2704,8 +2704,8 @@ class MainWindow(QMainWindow):
         if not rows:
             QMessageBox.information(
                 self,
-                "Seleção necessária",
-                "Selecione pelo menos uma camada para trocar a orientação.",
+                "Sele├º├úo necess├íria",
+                "Selecione pelo menos uma camada para trocar a orienta├º├úo.",
             )
             return
         _, model = self._get_stacking_view_and_model()
@@ -2742,12 +2742,12 @@ class MainWindow(QMainWindow):
         if not changes:
             QMessageBox.information(
                 self,
-                "Trocar orienta��ǜo",
-                "As camadas selecionadas ja possuem a orienta��ǜo escolhida.",
+                "Trocar orienta´┐¢´┐¢Ã£o",
+                "As camadas selecionadas ja possuem a orienta´┐¢´┐¢Ã£o escolhida.",
             )
             return
         command = BulkLayerEditCommand(
-            model, laminate, changes, "Trocar orienta��ǜo (lote)"
+            model, laminate, changes, "Trocar orienta´┐¢´┐¢Ã£o (lote)"
         )
         self.undo_stack.push(command)
         self._update_save_actions_enabled()
@@ -2856,7 +2856,7 @@ class MainWindow(QMainWindow):
             QMessageBox.information(
                 self,
                 "Aviso",
-                "Nenhum item está selecionado.",
+                "Nenhum item est├í selecionado.",
             )
             return
         model.set_all_checked(False)
@@ -3426,7 +3426,7 @@ class MainWindow(QMainWindow):
             QMessageBox.information(
                 self,
                 "Exportar planilha",
-                "Uma análise já está em andamento. Aguarde sua conclusão.",
+                "Uma an├ílise j├í est├í em andamento. Aguarde sua conclus├úo.",
             )
             return False
 
@@ -3444,7 +3444,7 @@ class MainWindow(QMainWindow):
         material = str(text or "").strip()
         if not material:
             QMessageBox.warning(
-                self, "Material vazio", "Informe um material válido para cadastro."
+                self, "Material vazio", "Informe um material v├ílido para cadastro."
             )
             return
 
@@ -3458,13 +3458,13 @@ class MainWindow(QMainWindow):
             QMessageBox.information(
                 self,
                 "Material cadastrado",
-                "Material adicionado e disponível na lista de materiais.",
+                "Material adicionado e dispon├¡vel na lista de materiais.",
             )
         else:
             QMessageBox.information(
                 self,
                 "Material existente",
-                "O material já estava cadastrado e segue disponível.",
+                "O material j├í estava cadastrado e segue dispon├¡vel.",
             )
 
         status_bar = self.statusBar()
@@ -3480,7 +3480,7 @@ class MainWindow(QMainWindow):
             QMessageBox.information(
                 self,
                 "Exportar planilha",
-                "Nenhum laminado disponível para análise.",
+                "Nenhum laminado dispon├¡vel para an├ílise.",
             )
             return
 
@@ -3508,8 +3508,8 @@ class MainWindow(QMainWindow):
         self._last_checks_report = None
         QMessageBox.critical(
             self,
-            "Falha ao executar as verificações.",
-            message or "Falha ao executar as verificações.",
+            "Falha ao executar as verifica├º├Áes.",
+            message or "Falha ao executar as verifica├º├Áes.",
         )
 
     def _on_checks_thread_finished(self) -> None:
@@ -3529,7 +3529,7 @@ class MainWindow(QMainWindow):
     def _handle_remove_duplicates_request(
         self, dialog: VerificationReportDialog
     ) -> None:
-        """Executa o fluxo de remoção de laminados duplicados sem associação."""
+        """Executa o fluxo de remo├º├úo de laminados duplicados sem associa├º├úo."""
         if self._grid_model is None:
             QMessageBox.information(
                 dialog,
@@ -3673,13 +3673,13 @@ class MainWindow(QMainWindow):
         try:
             final_path = export_grid_xlsx(model, target_path)
         except ValueError as exc:
-            QMessageBox.critical(self, "Falha na exportação da planilha.", str(exc))
+            QMessageBox.critical(self, "Falha na exporta├º├úo da planilha.", str(exc))
             return False
         except Exception as exc:  # pragma: no cover - defensivo
             logger.error("Falha ao exportar planilha: %s", exc, exc_info=True)
             QMessageBox.critical(
                 self,
-                "Falha na exportação da planilha.",
+                "Falha na exporta├º├úo da planilha.",
                 f"Falha ao exportar a planilha: {exc}",
             )
             return False

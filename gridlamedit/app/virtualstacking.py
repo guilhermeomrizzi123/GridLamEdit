@@ -222,6 +222,34 @@ class VirtualStackingHeaderView(WordWrapHeader):
         """Set the offset where laminate columns start."""
         self._laminate_column_offset = offset
 
+    def update_height_from_text(self) -> None:
+        """Adjust header height so wrapped text stays centered and visible."""
+        model = self.model()
+        if model is None:
+            return
+        fm = self.fontMetrics()
+        max_height = 0
+        for logical in range(model.columnCount()):
+            text = model.headerData(logical, self.orientation(), QtCore.Qt.DisplayRole)
+            if not text:
+                continue
+            width = self.sectionSize(logical) if hasattr(self, "sectionSize") else self.defaultSectionSize()
+            if width <= 0:
+                width = self.defaultSectionSize()
+            text_rect = fm.boundingRect(
+                QtCore.QRect(0, 0, int(width - 8), 2000),
+                QtCore.Qt.TextWordWrap,
+                str(text),
+            )
+            max_height = max(max_height, text_rect.height())
+
+        padding = 16
+        desired = max(80, max_height + padding)
+        if desired != self.height():
+            self.setMinimumHeight(desired)
+            self.setMaximumHeight(desired)
+            self.updateGeometry()
+
 
 class VirtualStackingModel(QtCore.QAbstractTableModel):
     """Qt model responsible for exposing Virtual Stacking data."""
@@ -843,8 +871,10 @@ class VirtualStackingWindow(QtWidgets.QDialog):
         header.setSectionResizeMode(QtWidgets.QHeaderView.Interactive)
         header.setSectionsMovable(True)
         header.setStretchLastSection(False)
-        # Reduz altura do cabeçalho mantendo espaço para nome + resumo de 2 linhas (compacto)
-        header.setFixedHeight(max(header.sizeHint().height(), 80))
+        # Keep header tall enough for wrapped text and adjust dynamically on resize
+        header.setMinimumHeight(max(header.sizeHint().height(), 80))
+        header.update_height_from_text()
+        header.sectionResized.connect(lambda *_: header.update_height_from_text())
         header.sectionResized.connect(lambda *_: self._resize_summary_columns())
         header.sectionMoved.connect(self._on_header_section_moved)
         header.sectionClicked.connect(self._on_header_section_clicked)
@@ -980,11 +1010,10 @@ class VirtualStackingWindow(QtWidgets.QDialog):
                     summary_header.blockSignals(False)
 
     def _mirror_summary_section_move(self, old_visual: int, new_visual: int) -> None:
-        summary_header = (
-            self.summary_table.horizontalHeader()
-            if hasattr(self, "summary_table")
-            else None
-        )
+        summary_header = None
+        summary = getattr(self, "summary_table", None)
+        if summary is not None:
+            summary_header = summary.horizontalHeader()
         if summary_header is None:
             return
         summary_header.blockSignals(True)
