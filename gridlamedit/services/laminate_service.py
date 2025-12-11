@@ -63,11 +63,11 @@ def create_laminate_with_association(
     """
 
     if model is None:
-        raise LaminateCreationError("Modelo inexistente para criar laminado.")
+        raise LaminateCreationError("Model not available to create laminate.")
 
     name = str(nome or "").strip()
     if not name:
-        raise LaminateCreationError("O campo Nome não pode ficar vazio.")
+        raise LaminateCreationError("The Name field cannot be empty.")
 
     existing = getattr(model, "laminados", None)
     if isinstance(existing, OrderedDict):
@@ -77,21 +77,21 @@ def create_laminate_with_association(
         model.laminados = target_map
 
     if name in target_map:
-        raise LaminateCreationError("Já existe um laminado com este nome.")
+        raise LaminateCreationError("A laminate with this name already exists.")
 
     lam_type = str(tipo or "").strip()
     if not lam_type:
-        raise LaminateCreationError("Selecione um tipo de laminado válido.")
+        raise LaminateCreationError("Select a valid laminate type.")
 
     color_index = _normalize_color(cor)
     color_index = max(MIN_COLOR_INDEX, min(MAX_COLOR_INDEX, color_index))
 
     cell = str(celula_id or "").strip()
     if not cell:
-        raise LaminateCreationError("Selecione uma célula para associar.")
+        raise LaminateCreationError("Select a cell to associate.")
 
     if model.celulas_ordenadas and cell not in model.celulas_ordenadas:
-        raise LaminateCreationError("Selecione uma célula válida para associar.")
+        raise LaminateCreationError("Select a valid cell to associate.")
 
     laminado = Laminado(
         nome=name,

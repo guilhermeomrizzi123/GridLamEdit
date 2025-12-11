@@ -40,7 +40,7 @@ class NewLaminateDialog(QDialog):
         parent: Optional[QWidget] = None,
     ) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Criar novo laminado")
+        self.setWindowTitle("Create New Laminate")
         self.setModal(True)
         self.setObjectName("dlgNewLaminate")
         self._grid_model = grid_model
@@ -89,10 +89,10 @@ class NewLaminateDialog(QDialog):
         self.edt_nome.setStyleSheet(
             "QLineEdit { color: gray; background-color: #f0f0f0; }"
         )
-        form_layout.addRow("Nome:", self.edt_nome)
+        form_layout.addRow("Name:", self.edt_nome)
 
         self.edt_tag = QLineEdit(self)
-        self.edt_tag.setPlaceholderText("Opcional")
+        self.edt_tag.setPlaceholderText("Optional")
         self.edt_tag.textChanged.connect(self._update_auto_name)
         form_layout.addRow("Tag:", self.edt_tag)
 
@@ -101,18 +101,18 @@ class NewLaminateDialog(QDialog):
         self.cmb_cor = QComboBox(self)
         self.cmb_cor.setObjectName("cmbCor")
         self.cmb_cor.addItems(self._color_options or [str(index) for index in range(1, 151)])
-        form_layout.addRow("Cor:", self.cmb_cor)
+        form_layout.addRow("Color:", self.cmb_cor)
 
         self.cmb_tipo = QComboBox(self)
         self.cmb_tipo.setObjectName("cmbTipo")
         self.cmb_tipo.addItems(self._type_options or ["SS", "Core", "Skin", "Custom"])
         self.cmb_tipo.setEditable(False)
-        form_layout.addRow("Tipo:", self.cmb_tipo)
+        form_layout.addRow("Type:", self.cmb_tipo)
 
         self.cmb_celula = QComboBox(self)
         self.cmb_celula.setObjectName("cmbCelula")
         self._populate_cells()
-        form_layout.addRow("Célula associada:", self.cmb_celula)
+        form_layout.addRow("Associated cell:", self.cmb_celula)
 
         layout.addLayout(form_layout)
 
@@ -120,10 +120,10 @@ class NewLaminateDialog(QDialog):
             QDialogButtonBox.Ok | QDialogButtonBox.Cancel, Qt.Horizontal, self
         )
         create_button = self.button_box.button(QDialogButtonBox.Ok)
-        create_button.setText("Criar")
+        create_button.setText("Create")
         create_button.setDefault(True)
         cancel_button = self.button_box.button(QDialogButtonBox.Cancel)
-        cancel_button.setText("Cancelar")
+        cancel_button.setText("Cancel")
         self.button_box.accepted.connect(self._handle_create)
         self.button_box.rejected.connect(self.reject)
         layout.addWidget(self.button_box)
@@ -194,8 +194,8 @@ class NewLaminateDialog(QDialog):
         if not nome:
             QMessageBox.warning(
                 self,
-                "Campos obrigatórios",
-                "O nome será gerado automaticamente, mas não foi possível determinar um nome.",
+                "Required fields",
+                "The name is generated automatically, but a name could not be determined.",
             )
             return
         cor = self.cmb_cor.currentData()
@@ -204,7 +204,9 @@ class NewLaminateDialog(QDialog):
         tipo = self.cmb_tipo.currentText().strip()
         if not tipo:
             QMessageBox.warning(
-                self, "Campos obrigatórios", "Selecione um tipo de laminado válido."
+                self,
+                "Required fields",
+                "Select a valid laminate type.",
             )
             return
         cell_data = self.cmb_celula.currentData()
@@ -212,7 +214,11 @@ class NewLaminateDialog(QDialog):
         celula = cell_data or cell_text
         celula = str(celula or "").strip()
         if not celula:
-            QMessageBox.warning(self, "Campos obrigatórios", "Selecione uma célula para associar.")
+            QMessageBox.warning(
+                self,
+                "Required fields",
+                "Select a cell to associate.",
+            )
             return
         tag_value = self.edt_tag.text()
         try:
@@ -225,14 +231,14 @@ class NewLaminateDialog(QDialog):
                 tag=tag_value,
             )
         except LaminateCreationError as exc:
-            QMessageBox.warning(self, "Não foi possível criar", str(exc))
+            QMessageBox.warning(self, "Could not create", str(exc))
             return
         except Exception as exc:  # pragma: no cover - defensive
             logger.exception("Falha inesperada ao criar laminado: %s", exc)
             QMessageBox.critical(
                 self,
-                "Erro inesperado",
-                "Ocorreu um erro ao criar o laminado. Verifique os logs para mais detalhes.",
+                "Unexpected error",
+                "An error occurred while creating the laminate. Check the logs for details.",
             )
             return
 

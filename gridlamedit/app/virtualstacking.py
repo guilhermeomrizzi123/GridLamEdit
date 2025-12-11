@@ -90,7 +90,7 @@ class _InsertLayerCommand(QtGui.QUndoCommand):
         default_material: str = "",
         default_orientation: float | None = None,
     ) -> None:
-        super().__init__("Inserir camada")
+        super().__init__("Insert layer")
         self._model = model
         self._laminate = laminate
         self._positions = positions
@@ -133,7 +133,7 @@ class _RemoveLayerCommand(QtGui.QUndoCommand):
         laminate: Laminado,
         rows: list[int],
     ) -> None:
-        super().__init__("Remover camada")
+        super().__init__("Remove layer")
         self._model = model
         self._laminate = laminate
         self._rows = sorted(set(rows))
@@ -167,8 +167,8 @@ class _MoveColumnCommand(QtGui.QUndoCommand):
         old_index: int,
         new_index: int,
     ) -> None:
-        direction = "esquerda" if new_index < old_index else "direita"
-        super().__init__(f"Mover coluna {direction}")
+        direction = "left" if new_index < old_index else "right"
+        super().__init__(f"Move column {direction}")
         self._cells_ref = cells
         self._old_index = old_index
         self._new_index = new_index
@@ -194,7 +194,7 @@ class _ChangeOrientationCommand(QtGui.QUndoCommand):
         old_value: object,
         new_value: object,
     ) -> None:
-        super().__init__("Alterar orientação")
+        super().__init__("Change orientation")
         self._laminate = laminate
         self._row = row
         self._old_value = old_value
@@ -298,7 +298,7 @@ class VirtualStackingModel(QtCore.QAbstractTableModel):
             if section == self.COL_PLY:
                 return "Ply"
             if section == self.COL_PLY_TYPE:
-                return "Simetria"
+                return "Symmetry"
             if section == self.COL_MATERIAL:
                 return "Material"
             if section == self.COL_ROSETTE:
@@ -887,14 +887,14 @@ class VirtualStackingWindow(QtWidgets.QDialog):
         layout.setSpacing(8)
 
         seq_button = QtWidgets.QToolButton(self)
-        seq_button.setText("Renomear Sequence")
-        seq_button.setToolTip("Renomear prefixo de todas as sequencias")
+        seq_button.setText("Rename Sequence")
+        seq_button.setToolTip("Rename the prefix for every sequence")
         seq_button.clicked.connect(self._rename_all_sequences)
         layout.addWidget(seq_button)
 
         ply_button = QtWidgets.QToolButton(self)
-        ply_button.setText("Renomear Ply")
-        ply_button.setToolTip("Renomear prefixo de todos os plies")
+        ply_button.setText("Rename Ply")
+        ply_button.setToolTip("Rename the prefix for every ply")
         ply_button.clicked.connect(self._rename_all_ply)
         layout.addWidget(ply_button)
 
@@ -1109,15 +1109,15 @@ class VirtualStackingWindow(QtWidgets.QDialog):
         if not selected_columns:
             QtWidgets.QMessageBox.information(
                 self,
-                "Mover laminado",
-                "Selecione uma unica coluna para mover.",
+                "Move laminate",
+                "Select exactly one column to move.",
             )
             return
         if len(selected_columns) > 1:
             QtWidgets.QMessageBox.information(
                 self,
-                "Mover laminado",
-                "Selecione apenas uma coluna para mover.",
+                "Move laminate",
+                "Select only one column to move.",
             )
             return
         column = selected_columns[0]
@@ -1125,18 +1125,22 @@ class VirtualStackingWindow(QtWidgets.QDialog):
         if direction < 0 and cell_idx <= 0:
             QtWidgets.QMessageBox.information(
                 self,
-                "Mover laminado",
-                "Esta coluna ja esta na extremidade esquerda.",
+                "Move laminate",
+                "This column is already at the left edge.",
             )
             return
         if direction > 0 and cell_idx >= len(self._cells) - 1:
             QtWidgets.QMessageBox.information(
                 self,
-                "Mover laminado",
-                "Esta coluna ja esta na extremidade direita.",
+                "Move laminate",
+                "This column is already at the right edge.",
             )
             return
         new_pos = cell_idx + direction
+
+        # Record state for undo/redo before applying the move
+        self._push_virtual_snapshot()
+
         current_ids = [cell.cell_id for cell in self._cells]
         current_ids[cell_idx], current_ids[new_pos] = current_ids[new_pos], current_ids[cell_idx]
         self._sorted_cell_ids = current_ids
@@ -1200,7 +1204,7 @@ class VirtualStackingWindow(QtWidgets.QDialog):
         else:
             warning_icon_label.setVisible(False)
         warning_container.addWidget(warning_icon_label)
-        warning_container.addWidget(QtWidgets.QLabel("Laminado Desbalanceado", self))
+        warning_container.addWidget(QtWidgets.QLabel("Unbalanced Laminate", self))
         warning_widget = QtWidgets.QWidget(self)
         warning_widget.setLayout(warning_container)
         warning_widget.setAttribute(QtCore.Qt.WA_TranslucentBackground, True)
@@ -1211,18 +1215,18 @@ class VirtualStackingWindow(QtWidgets.QDialog):
 
         # Reorganizar por Vizinhança
         self.btn_reorganize_neighbors = QtWidgets.QToolButton(self)
-        self.btn_reorganize_neighbors.setText("Reorganizar por Vizinhança")
+        self.btn_reorganize_neighbors.setText("Reorder by Neighborhood")
         self.btn_reorganize_neighbors.setToolTip(
-            "Reorganiza as sequências com base nas regras de vizinhança e simetria"
+            "Reorders sequences based on neighborhood and symmetry rules"
         )
         self.btn_reorganize_neighbors.clicked.connect(self.on_reorganizar_por_vizinhanca_clicked)
         toolbar.addWidget(self.btn_reorganize_neighbors)
 
         # Novo botão: analisar simetria
         self.btn_analyze_symmetry = QtWidgets.QToolButton(self)
-        self.btn_analyze_symmetry.setText("Analisar Simetria")
+        self.btn_analyze_symmetry.setText("Analyze Symmetry")
         self.btn_analyze_symmetry.setToolTip(
-            "Analisa a simetria de cada coluna, ignorando camadas centrais, e marca com borda verde as camadas centrais de laminados simétricos."
+            "Analyzes symmetry for each column (ignoring center rows) and highlights symmetric center layers in green."
         )
         self.btn_analyze_symmetry.clicked.connect(self._analyze_symmetry)
         toolbar.addWidget(self.btn_analyze_symmetry)
@@ -1230,13 +1234,13 @@ class VirtualStackingWindow(QtWidgets.QDialog):
         # Controles de movimentação.
         self.btn_move_left = QtWidgets.QToolButton(self)
         self.btn_move_left.setIcon(self.style().standardIcon(QtWidgets.QStyle.SP_ArrowLeft))
-        self.btn_move_left.setToolTip("Mover coluna selecionada para a esquerda")
+        self.btn_move_left.setToolTip("Move the selected column to the left")
         self.btn_move_left.clicked.connect(lambda: self._move_selected_column(-1))
         toolbar.addWidget(self.btn_move_left)
 
         self.btn_move_right = QtWidgets.QToolButton(self)
         self.btn_move_right.setIcon(self.style().standardIcon(QtWidgets.QStyle.SP_ArrowRight))
-        self.btn_move_right.setToolTip("Mover coluna selecionada para a direita")
+        self.btn_move_right.setToolTip("Move the selected column to the right")
         self.btn_move_right.clicked.connect(lambda: self._move_selected_column(1))
         toolbar.addWidget(self.btn_move_right)
 
@@ -1244,15 +1248,15 @@ class VirtualStackingWindow(QtWidgets.QDialog):
 
         # Controles de desfazer/refazer.
         self.btn_undo = QtWidgets.QToolButton(self)
-        self.btn_undo.setText("Desfazer")
-        self.btn_undo.setToolTip("Desfazer alteracao (Ctrl+Z)")
+        self.btn_undo.setText("Undo")
+        self.btn_undo.setToolTip("Undo change (Ctrl+Z)")
         self.btn_undo.clicked.connect(self.undo_stack.undo)
         self.btn_undo.setEnabled(self.undo_stack.canUndo())
         toolbar.addWidget(self.btn_undo)
 
         self.btn_redo = QtWidgets.QToolButton(self)
-        self.btn_redo.setText("Refazer")
-        self.btn_redo.setToolTip("Refazer alteracao (Ctrl+Y)")
+        self.btn_redo.setText("Redo")
+        self.btn_redo.setToolTip("Redo change (Ctrl+Y)")
         self.btn_redo.clicked.connect(self.undo_stack.redo)
         self.btn_redo.setEnabled(self.undo_stack.canRedo())
         toolbar.addWidget(self.btn_redo)
@@ -1478,7 +1482,7 @@ class VirtualStackingWindow(QtWidgets.QDialog):
         dialog = QtWidgets.QDialog(self)
         dialog.setWindowTitle(title)
         layout = QtWidgets.QVBoxLayout(dialog)
-        layout.addWidget(QtWidgets.QLabel(f"Prefixo atual: {current_prefix}", dialog))
+        layout.addWidget(QtWidgets.QLabel(f"Current prefix: {current_prefix}", dialog))
         input_box = QtWidgets.QLineEdit(dialog)
         input_box.setText(current_prefix)
         layout.addWidget(input_box)
@@ -1533,12 +1537,13 @@ class VirtualStackingWindow(QtWidgets.QDialog):
 
     def _rename_all_sequences(self) -> None:
         current_prefix = self._current_sequence_prefix()
-        new_prefix = self._prompt_prefix_dialog("Renomear Sequence", current_prefix)
+        new_prefix = self._prompt_prefix_dialog("Rename Sequence", current_prefix)
         if new_prefix is None:
             return
         cleaned = new_prefix.strip().rstrip(".")
         if not cleaned or cleaned == current_prefix.rstrip("."):
             return
+        self._push_virtual_snapshot()
         self._apply_global_prefix_change(
             "sequence",
             StackingTableModel.COL_SEQUENCE,
@@ -1547,12 +1552,13 @@ class VirtualStackingWindow(QtWidgets.QDialog):
 
     def _rename_all_ply(self) -> None:
         current_prefix = self._current_ply_prefix()
-        new_prefix = self._prompt_prefix_dialog("Renomear Ply", current_prefix)
+        new_prefix = self._prompt_prefix_dialog("Rename Ply", current_prefix)
         if new_prefix is None:
             return
         cleaned = new_prefix.strip().rstrip(".")
         if not cleaned or cleaned == current_prefix.rstrip("."):
             return
+        self._push_virtual_snapshot()
         self._apply_global_prefix_change(
             "ply_label",
             StackingTableModel.COL_PLY,
@@ -1809,15 +1815,15 @@ class VirtualStackingWindow(QtWidgets.QDialog):
         laminate_type, dominant_pct = self._classify_laminate_type(counts, total)
 
         lines: list[str] = []
-        lines.append(f"Total de camadas orientadas: {total}")
+        lines.append(f"Total oriented layers: {total}")
         if total > 0:
             pct_text = f" ({dominant_pct * 100:.0f}%)" if dominant_pct > 0 else ""
-            lines.append(f"Tipo predominante: {laminate_type}{pct_text}")
+            lines.append(f"Dominant type: {laminate_type}{pct_text}")
         else:
-            lines.append("Tipo predominante: -")
+            lines.append("Dominant type: -")
 
         lines.append("")
-        lines.append("Quantidade por orientacao:")
+        lines.append("Orientation counts:")
         for key, title in [
             ("0", "0 deg"),
             ("+45", "+45 deg"),
@@ -1879,7 +1885,7 @@ class VirtualStackingWindow(QtWidgets.QDialog):
             ply_width = max(metrics.horizontalAdvance("Ply") + padding, 55)
             header.resizeSection(VirtualStackingModel.COL_PLY, ply_width)
         if self.model.columnCount() >= 3:
-            ply_type_width = max(metrics.horizontalAdvance("Simetria") + padding, 90)
+            ply_type_width = max(metrics.horizontalAdvance("Symmetry") + padding, 90)
             header.resizeSection(VirtualStackingModel.COL_PLY_TYPE, ply_type_width)
         if self.model.columnCount() >= 4:
             material_width = max(metrics.horizontalAdvance("Material") + padding * 2, 140)
@@ -1978,8 +1984,8 @@ class VirtualStackingWindow(QtWidgets.QDialog):
     def _prompt_custom_orientation(self, parent: QtWidgets.QWidget) -> float | None:
         dialog = QtWidgets.QInputDialog(parent)
         dialog.setInputMode(QtWidgets.QInputDialog.DoubleInput)
-        dialog.setWindowTitle("Outro valor")
-        dialog.setLabelText("Informe a orientacao (-100 a 100 graus):")
+        dialog.setWindowTitle("Custom value")
+        dialog.setLabelText("Enter the orientation (-100 to 100 degrees):")
         dialog.setDoubleRange(-100.0, 100.0)
         dialog.setDoubleDecimals(1)
         dialog.setDoubleStep(1.0)
@@ -1997,15 +2003,15 @@ class VirtualStackingWindow(QtWidgets.QDialog):
         if not (0 <= row < stacking_model.rowCount()):
             QtWidgets.QMessageBox.information(
                 self,
-                "Orientacao inexistente",
-                "A linha selecionada nao existe para este laminado.",
+                "Orientation unavailable",
+                "The selected row does not exist for this laminate.",
             )
             return
-        options = ["Empty", "0", "45", "-45", "90", "Outro valor..."]
+        options = ["Empty", "0", "45", "-45", "90", "Custom value..."]
         selected, ok = QtWidgets.QInputDialog.getItem(
             self,
-            "Editar orientacao",
-            "Selecione a orientacao:",
+            "Edit orientation",
+            "Select the orientation:",
             options,
             0,
             False,
@@ -2013,7 +2019,7 @@ class VirtualStackingWindow(QtWidgets.QDialog):
         if not ok:
             return
         selected = selected.strip()
-        if selected == "Outro valor...":
+        if selected == "Custom value...":
             custom_value = self._prompt_custom_orientation(self)
             if custom_value is None:
                 return
@@ -2025,8 +2031,8 @@ class VirtualStackingWindow(QtWidgets.QDialog):
         if not self.model.setData(index, payload, QtCore.Qt.EditRole):
             QtWidgets.QMessageBox.warning(
                 self,
-                "Orientacao invalida",
-                "Use valores entre -100 e 100 graus ou deixe em branco.",
+                "Invalid orientation",
+                "Use values between -100 and 100 degrees or leave it blank.",
             )
 
     def _clear_orientation_at(self, index: QtCore.QModelIndex) -> None:
@@ -2035,8 +2041,8 @@ class VirtualStackingWindow(QtWidgets.QDialog):
         if not self.model.setData(index, "", QtCore.Qt.EditRole):
             QtWidgets.QMessageBox.information(
                 self,
-                "Limpar orientacao",
-                "Nao foi possivel limpar esta celula. Verifique se a linha existe.",
+                "Clear orientation",
+                "Could not clear this cell. Verify that the row exists.",
             )
 
     def _remove_layer_at(self, index: QtCore.QModelIndex) -> None:
@@ -2047,8 +2053,8 @@ class VirtualStackingWindow(QtWidgets.QDialog):
         if not (0 <= row < stacking_model.rowCount()):
             QtWidgets.QMessageBox.information(
                 self,
-                "Remover camada",
-                "Selecione uma linha existente para remover.",
+                "Remove layer",
+                "Select an existing row to remove.",
             )
             return
         
@@ -2180,8 +2186,8 @@ class VirtualStackingWindow(QtWidgets.QDialog):
         if not targets:
             QtWidgets.QMessageBox.information(
                 self,
-                "Inserir camada",
-                "Selecione pelo menos uma linha para inserir uma nova camada.",
+                "Insert layer",
+                "Select at least one row to insert a new layer.",
             )
             return
         affected: list[str] = []
@@ -2251,27 +2257,27 @@ class VirtualStackingWindow(QtWidgets.QDialog):
         
         # Add sequence actions
         add_sequence_above_action = menu.addAction(
-            "Adicionar sequência acima da sequência selecionada"
+            "Add sequence above the selected sequence"
         )
         add_sequence_below_action = menu.addAction(
-            "Adicionar sequência abaixo da sequência selecionada"
+            "Add sequence below the selected sequence"
         )
-        delete_sequence_action = menu.addAction("Deletar sequência selecionada")
+        delete_sequence_action = menu.addAction("Delete selected sequence")
 
         is_sequence_column = index.column() < self.model.LAMINATE_COLUMN_OFFSET
         if not is_sequence_column:
             # Add layer actions for laminate columns
             menu.addSeparator()
             add_layer_above_action = menu.addAction(
-                "Adicionar camada acima da camada selecionada"
+                "Add layer above the selected layer"
             )
             add_layer_below_action = menu.addAction(
-                "Adicionar camada abaixo da camada selecionada"
+                "Add layer below the selected layer"
             )
             menu.addSeparator()
-            edit_action = menu.addAction("Editar orientacao...")
-            clear_action = menu.addAction("Limpar orientacao")
-            remove_action = menu.addAction("Remover camada")
+            edit_action = menu.addAction("Edit orientation...")
+            clear_action = menu.addAction("Clear orientation")
+            remove_action = menu.addAction("Remove layer")
         
         chosen = menu.exec(self.table.viewport().mapToGlobal(pos))
         if chosen == add_sequence_above_action:
@@ -2608,6 +2614,16 @@ class VirtualStackingWindow(QtWidgets.QDialog):
         if self._project is None or not self._cells:
             return
 
+        adjacency = self._neighbors_adjacency()
+        has_neighbors = any(neighbors for neighbors in adjacency.values())
+        if not has_neighbors:
+            QtWidgets.QMessageBox.information(
+                self,
+                "Reorder By Neighborhood",
+                "No neighbor cells are registered. Define cell neighbors before reorganizing by neighborhood.",
+            )
+            return
+
         # Habilitar desfazer
         self._push_virtual_snapshot()
 
@@ -2615,7 +2631,6 @@ class VirtualStackingWindow(QtWidgets.QDialog):
         for cell in self._cells:
             self._ensure_unique_laminate_for_cell(cell)
 
-        adjacency = self._neighbors_adjacency()
         cell_order = [cell.cell_id for cell in self._cells]
         order_index = {cid: idx for idx, cid in enumerate(cell_order)}
         cell_layers: dict[str, list[Camada]] = {

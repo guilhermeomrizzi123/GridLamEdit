@@ -33,7 +33,7 @@ class VerificationReportDialog(QDialog):
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Relatório de Verificação de Laminados")
+        self.setWindowTitle("Laminate Verification Report")
         self.setModal(True)
         self._report: ChecksReport | None = None
         self._build_ui()
@@ -52,16 +52,16 @@ class VerificationReportDialog(QDialog):
         self.button_box = QDialogButtonBox(
             QDialogButtonBox.Ok | QDialogButtonBox.Cancel, Qt.Horizontal, self
         )
-        remove_duplicates_button = QPushButton("Remover Duplicados", self)
+        remove_duplicates_button = QPushButton("Remove Duplicates", self)
         remove_duplicates_button.setObjectName("btnRemoveDuplicatesReport")
         remove_duplicates_button.clicked.connect(self._emit_remove_duplicates_request)
         # Mantem o botao alinhado ao fluxo de exportacao para incentivar a limpeza antes da saida.
         self.button_box.addButton(remove_duplicates_button, QDialogButtonBox.ActionRole)
         export_button = self.button_box.button(QDialogButtonBox.Ok)
-        export_button.setText("Exportar")
+        export_button.setText("Export")
         export_button.setDefault(True)
         cancel_button = self.button_box.button(QDialogButtonBox.Cancel)
-        cancel_button.setText("Cancelar")
+        cancel_button.setText("Cancel")
         self.button_box.accepted.connect(self.accept)
         self.button_box.rejected.connect(self.reject)
         layout.addWidget(self.button_box)
@@ -77,15 +77,15 @@ class VerificationReportDialog(QDialog):
         self._symmetric_list = QListWidget(tab)
         self._symmetric_list.setObjectName("lstSymmetric")
         self._symmetric_list.setSelectionMode(QListWidget.NoSelection)
-        layout.addWidget(self._wrap_group_box("Simétricos", self._symmetric_list))
+        layout.addWidget(self._wrap_group_box("Symmetric", self._symmetric_list))
 
         self._asymmetric_list = QListWidget(tab)
         self._asymmetric_list.setObjectName("lstAsymmetric")
         self._asymmetric_list.setSelectionMode(QListWidget.NoSelection)
-        layout.addWidget(self._wrap_group_box("Não Simétricos", self._asymmetric_list))
+        layout.addWidget(self._wrap_group_box("Not Symmetric", self._asymmetric_list))
 
         layout.addStretch(1)
-        self._tabs.addTab(tab, "Simetria")
+        self._tabs.addTab(tab, "Symmetry")
 
     def _build_duplicates_tab(self) -> None:
         tab = QWidget(self)
@@ -94,13 +94,13 @@ class VerificationReportDialog(QDialog):
         layout.setSpacing(8)
 
         self._duplicates_tree = QTreeWidget(tab)
-        self._duplicates_tree.setHeaderLabel("Grupos de laminados duplicados")
+        self._duplicates_tree.setHeaderLabel("Groups of duplicate laminates")
         self._duplicates_tree.setColumnCount(1)
         self._duplicates_tree.setRootIsDecorated(True)
         self._duplicates_tree.setSelectionMode(QTreeWidget.NoSelection)
         layout.addWidget(self._duplicates_tree)
 
-        self._tabs.addTab(tab, "Duplicados")
+        self._tabs.addTab(tab, "Duplicates")
 
     @staticmethod
     def _wrap_group_box(title: str, content: QWidget) -> QGroupBox:
@@ -126,7 +126,7 @@ class VerificationReportDialog(QDialog):
         widget.clear()
         names = [name for name in entries if name]
         if not names:
-            QListWidgetItem("(nenhum laminado)", widget)
+            QListWidgetItem("(no laminate)", widget)
             widget.setEnabled(False)
             return
         widget.setEnabled(True)
@@ -137,7 +137,7 @@ class VerificationReportDialog(QDialog):
         tree = self._duplicates_tree
         tree.clear()
         if not groups:
-            root = QTreeWidgetItem(["Nenhum duplicado identificado"])
+            root = QTreeWidgetItem(["No duplicates found"])
             tree.addTopLevelItem(root)
             tree.setEnabled(False)
             tree.expandAll()
@@ -145,7 +145,7 @@ class VerificationReportDialog(QDialog):
 
         tree.setEnabled(True)
         for idx, group in enumerate(groups, start=1):
-            title = f"Grupo{idx}"
+            title = f"Group {idx}"
             parent = QTreeWidgetItem([title])
             tooltip = group.summary or group.signature
             if tooltip:
