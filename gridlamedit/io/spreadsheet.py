@@ -2178,6 +2178,15 @@ class _GridUiBinding:
             widget.setPlainText(", ".join(cells))
 
     def material_options(self) -> list[str]:
+        provider = getattr(self.ui, "available_materials", None)
+        if callable(provider):
+            try:
+                materials = provider()
+                if materials:
+                    return list(materials)
+            except Exception:
+                logger.debug("Falha ao obter materiais disponiveis via UI.", exc_info=True)
+
         materials: list[str] = []
         seen: set[str] = set()
         for laminado in self.model.laminados.values():

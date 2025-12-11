@@ -2,7 +2,7 @@
 Application entry point for the GridLamEdit GUI.
 
 Running ``python -m gridlamedit.app.main`` will launch a minimal PySide6
-window. Additional modules (models, services, ui) can build on this later.
+window. Additional modules (models, services, ui) can build on this later.S
 """
 
 from __future__ import annotations

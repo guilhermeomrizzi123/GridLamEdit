@@ -48,8 +48,10 @@ from gridlamedit.services.laminate_checks import (
 )
 from gridlamedit.services.laminate_service import auto_name_for_laminate, sync_material_by_sequence
 from gridlamedit.core.paths import package_path
+from gridlamedit.services.material_registry import (
+    available_materials as registry_available_materials,
+)
 from gridlamedit.services.project_query import (
-    project_distinct_materials,
     project_distinct_orientations,
     project_most_used_material,
 )
@@ -902,7 +904,9 @@ class VirtualStackingWindow(QtWidgets.QDialog):
     def _apply_orientation_delegate(self) -> None:
         material_delegate = MaterialComboDelegate(
             self.table,
-            items_provider=lambda: project_distinct_materials(self._project),
+            items_provider=lambda: registry_available_materials(
+                self._project, settings=self._settings
+            ),
         )
         self.table.setItemDelegateForColumn(
             VirtualStackingModel.COL_MATERIAL, material_delegate

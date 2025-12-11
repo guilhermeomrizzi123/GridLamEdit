@@ -54,6 +54,7 @@ from PySide6.QtWidgets import (
     QFrame,
     QLabel,
     QLineEdit,
+    QInputDialog,
     QListWidget,
     QListWidgetItem,
     QMessageBox,
@@ -119,8 +120,11 @@ from gridlamedit.services.laminate_batch_import import (
     create_blank_batch_template,
     parse_batch_template,
 )
+from gridlamedit.services.material_registry import (
+    add_custom_material,
+    available_materials as registry_available_materials,
+)
 from gridlamedit.services.project_query import (
-    project_distinct_materials,
     project_distinct_orientations,
     project_most_used_material,
 )
@@ -366,6 +370,13 @@ class MainWindow(QMainWindow):
                 QKeySequence("Ctrl+E"),
             ),
             (
+                "register_material_action",
+                "Cadastrar Material...",
+                self._on_register_material,
+                "Cadastrar um novo material padrao.",
+                None,
+            ),
+            (
                 "virtual_stacking_action",
                 "Abrir Virtual Stacking",
                 self.open_virtual_stacking,
@@ -407,6 +418,7 @@ class MainWindow(QMainWindow):
         file_menu.addAction(self.save_action)
         file_menu.addAction(self.save_as_action)
         file_menu.addAction(self.export_excel_action)
+        file_menu.addAction(self.register_material_action)
         file_menu.addSeparator()
         file_menu.addAction(self.exit_action)
 
@@ -964,6 +976,10 @@ class MainWindow(QMainWindow):
             if tipo and tipo not in ordered:
                 ordered.append(tipo)
         return ordered
+
+    def available_materials(self) -> list[str]:
+        """Return materials merging defaults, user entries, and project data."""
+        return registry_available_materials(self._grid_model, settings=self._settings)
 
     def _available_cells(self) -> list[str]:
         if self._grid_model is None:
@@ -2645,8 +2661,7 @@ class MainWindow(QMainWindow):
         _, _, laminate = self._stacking_binding_context()
         if model is None or laminate is None:
             return
-        project = self._grid_model
-        materials = project_distinct_materials(project)
+        materials = self.available_materials()
         dialog = BulkMaterialDialog(
             parent=self,
             available_materials=materials,
@@ -3417,6 +3432,44 @@ class MainWindow(QMainWindow):
 
         self._start_export_verification()
         return True
+
+    def _on_register_material(self, checked: bool = False) -> None:  # noqa: ARG002
+        text, ok = QInputDialog.getText(
+            self,
+            "Cadastrar material",
+            "Informe o material (texto completo) para disponibilizar nas listas:",
+        )
+        if not ok:
+            return
+        material = str(text or "").strip()
+        if not material:
+            QMessageBox.warning(
+                self, "Material vazio", "Informe um material válido para cadastro."
+            )
+            return
+
+        existing_keys = {item.casefold() for item in self.available_materials()}
+        updated = add_custom_material(material, settings=self._settings)
+        added = material.casefold() not in existing_keys and material.casefold() in {
+            item.casefold() for item in updated
+        }
+
+        if added:
+            QMessageBox.information(
+                self,
+                "Material cadastrado",
+                "Material adicionado e disponível na lista de materiais.",
+            )
+        else:
+            QMessageBox.information(
+                self,
+                "Material existente",
+                "O material já estava cadastrado e segue disponível.",
+            )
+
+        status_bar = self.statusBar()
+        if status_bar:
+            status_bar.showMessage("Materiais atualizados", 3000)
 
     def _start_export_verification(self) -> None:
         model = self._grid_model
