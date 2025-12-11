@@ -2937,27 +2937,24 @@ class MainWindow(QMainWindow):
         except Exception:
             logger.warning("Nao foi possivel abrir o arquivo %s automaticamente.", path)
 
-    def _prompt_batch_import_choice(self, temp_path: Path) -> tuple[Optional[str], Optional[Path]]:
+    def _prompt_batch_import_choice(self) -> Optional[str]:
         box = QMessageBox(self)
         box.setWindowTitle("Importar laminados em lote")
         box.setText(
-            "O template em branco foi aberto. Preencha, salve e feche o arquivo antes de importar."
+            "Selecione como deseja proceder com a importacao em lote."
         )
-        import_now = box.addButton("Importar agora", QMessageBox.AcceptRole)
+        open_template = box.addButton("Abrir template", QMessageBox.ActionRole)
         choose_file = box.addButton(
-            "Selecionar arquivo preenchido", QMessageBox.ActionRole
+            "Selecionar template preenchido", QMessageBox.AcceptRole
         )
-        save_template = box.addButton("Salvar template", QMessageBox.ActionRole)
         box.addButton(QMessageBox.Cancel)
         box.exec()
         clicked = box.clickedButton()
-        if clicked is import_now:
-            return "import", temp_path
+        if clicked is open_template:
+            return "open"
         if clicked is choose_file:
-            return "choose", None
-        if clicked is save_template:
-            return "save", None
-        return None, None
+            return "choose"
+        return None
 
     def _save_blank_batch_template(self, base_template: Path) -> None:
         options = self._file_dialog_options()
@@ -3134,42 +3131,44 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Template ausente", str(exc))
             return
 
-        try:
-            temp_copy = create_blank_batch_template(
-                template_path, sheet_name="Sheet1"
-            )
-        except Exception as exc:
-            logger.error("Falha ao preparar template em branco: %s", exc, exc_info=True)
-            QMessageBox.critical(
-                self,
-                "Erro",
-                "Nao foi possivel preparar o template de lote.",
-            )
-            return
-
-        self._open_with_default_app(temp_copy)
-        choice, target = self._prompt_batch_import_choice(temp_copy)
+        choice = self._prompt_batch_import_choice()
         if choice is None:
             return
-        if choice == "save":
-            self._save_blank_batch_template(template_path)
+
+        if choice == "open":
+            try:
+                temp_copy = create_blank_batch_template(
+                    template_path, sheet_name="Sheet1"
+                )
+            except Exception as exc:
+                logger.error(
+                    "Falha ao preparar template em branco: %s", exc, exc_info=True
+                )
+                QMessageBox.critical(
+                    self,
+                    "Erro",
+                    "Nao foi possivel preparar o template de lote.",
+                )
+                return
+            self._open_with_default_app(temp_copy)
             return
+
         if choice == "choose":
             selected = self._select_filled_batch_file()
             if selected is None:
                 return
-            target = selected
-
-        if target is None:
-            return
-
-        self._import_batch_from_path(target)
+            self._import_batch_from_path(selected)
 
 
     def _load_spreadsheet(self, checked: bool = False) -> None:  # noqa: ARG002
         """Open an Excel file and populate the UI."""
         if not self._confirm_discard_changes():
             return
+
+        previous_laminates = {}
+        if self._grid_model is not None and getattr(self._grid_model, "laminados", None):
+            previous_laminates = dict(self._grid_model.laminados)
+
         options = self._file_dialog_options()
         path, _ = QFileDialog.getOpenFileName(
             self,
@@ -3192,6 +3191,12 @@ class MainWindow(QMainWindow):
 
         model.source_excel_path = path
         model.dirty = False
+
+        if previous_laminates:
+            for name, laminate in previous_laminates.items():
+                if name not in model.laminados:
+                    model.laminados[name] = laminate
+
         self._grid_model = model
         self.project_manager.current_path = None
 
