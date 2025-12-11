@@ -538,17 +538,6 @@ class MainWindow(QMainWindow):
         layout.addWidget(layers_section, stretch=2)
         layout.setStretchFactor(layers_section, 2)
 
-        # Footer outside stacking table (panel-level footer in gray area)
-        footer_bar = QHBoxLayout()
-        # Increase right margin even further to shift the label more left
-        footer_bar.setContentsMargins(8, 0, 64, 8)
-        footer_bar.setSpacing(0)
-        footer_bar.addItem(QSpacerItem(0, 0, QSizePolicy.Expanding, QSizePolicy.Minimum))
-        self.layers_count_label = QLabel("Quantidade Total de Camadas: 0", panel)
-        self.layers_count_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        self.layers_count_label.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
-        footer_bar.addWidget(self.layers_count_label)
-        layout.addLayout(footer_bar)
         return panel
 
     def _build_laminate_form(self) -> QHBoxLayout:
@@ -804,9 +793,13 @@ class MainWindow(QMainWindow):
         laminate: Optional[Laminado] = None
         if self._grid_model is not None and laminate_name:
             laminate = self._grid_model.laminados.get(laminate_name)
+        if laminate is None:
+            laminate = self._current_laminate_instance()
         self._update_auto_rename_controls(laminate)
         self._set_color_combo_value(laminate)
         self._apply_auto_rename_if_needed(laminate)
+        if laminate is not None:
+            self.check_symmetry()
 
     def _on_binding_layers_modified(
         self, laminate_name: Optional[str]
@@ -1014,8 +1007,8 @@ class MainWindow(QMainWindow):
 
     def _build_associated_cells_view(self) -> QWidget:
         container = QWidget(self)
-        layout = QVBoxLayout(container)
-        layout.setSpacing(6)
+        layout = QHBoxLayout(container)
+        layout.setSpacing(12)
         layout.setContentsMargins(0, 0, 0, 0)
 
         self.btn_associated_cells = QPushButton(
@@ -1030,6 +1023,13 @@ class MainWindow(QMainWindow):
         )
 
         layout.addWidget(self.btn_associated_cells, alignment=Qt.AlignLeft)
+        layout.addStretch()
+
+        self.layers_count_label = QLabel("Quantidade Total de Camadas: 0", container)
+        self.layers_count_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.layers_count_label.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        layout.addWidget(self.layers_count_label, alignment=Qt.AlignRight)
+
         container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         return container
 
@@ -1080,8 +1080,10 @@ class MainWindow(QMainWindow):
     def _create_layers_table(self, parent: QWidget) -> QTableView:
         table = QTableView(parent)
         table.setAlternatingRowColors(True)
-        table.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        table.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        table.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOn)
         table.setVerticalScrollMode(QAbstractItemView.ScrollPerItem)
+        table.setViewportMargins(0, 0, 0, 8)  # leave breathing room for the last row
         table.verticalHeader().setVisible(False)
         table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         table.setMinimumHeight(440)
@@ -1122,8 +1124,7 @@ class MainWindow(QMainWindow):
             label.setGeometry(0, 0, 0, band.height())
             label.hide()
             self._band_labels.append(label)
-        band.installEventFilter(self)
-        self._stacking_header_band = band
+
         return band
 
     def _create_layers_buttons(self) -> QVBoxLayout:
