@@ -2638,6 +2638,118 @@ class VirtualStackingWindow(QtWidgets.QDialog):
                 model.update_layers(copy.deepcopy(layers))
             self._after_laminate_changed(cell.laminate)
 
+    def _split_center_row_groups(
+        self,
+        row: dict[str, Camada],
+        adjacency: dict[str, set[str]],
+        cell_order: list[str],
+        order_index: dict[str, int],
+    ) -> list[dict[str, Camada]]:
+        oriented: dict[str, object] = {}
+        for cid in cell_order:
+            layer = row.get(cid)
+            if layer is None:
+                continue
+            orientation = getattr(layer, "orientacao", None)
+            if orientation is None:
+                continue
+            oriented[cid] = self._normalize_orientation_value(orientation)
+
+        if not oriented:
+            return [copy.deepcopy(row)]
+
+        visited: set[str] = set()
+        groups: list[tuple[int, set[str]]] = []
+        for cid in cell_order:
+            if cid in visited or cid not in oriented:
+                continue
+            component: set[str] = set()
+            stack = [cid]
+            visited.add(cid)
+            while stack:
+                current = stack.pop()
+                component.add(current)
+                for neighbor in adjacency.get(current, set()):
+                    if neighbor in oriented and neighbor not in visited:
+                        visited.add(neighbor)
+                        stack.append(neighbor)
+
+            orientation_groups: dict[object, set[str]] = {}
+            for cell_id in component:
+                ori = oriented[cell_id]
+                orientation_groups.setdefault(ori, set()).add(cell_id)
+            for cells in orientation_groups.values():
+                anchor = min(order_index.get(c, len(order_index)) for c in cells)
+                groups.append((anchor, cells))
+
+        groups.sort(key=lambda entry: entry[0])
+
+        if len(groups) <= 1:
+            normalized_row: dict[str, Camada] = {}
+            for cid in cell_order:
+                base = row.get(cid)
+                if base is None:
+                    continue
+                layer_copy = copy.deepcopy(base)
+                if cid in oriented:
+                    layer_copy.orientacao = oriented[cid]
+                else:
+                    layer_copy.orientacao = None
+                normalized_row[cid] = layer_copy
+            return [normalized_row]
+
+        split_rows: list[dict[str, Camada]] = []
+        for _, cells in groups:
+            new_row: dict[str, Camada] = {}
+            for cid in cell_order:
+                base = row.get(cid)
+                if base is None:
+                    continue
+                layer_copy = copy.deepcopy(base)
+                if cid in cells:
+                    layer_copy.orientacao = oriented[cid]
+                else:
+                    layer_copy.orientacao = None
+                new_row[cid] = layer_copy
+            split_rows.append(new_row)
+
+        return split_rows
+
+    def _process_center_sequences(
+        self,
+        rows: list[dict[str, Camada]],
+        adjacency: dict[str, set[str]],
+        cell_order: list[str],
+    ) -> list[dict[str, Camada]]:
+        if not rows:
+            return rows
+
+        order_index = {cid: idx for idx, cid in enumerate(cell_order)}
+
+        if len(rows) % 2 == 0:
+            center_indices = [len(rows) // 2 - 1, len(rows) // 2]
+        else:
+            center_indices = [len(rows) // 2]
+
+        result = list(rows)
+        offset = 0
+        for center in center_indices:
+            idx = center + offset
+            if idx < 0 or idx >= len(result):
+                continue
+            split_rows = self._split_center_row_groups(
+                result[idx], adjacency, cell_order, order_index
+            )
+            if len(split_rows) == 1:
+                result[idx] = split_rows[0]
+                continue
+            result.pop(idx)
+            for insert_pos, new_row in enumerate(split_rows):
+                result.insert(idx + insert_pos, new_row)
+            offset += len(split_rows) - 1
+
+        return result
+
     def reorganizar_por_vizinhanca(self) -> None:
         """Aplica as regras de agrupamento por vizinhança e simetria."""
         if self._project is None or not self._cells:
@@ -2722,6 +2834,9 @@ class VirtualStackingWindow(QtWidgets.QDialog):
         for bottom_rows in reversed(back_rows):
             for row in reversed(bottom_rows):
                 final_rows.append(row)
+
+        # Após aplicar as regras existentes, tratar as sequências centrais para separar orientações e blocos desconectados
+        final_rows = self._process_center_sequences(final_rows, adjacency, cell_order)
 
         self._apply_virtual_rows_to_laminates(final_rows)
         self._notify_changes([cell.laminate.nome for cell in self._cells])
