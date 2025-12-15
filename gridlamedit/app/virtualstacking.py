@@ -55,6 +55,7 @@ from gridlamedit.services.project_query import (
     project_distinct_orientations,
     project_most_used_material,
 )
+from gridlamedit.services.virtual_stacking_export import export_virtual_stacking
 
 
 @dataclass
@@ -1240,6 +1241,14 @@ class VirtualStackingWindow(QtWidgets.QDialog):
         warning_widget.setStyleSheet("background: transparent; margin: 0; padding: 0;")
         toolbar.addWidget(warning_widget)
 
+        self.btn_export_virtual = QtWidgets.QToolButton(self)
+        self.btn_export_virtual.setText("Export Virtual Stacking")
+        self.btn_export_virtual.setToolTip(
+            "Exporta a planilha no formato do template Virtual Stacking.xls para importacao no CATIA."
+        )
+        self.btn_export_virtual.clicked.connect(self._export_virtual_stacking)
+        toolbar.addWidget(self.btn_export_virtual)
+
         toolbar.addStretch()
 
         # Reorganizar por Vizinhança
@@ -1291,6 +1300,54 @@ class VirtualStackingWindow(QtWidgets.QDialog):
         toolbar.addWidget(self.btn_redo)
 
         return toolbar
+
+    def _default_export_path(self) -> str:
+        try:
+            last = self._settings.value("virtual_stacking/last_export_path", "")
+        except Exception:
+            last = ""
+        if last:
+            return str(last)
+        return str(Path.home() / "Virtual Stacking.xls")
+
+    def _export_virtual_stacking(self) -> None:
+        if self._project is None or not self._cells or not self._layers:
+            QtWidgets.QMessageBox.information(
+                self,
+                "Export Virtual Stacking",
+                "Nenhum dado de Virtual Stacking disponivel para exportar.",
+            )
+            return
+
+        suggested = self._default_export_path()
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self,
+            "Export Virtual Stacking",
+            suggested,
+            "Excel 97-2003 (*.xls)",
+        )
+        if not path:
+            return
+        try:
+            self._settings.setValue("virtual_stacking/last_export_path", path)
+        except Exception:
+            pass
+
+        try:
+            output_path = export_virtual_stacking(self._layers, self._cells, Path(path))
+        except Exception as exc:
+            QtWidgets.QMessageBox.critical(
+                self,
+                "Export Virtual Stacking",
+                f"Falha ao exportar a planilha: {exc}",
+            )
+            return
+
+        QtWidgets.QMessageBox.information(
+            self,
+            "Export Virtual Stacking",
+            f"Planilha exportada para:\n{output_path}",
+        )
 
     # Data binding ----------------------------------------------------
 
