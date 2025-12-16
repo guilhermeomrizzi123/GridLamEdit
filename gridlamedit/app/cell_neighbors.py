@@ -14,8 +14,12 @@ which returns the current neighbor map in memory.
 from __future__ import annotations
 
 from collections import Counter
+import logging
+from pathlib import Path
+import re
 from dataclasses import dataclass
 from typing import Dict, Optional, Tuple
+import pandas as pd
 
 from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import QColor, QFont, QPainterPath, QPen, QAction, QUndoStack, QUndoCommand, QLinearGradient, QRadialGradient, QBrush
@@ -49,12 +53,15 @@ try:
         ORIENTATION_HIGHLIGHT_COLORS,
         DEFAULT_ORIENTATION_HIGHLIGHT,
         normalize_angle,
+        CELL_ID_PATTERN,
     )
     from gridlamedit.services.laminate_checks import evaluate_symmetry_for_layers
 except Exception:  # pragma: no cover - optional import for loose coupling
     GridModel = object  # type: ignore
     ORIENTATION_HIGHLIGHT_COLORS = {45.0: QColor(193, 174, 255), 90.0: QColor(160, 196, 255), -45.0: QColor(176, 230, 176), 0.0: QColor(230, 230, 230)}
     DEFAULT_ORIENTATION_HIGHLIGHT = QColor(255, 236, 200)
+
+    CELL_ID_PATTERN = re.compile(r"^C\d+$", re.IGNORECASE)
 
     def normalize_angle(value):  # type: ignore
         return float(value)
@@ -580,6 +587,16 @@ class CellNeighborsWindow(QDialog):
         toolbar.addWidget(self.save_button)
         
         toolbar.addSeparator()
+
+        # Auto neighbors button
+        self.auto_neighbors_button = QPushButton("Auto neighbors", self)
+        self.auto_neighbors_button.setToolTip(
+            "Generate neighbors automatically from Planilha1 columns C-F."
+        )
+        self.auto_neighbors_button.clicked.connect(self._auto_define_neighbors_from_spreadsheet)
+        toolbar.addWidget(self.auto_neighbors_button)
+        
+        toolbar.addSeparator()
         
         # Undo button
         self.undo_button = QPushButton("Desfazer", self)
@@ -1044,6 +1061,227 @@ class CellNeighborsWindow(QDialog):
                     import logging
                     logger = logging.getLogger(__name__)
                     logger.warning(f"Failed to save cell neighbors: {e}")
+
+    def _auto_define_neighbors_from_spreadsheet(self) -> None:
+        """Populate neighbors automatically using Planilha1 columns C-F."""
+        source_excel = getattr(self._model, "source_excel_path", None) if self._model else None
+        if not source_excel:
+            QMessageBox.warning(
+                self,
+                "Source Excel missing",
+                "No source Excel is loaded. Please import the spreadsheet before running auto-neighboring.",
+            )
+            return
+
+        excel_path = Path(source_excel)
+        try:
+            boundaries, parse_warnings = self._load_boundaries_from_excel(excel_path)
+            neighbors, inference_warnings = self._build_neighbors_from_boundaries(boundaries)
+        except Exception as exc:  # pragma: no cover - defensive
+            logging.getLogger(__name__).warning("Falha na geracao automatica de vizinhos: %s", exc, exc_info=True)
+            QMessageBox.critical(
+                self,
+                "Failed to generate neighbors",
+                f"Could not auto-generate neighbors: {exc}",
+            )
+            return
+
+        # Always ensure we keep cells tracked in the UI, even if no boundaries were found for them
+        for cell_id in self._cells:
+            neighbors.setdefault(cell_id, {"up": None, "down": None, "left": None, "right": None})
+
+        if not neighbors:
+            QMessageBox.information(
+                self,
+                "No cells found",
+                "No valid cells were found in Planilha1 to generate neighbors.",
+            )
+            return
+
+        # Apply and refresh UI
+        self._neighbors = neighbors
+        self._rebuild_graph_from_neighbors()
+        self._has_unsaved_changes = True
+        self._update_command_buttons()
+        self._update_all_plus_buttons_visibility()
+        self._center_view_on_cells()
+        if self._current_sequence_index is not None:
+            self.update_cell_colors_for_sequence(self._current_sequence_index)
+        elif self._aml_highlight_enabled:
+            self.update_cell_colors_for_aml()
+
+        # Log detailed warnings but keep UI message concise
+        logger = logging.getLogger(__name__)
+        for w in parse_warnings:
+            logger.warning("Auto neighbors parse warning: %s", w)
+        for w in inference_warnings:
+            logger.warning("Auto neighbors inference warning: %s", w)
+
+        cells_with_neighbors = sum(
+            1 for mapping in neighbors.values() if any(mapping.values())
+        )
+        edge_pairs: set[tuple[str, str]] = set()
+        for src, mapping in neighbors.items():
+            for dst in mapping.values():
+                if dst:
+                    pair = tuple(sorted((src, dst)))
+                    edge_pairs.add(pair)
+        edge_count = len(edge_pairs)
+        warning_count = len(parse_warnings) + len(inference_warnings)
+
+        message = (
+            "Neighbor generation completed.\n"
+            f"Neighbor relations defined for {cells_with_neighbors} cells "
+            f"({edge_count} connections).\n"
+            f"Warnings: {warning_count} (details logged)."
+        )
+        QMessageBox.information(self, "Neighbors generated", message)
+
+    def _load_boundaries_from_excel(self, excel_path: Path) -> tuple[dict[str, dict[str, Optional[str]]], list[str]]:
+        """Read Planilha1 and return boundary tokens for columns C-F (1-4).
+        Supports .xlsx via pandas/openpyxl and .xls via xlrd without requiring newer xlrd."""
+        if not excel_path.exists():
+            raise FileNotFoundError(f"Source Excel '{excel_path}' was not found.")
+
+        df: pd.DataFrame
+        suffix = excel_path.suffix.lower()
+        try:
+            if suffix == ".xls":
+                try:
+                    import xlrd  # type: ignore
+                except Exception as exc:  # pragma: no cover - optional dep
+                    raise ValueError(
+                        "Leitura de arquivos .xls requer a dependencia opcional 'xlrd'."
+                    ) from exc
+                try:
+                    book = xlrd.open_workbook(excel_path)  # type: ignore[arg-type]
+                    if "Planilha1" not in book.sheet_names():
+                        raise ValueError("Worksheet 'Planilha1' was not found in the source Excel.")
+                    sheet = book.sheet_by_name("Planilha1")
+                    rows = [sheet.row_values(r) for r in range(sheet.nrows)]
+                    max_len = max((len(r) for r in rows), default=0)
+                    normalized = [r + [None] * (max_len - len(r)) for r in rows]
+                    df = pd.DataFrame(normalized)
+                except Exception as exc:  # pragma: no cover - defensive
+                    raise ValueError(f"Failed to open Planilha1 in '{excel_path.name}': {exc}") from exc
+            else:
+                df = pd.read_excel(excel_path, sheet_name="Planilha1", header=None)
+        except Exception as exc:  # pragma: no cover - defensive
+            raise ValueError(f"Failed to open Planilha1 in '{excel_path.name}': {exc}") from exc
+
+        df = df.dropna(how="all").reset_index(drop=True)
+        if df.empty:
+            return {}, ["Worksheet Planilha1 is empty."]
+
+        def _is_blank(value: object) -> bool:
+            if value is None:
+                return True
+            if isinstance(value, float) and pd.isna(value):
+                return True
+            if isinstance(value, str) and not value.strip():
+                return True
+            return False
+
+        def _first_non_blank_value(row: pd.Series) -> Optional[str]:
+            for val in row:
+                if _is_blank(val):
+                    continue
+                return str(val)
+            return None
+
+        header_idx: Optional[int] = None
+        for idx, row in df.iterrows():
+            first = _first_non_blank_value(row)
+            if first and str(first).strip().lower() == "cells":
+                header_idx = idx
+                break
+
+        if header_idx is None:
+            raise ValueError("Could not find the 'Cells' header row in Planilha1.")
+
+        separator_idx: Optional[int] = None
+        for idx in range(header_idx + 1, len(df)):
+            row = df.iloc[idx]
+            if any(str(val).strip() == "#" for val in row if not _is_blank(val)):
+                separator_idx = idx
+                break
+
+        if separator_idx is None:
+            raise ValueError("Could not find the '#' separator line in Planilha1.")
+
+        allowed_cells = set(self._cells or [])
+        warnings: list[str] = []
+        boundaries: dict[str, dict[str, Optional[str]]] = {}
+
+        def _col_value(row: pd.Series, idx: int) -> Optional[str]:
+            if idx >= len(row):
+                return None
+            value = row.iloc[idx]
+            if _is_blank(value):
+                return None
+            return str(value).strip()
+
+        for row_idx in range(header_idx + 1, separator_idx):
+            row = df.iloc[row_idx]
+            cell_raw = row.iloc[0] if len(row) > 0 else None
+            if _is_blank(cell_raw):
+                continue
+            cell_id = str(cell_raw).strip().upper()
+            if not CELL_ID_PATTERN.match(cell_id):
+                warnings.append(f"Row {row_idx + 1}: cell '{cell_raw}' ignored (invalid format).")
+                continue
+            if allowed_cells and cell_id not in allowed_cells:
+                warnings.append(f"Row {row_idx + 1}: cell '{cell_id}' is outside the current project; ignored.")
+                continue
+
+            boundaries[cell_id] = {
+                "down": _col_value(row, 2),
+                "right": _col_value(row, 3),
+                "up": _col_value(row, 4),
+                "left": _col_value(row, 5),
+            }
+
+        return boundaries, warnings
+
+    def _build_neighbors_from_boundaries(
+        self, boundaries: dict[str, dict[str, Optional[str]]]
+    ) -> tuple[dict[str, dict[str, Optional[str]]], list[str]]:
+        """Build neighbor mapping by matching boundary tokens between cells."""
+        neighbors: dict[str, dict[str, Optional[str]]] = {
+            cell: {"up": None, "down": None, "left": None, "right": None} for cell in boundaries
+        }
+        warnings: list[str] = []
+
+        def _token(value: Optional[str]) -> Optional[str]:
+            return str(value).strip().lower() if value is not None else None
+
+        def _assign(src: str, direction: str, dst: str, opposite_direction: str) -> None:
+            current_src = neighbors[src].get(direction)
+            current_dst = neighbors[dst].get(opposite_direction)
+            if current_src and current_src != dst:
+                warnings.append(f"Celula {src} ja possui vizinho em {direction}: {current_src}.")
+                return
+            if current_dst and current_dst != src:
+                warnings.append(f"Celula {dst} ja possui vizinho em {opposite_direction}: {current_dst}.")
+                return
+            neighbors[src][direction] = dst
+            neighbors[dst][opposite_direction] = src
+
+        cell_items = list(boundaries.items())
+        for src, edges in cell_items:
+            for dst, other_edges in cell_items:
+                if src == dst:
+                    continue
+                if _token(edges.get("down")) and _token(edges.get("down")) == _token(other_edges.get("up")):
+                    _assign(src, "down", dst, "up")
+                if _token(edges.get("up")) and _token(edges.get("up")) == _token(other_edges.get("down")):
+                    _assign(src, "up", dst, "down")
+                if _token(edges.get("right")) and _token(edges.get("right")) == _token(other_edges.get("left")):
+                    _assign(src, "right", dst, "left")
+                if _token(edges.get("left")) and _token(edges.get("left")) == _token(other_edges.get("right")):
+                    _assign(src, "left", dst, "right")
+
+        return neighbors, warnings
 
     def _expand_scene_rect(self) -> None:
         """Expand the scene rect to fit all nodes with a safety margin."""
