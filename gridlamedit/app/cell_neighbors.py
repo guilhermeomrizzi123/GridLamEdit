@@ -15,11 +15,9 @@ from __future__ import annotations
 
 from collections import Counter
 import logging
-from pathlib import Path
 import re
 from dataclasses import dataclass
 from typing import Dict, Optional, Tuple
-import pandas as pd
 
 from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import QColor, QFont, QPainterPath, QPen, QAction, QUndoStack, QUndoCommand, QLinearGradient, QRadialGradient, QBrush
@@ -587,16 +585,6 @@ class CellNeighborsWindow(QDialog):
         toolbar.addWidget(self.save_button)
         
         toolbar.addSeparator()
-
-        # Auto neighbors button
-        self.auto_neighbors_button = QPushButton("Auto neighbors", self)
-        self.auto_neighbors_button.setToolTip(
-            "Generate neighbors automatically from Planilha1 columns C-F."
-        )
-        self.auto_neighbors_button.clicked.connect(self._auto_define_neighbors_from_spreadsheet)
-        toolbar.addWidget(self.auto_neighbors_button)
-        
-        toolbar.addSeparator()
         
         # Undo button
         self.undo_button = QPushButton("Desfazer", self)
@@ -1062,227 +1050,6 @@ class CellNeighborsWindow(QDialog):
                     logger = logging.getLogger(__name__)
                     logger.warning(f"Failed to save cell neighbors: {e}")
 
-    def _auto_define_neighbors_from_spreadsheet(self) -> None:
-        """Populate neighbors automatically using Planilha1 columns C-F."""
-        source_excel = getattr(self._model, "source_excel_path", None) if self._model else None
-        if not source_excel:
-            QMessageBox.warning(
-                self,
-                "Source Excel missing",
-                "No source Excel is loaded. Please import the spreadsheet before running auto-neighboring.",
-            )
-            return
-
-        excel_path = Path(source_excel)
-        try:
-            boundaries, parse_warnings = self._load_boundaries_from_excel(excel_path)
-            neighbors, inference_warnings = self._build_neighbors_from_boundaries(boundaries)
-        except Exception as exc:  # pragma: no cover - defensive
-            logging.getLogger(__name__).warning("Falha na geracao automatica de vizinhos: %s", exc, exc_info=True)
-            QMessageBox.critical(
-                self,
-                "Failed to generate neighbors",
-                f"Could not auto-generate neighbors: {exc}",
-            )
-            return
-
-        # Always ensure we keep cells tracked in the UI, even if no boundaries were found for them
-        for cell_id in self._cells:
-            neighbors.setdefault(cell_id, {"up": None, "down": None, "left": None, "right": None})
-
-        if not neighbors:
-            QMessageBox.information(
-                self,
-                "No cells found",
-                "No valid cells were found in Planilha1 to generate neighbors.",
-            )
-            return
-
-        # Apply and refresh UI
-        self._neighbors = neighbors
-        self._rebuild_graph_from_neighbors()
-        self._has_unsaved_changes = True
-        self._update_command_buttons()
-        self._update_all_plus_buttons_visibility()
-        self._center_view_on_cells()
-        if self._current_sequence_index is not None:
-            self.update_cell_colors_for_sequence(self._current_sequence_index)
-        elif self._aml_highlight_enabled:
-            self.update_cell_colors_for_aml()
-
-        # Log detailed warnings but keep UI message concise
-        logger = logging.getLogger(__name__)
-        for w in parse_warnings:
-            logger.warning("Auto neighbors parse warning: %s", w)
-        for w in inference_warnings:
-            logger.warning("Auto neighbors inference warning: %s", w)
-
-        cells_with_neighbors = sum(
-            1 for mapping in neighbors.values() if any(mapping.values())
-        )
-        edge_pairs: set[tuple[str, str]] = set()
-        for src, mapping in neighbors.items():
-            for dst in mapping.values():
-                if dst:
-                    pair = tuple(sorted((src, dst)))
-                    edge_pairs.add(pair)
-        edge_count = len(edge_pairs)
-        warning_count = len(parse_warnings) + len(inference_warnings)
-
-        message = (
-            "Neighbor generation completed.\n"
-            f"Neighbor relations defined for {cells_with_neighbors} cells "
-            f"({edge_count} connections).\n"
-            f"Warnings: {warning_count} (details logged)."
-        )
-        QMessageBox.information(self, "Neighbors generated", message)
-
-    def _load_boundaries_from_excel(self, excel_path: Path) -> tuple[dict[str, dict[str, Optional[str]]], list[str]]:
-        """Read Planilha1 and return boundary tokens for columns C-F (1-4).
-        Supports .xlsx via pandas/openpyxl and .xls via xlrd without requiring newer xlrd."""
-        if not excel_path.exists():
-            raise FileNotFoundError(f"Source Excel '{excel_path}' was not found.")
-
-        df: pd.DataFrame
-        suffix = excel_path.suffix.lower()
-        try:
-            if suffix == ".xls":
-                try:
-                    import xlrd  # type: ignore
-                except Exception as exc:  # pragma: no cover - optional dep
-                    raise ValueError(
-                        "Leitura de arquivos .xls requer a dependencia opcional 'xlrd'."
-                    ) from exc
-                try:
-                    book = xlrd.open_workbook(excel_path)  # type: ignore[arg-type]
-                    if "Planilha1" not in book.sheet_names():
-                        raise ValueError("Worksheet 'Planilha1' was not found in the source Excel.")
-                    sheet = book.sheet_by_name("Planilha1")
-                    rows = [sheet.row_values(r) for r in range(sheet.nrows)]
-                    max_len = max((len(r) for r in rows), default=0)
-                    normalized = [r + [None] * (max_len - len(r)) for r in rows]
-                    df = pd.DataFrame(normalized)
-                except Exception as exc:  # pragma: no cover - defensive
-                    raise ValueError(f"Failed to open Planilha1 in '{excel_path.name}': {exc}") from exc
-            else:
-                df = pd.read_excel(excel_path, sheet_name="Planilha1", header=None)
-        except Exception as exc:  # pragma: no cover - defensive
-            raise ValueError(f"Failed to open Planilha1 in '{excel_path.name}': {exc}") from exc
-
-        df = df.dropna(how="all").reset_index(drop=True)
-        if df.empty:
-            return {}, ["Worksheet Planilha1 is empty."]
-
-        def _is_blank(value: object) -> bool:
-            if value is None:
-                return True
-            if isinstance(value, float) and pd.isna(value):
-                return True
-            if isinstance(value, str) and not value.strip():
-                return True
-            return False
-
-        def _first_non_blank_value(row: pd.Series) -> Optional[str]:
-            for val in row:
-                if _is_blank(val):
-                    continue
-                return str(val)
-            return None
-
-        header_idx: Optional[int] = None
-        for idx, row in df.iterrows():
-            first = _first_non_blank_value(row)
-            if first and str(first).strip().lower() == "cells":
-                header_idx = idx
-                break
-
-        if header_idx is None:
-            raise ValueError("Could not find the 'Cells' header row in Planilha1.")
-
-        separator_idx: Optional[int] = None
-        for idx in range(header_idx + 1, len(df)):
-            row = df.iloc[idx]
-            if any(str(val).strip() == "#" for val in row if not _is_blank(val)):
-                separator_idx = idx
-                break
-
-        if separator_idx is None:
-            raise ValueError("Could not find the '#' separator line in Planilha1.")
-
-        allowed_cells = set(self._cells or [])
-        warnings: list[str] = []
-        boundaries: dict[str, dict[str, Optional[str]]] = {}
-
-        def _col_value(row: pd.Series, idx: int) -> Optional[str]:
-            if idx >= len(row):
-                return None
-            value = row.iloc[idx]
-            if _is_blank(value):
-                return None
-            return str(value).strip()
-
-        for row_idx in range(header_idx + 1, separator_idx):
-            row = df.iloc[row_idx]
-            cell_raw = row.iloc[0] if len(row) > 0 else None
-            if _is_blank(cell_raw):
-                continue
-            cell_id = str(cell_raw).strip().upper()
-            if not CELL_ID_PATTERN.match(cell_id):
-                warnings.append(f"Row {row_idx + 1}: cell '{cell_raw}' ignored (invalid format).")
-                continue
-            if allowed_cells and cell_id not in allowed_cells:
-                warnings.append(f"Row {row_idx + 1}: cell '{cell_id}' is outside the current project; ignored.")
-                continue
-
-            boundaries[cell_id] = {
-                "down": _col_value(row, 2),
-                "right": _col_value(row, 3),
-                "up": _col_value(row, 4),
-                "left": _col_value(row, 5),
-            }
-
-        return boundaries, warnings
-
-    def _build_neighbors_from_boundaries(
-        self, boundaries: dict[str, dict[str, Optional[str]]]
-    ) -> tuple[dict[str, dict[str, Optional[str]]], list[str]]:
-        """Build neighbor mapping by matching boundary tokens between cells."""
-        neighbors: dict[str, dict[str, Optional[str]]] = {
-            cell: {"up": None, "down": None, "left": None, "right": None} for cell in boundaries
-        }
-        warnings: list[str] = []
-
-        def _token(value: Optional[str]) -> Optional[str]:
-            return str(value).strip().lower() if value is not None else None
-
-        def _assign(src: str, direction: str, dst: str, opposite_direction: str) -> None:
-            current_src = neighbors[src].get(direction)
-            current_dst = neighbors[dst].get(opposite_direction)
-            if current_src and current_src != dst:
-                warnings.append(f"Celula {src} ja possui vizinho em {direction}: {current_src}.")
-                return
-            if current_dst and current_dst != src:
-                warnings.append(f"Celula {dst} ja possui vizinho em {opposite_direction}: {current_dst}.")
-                return
-            neighbors[src][direction] = dst
-            neighbors[dst][opposite_direction] = src
-
-        cell_items = list(boundaries.items())
-        for src, edges in cell_items:
-            for dst, other_edges in cell_items:
-                if src == dst:
-                    continue
-                if _token(edges.get("down")) and _token(edges.get("down")) == _token(other_edges.get("up")):
-                    _assign(src, "down", dst, "up")
-                if _token(edges.get("up")) and _token(edges.get("up")) == _token(other_edges.get("down")):
-                    _assign(src, "up", dst, "down")
-                if _token(edges.get("right")) and _token(edges.get("right")) == _token(other_edges.get("left")):
-                    _assign(src, "right", dst, "left")
-                if _token(edges.get("left")) and _token(edges.get("left")) == _token(other_edges.get("right")):
-                    _assign(src, "left", dst, "right")
-
-        return neighbors, warnings
-
     def _expand_scene_rect(self) -> None:
         """Expand the scene rect to fit all nodes with a safety margin."""
         if not self._nodes_by_grid:
@@ -1340,19 +1107,16 @@ class CellNeighborsWindow(QDialog):
         # Center the view on this point
         self.view.centerOn(center_x, center_y)
 
-    def _get_used_cell_ids(self) -> set[str]:
-        """Return set of cell IDs already used in the interface."""
-        used = set()
-        for record in self._nodes_by_grid.values():
-            if record.cell_id:
-                used.add(record.cell_id)
-        return used
-
     def _has_available_cells(self) -> bool:
         """Check if there are any cells available for selection."""
-        used_cells = self._get_used_cell_ids()
-        available_cells = [cell for cell in self._cells if cell not in used_cells]
-        return len(available_cells) > 0
+        return bool(self._cells)
+
+    def _has_grid_connection(self, record: _NodeRecord, direction: str) -> bool:
+        """Return True if there is a drawn connection from this node in the given direction."""
+        dx, dy = DIR_OFFSETS[direction]
+        neighbor_pos = (record.grid_pos[0] + dx, record.grid_pos[1] + dy)
+        key = (record.grid_pos, neighbor_pos) if record.grid_pos <= neighbor_pos else (neighbor_pos, record.grid_pos)
+        return key in self._lines_between_nodes
 
     def _update_all_plus_buttons_visibility(self) -> None:
         """Update visibility of all '+' buttons based on cell availability."""
@@ -1370,9 +1134,8 @@ class CellNeighborsWindow(QDialog):
                         line.setVisible(has_available)
             else:
                 # Node with cell assigned - check each direction
-                neighbors = self._neighbors.get(record.cell_id, {})
                 for direction in DIR_OFFSETS.keys():
-                    has_neighbor = neighbors.get(direction) is not None
+                    has_neighbor = self._has_grid_connection(record, direction)
                     btn = record.item.plus_items.get(direction)
                     line = record.item.plus_lines.get(direction)
                     
@@ -1902,9 +1665,8 @@ class CellNeighborsWindow(QDialog):
         if not self._cells:
             return
         
-        # Filter out already used cells
-        used_cells = self._get_used_cell_ids()
-        available_cells = [cell for cell in self._cells if cell not in used_cells or cell == record.cell_id]
+        # Allow reusing the same cell ID multiple times when defining neighborhoods
+        available_cells = list(self._cells)
         
         if not available_cells:
             return
@@ -1952,7 +1714,13 @@ class CellNeighborsWindow(QDialog):
                 self._prompt_select_cell(neighbor)
                 if not neighbor.cell_id:
                     return
-            self._link_cells(record.cell_id, direction, neighbor.cell_id)
+            self._link_cells(
+                record.cell_id,
+                direction,
+                neighbor.cell_id,
+                src_pos=record.grid_pos,
+                dst_pos=neighbor.grid_pos,
+            )
             self._draw_connection_between(record.grid_pos, neighbor.grid_pos)
             self._update_node_neighbors(record)
             self._update_node_neighbors(neighbor)
@@ -1975,7 +1743,13 @@ class CellNeighborsWindow(QDialog):
             self.scene.removeItem(neighbor.item)
             del self._nodes_by_grid[target_grid]
             return
-        self._link_cells(record.cell_id, direction, neighbor.cell_id)
+        self._link_cells(
+            record.cell_id,
+            direction,
+            neighbor.cell_id,
+            src_pos=record.grid_pos,
+            dst_pos=neighbor.grid_pos,
+        )
         self._draw_connection_between(record.grid_pos, neighbor.grid_pos)
         self._update_node_neighbors(record)
         self._update_node_neighbors(neighbor)
@@ -2005,17 +1779,24 @@ class CellNeighborsWindow(QDialog):
             if rec.cell_id == dst:
                 rec.item.set_neighbor(opposite(direction), src)
 
-    def _link_cells(self, src: str, direction: str, dst: str) -> None:
+    def _link_cells(
+        self,
+        src: str,
+        direction: str,
+        dst: str,
+        *,
+        src_pos: tuple[int, int] | None = None,
+        dst_pos: tuple[int, int] | None = None,
+    ) -> None:
         """Link cells with undo support."""
-        # Find grid positions
-        src_pos = None
-        dst_pos = None
-        for rec in self._nodes_by_grid.values():
-            if rec.cell_id == src:
-                src_pos = rec.grid_pos
-            if rec.cell_id == dst:
-                dst_pos = rec.grid_pos
-        
+        if src_pos is None or dst_pos is None:
+            for rec in self._nodes_by_grid.values():
+                if src_pos is None and rec.cell_id == src:
+                    src_pos = rec.grid_pos
+                if dst_pos is None and rec.cell_id == dst:
+                    dst_pos = rec.grid_pos
+                if src_pos is not None and dst_pos is not None:
+                    break
         if src_pos and dst_pos:
             command = AddNeighborCommand(self, src, direction, dst, src_pos, dst_pos)
             self._undo_stack.push(command)
@@ -2091,10 +1872,12 @@ class CellNeighborsWindow(QDialog):
                 record.item.set_neighbor(dir_name, None)
             return
         
-        neighbors = self._neighbors.get(record.cell_id, {})
-        for dir_name in DIR_OFFSETS.keys():
-            cell_id = neighbors.get(dir_name)
-            record.item.set_neighbor(dir_name, cell_id)
+        for dir_name, (dx, dy) in DIR_OFFSETS.items():
+            neighbor_pos = (record.grid_pos[0] + dx, record.grid_pos[1] + dy)
+            neighbor_rec = self._nodes_by_grid.get(neighbor_pos)
+            has_connection = self._has_grid_connection(record, dir_name)
+            neighbor_id = neighbor_rec.cell_id if (has_connection and neighbor_rec and neighbor_rec.cell_id) else None
+            record.item.set_neighbor(dir_name, neighbor_id)
 
 
 class SelectCellDialog(QDialog):
