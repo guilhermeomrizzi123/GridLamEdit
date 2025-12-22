@@ -8,6 +8,7 @@ import os
 import re
 import secrets
 import math
+import unicodedata
 from collections import Counter, OrderedDict
 from dataclasses import dataclass
 from enum import Enum, auto
@@ -26,6 +27,7 @@ from PySide6.QtCore import (
     QUrl,
     Signal,
     Slot,
+    QSortFilterProxyModel,
 )
 from PySide6.QtGui import (
     QDesktopServices,
@@ -40,6 +42,8 @@ from PySide6.QtGui import (
     QTextOption,
     QUndoCommand,
     QUndoStack,
+    QStandardItemModel,
+    QStandardItem,
 )
 from PySide6.QtWidgets import (
     QAbstractButton,
@@ -154,6 +158,48 @@ COL_SELECTION = StackingTableModel.COL_SELECT
 COL_PLY_TYPE = StackingTableModel.COL_PLY_TYPE
 COL_MATERIAL = StackingTableModel.COL_MATERIAL
 COL_ORIENTATION = StackingTableModel.COL_ORIENTATION
+
+
+class LaminateFilterProxy(QSortFilterProxyModel):
+    """Case-insensitive filter that matches raw or normalized text and keeps the sentinel."""
+
+    def __init__(self, parent: QObject | None = None) -> None:
+        super().__init__(parent)
+        self._filter_text: str = ""
+        self._filter_norm: str = ""
+        self._sentinel: str = "--"
+        self.setFilterCaseSensitivity(Qt.CaseInsensitive)
+
+    @staticmethod
+    def _normalize(text: str) -> str:
+        base = unicodedata.normalize("NFKD", text)
+        stripped = "".join(ch for ch in base if not unicodedata.combining(ch))
+        return re.sub(r"[^0-9A-Za-z]+", "", stripped).lower()
+
+    def set_filter_text(self, text: str) -> None:
+        self._filter_text = text.strip()
+        self._filter_norm = self._normalize(self._filter_text) if self._filter_text else ""
+        self.invalidateFilter()
+
+    def filterAcceptsRow(self, source_row: int, source_parent) -> bool:  # type: ignore[override]
+        if not self._filter_text:
+            return True
+        index = self.sourceModel().index(source_row, self.filterKeyColumn(), source_parent)
+        raw_text = str(index.data() or "")
+        if raw_text == self._sentinel:
+            return True
+
+        # Raw substring match (case-insensitive)
+        if self._filter_text.lower() in raw_text.lower():
+            return True
+
+        # Normalized match handles accents and punctuation removal (e.g., "4109" in "L30(4109)")
+        if self._filter_norm:
+            norm_text = self._normalize(raw_text)
+            if self._filter_norm in norm_text:
+                return True
+
+        return False
 
 
 class _LaminateChecksWorker(QObject):
@@ -528,8 +574,10 @@ class MainWindow(QMainWindow):
         # Laminate selector (Trocar Laminado)
         selector_label = QLabel("Trocar Laminado:", panel)
         self.laminate_name_combo = QComboBox(panel)
-        self.laminate_name_combo.setMinimumWidth(180)
-        self.laminate_name_combo.setEditable(False)
+        self.laminate_name_combo.setMinimumWidth(220)
+        self.laminate_name_combo.setEditable(True)
+        self.laminate_name_combo.setInsertPolicy(QComboBox.NoInsert)
+        self._init_laminate_search_combo()
         # Connect signal to handle laminate change
         self.laminate_name_combo.activated.connect(self._on_laminate_combo_changed)
         
@@ -610,6 +658,103 @@ class MainWindow(QMainWindow):
         layout.addWidget(combo)
         setattr(self, f"laminate_{attr_prefix}_combo", combo)
         return layout
+
+    def _init_laminate_search_combo(self) -> None:
+        """Attach filtering behavior and search placeholder to the laminate combo."""
+        combo = getattr(self, "laminate_name_combo", None)
+        if not isinstance(combo, QComboBox):
+            return
+
+        source_model = QStandardItemModel(combo)
+        proxy_model = LaminateFilterProxy(combo)
+        proxy_model.setSourceModel(source_model)
+        proxy_model.setFilterKeyColumn(0)
+
+        combo.setModel(proxy_model)
+        combo.setModelColumn(0)
+
+        line_edit = combo.lineEdit()
+        if line_edit is not None:
+            line_edit.setPlaceholderText("Buscar laminado...")
+            line_edit.textChanged.connect(self._filter_laminate_combo)
+            line_edit.returnPressed.connect(self._select_first_visible_laminate)
+
+        self._laminate_source_model = source_model
+        self._laminate_filter_model = proxy_model
+        self._reset_laminate_filter(clear_text=True)
+
+    def _filter_laminate_combo(self, text: str) -> None:
+        proxy = getattr(self, "_laminate_filter_model", None)
+        if isinstance(proxy, LaminateFilterProxy):
+            proxy.set_filter_text(text)
+
+    def _reset_laminate_filter(self, *, clear_text: bool = False) -> None:
+        proxy = getattr(self, "_laminate_filter_model", None)
+        combo = getattr(self, "laminate_name_combo", None)
+        if isinstance(proxy, LaminateFilterProxy):
+            proxy.set_filter_text("")
+        if clear_text and isinstance(combo, QComboBox):
+            line_edit = combo.lineEdit()
+            if line_edit is not None:
+                line_edit.blockSignals(True)
+                line_edit.clear()
+                line_edit.blockSignals(False)
+
+    def _clear_laminate_combo_display(self) -> None:
+        """Show an empty search field while keeping the sentinel option in the list."""
+        combo = getattr(self, "laminate_name_combo", None)
+        if not isinstance(combo, QComboBox):
+            return
+        self._reset_laminate_filter(clear_text=True)
+        combo.blockSignals(True)
+        combo.setCurrentIndex(-1)  # No pre-selected item; dropdown still shows all entries
+        combo.blockSignals(False)
+
+    def _select_first_visible_laminate(self) -> None:
+        combo = getattr(self, "laminate_name_combo", None)
+        proxy = getattr(self, "_laminate_filter_model", None)
+        if not isinstance(combo, QComboBox) or not isinstance(proxy, LaminateFilterProxy):
+            return
+        for row in range(proxy.rowCount()):
+            idx = proxy.index(row, 0)
+            text = str(idx.data() or "")
+            if text and text != "--":
+                combo.blockSignals(True)
+                combo.setCurrentIndex(row)
+                combo.blockSignals(False)
+                self._on_laminate_combo_changed(row)
+                break
+
+    def _set_laminate_combo_selection(self, name: Optional[str]) -> None:
+        combo = getattr(self, "laminate_name_combo", None)
+        proxy = getattr(self, "_laminate_filter_model", None)
+        source = getattr(self, "_laminate_source_model", None)
+        target = name or "--"
+
+        if not isinstance(combo, QComboBox):
+            return
+        if isinstance(source, QStandardItemModel) and isinstance(proxy, LaminateFilterProxy):
+            self._reset_laminate_filter(clear_text=True)
+            match_source_idx = None
+            for row in range(source.rowCount()):
+                idx = source.index(row, 0)
+                if str(idx.data() or "") == target:
+                    match_source_idx = idx
+                    break
+            if match_source_idx is None:
+                return
+            proxy_idx = proxy.mapFromSource(match_source_idx)
+            if proxy_idx.isValid():
+                combo.blockSignals(True)
+                combo.setCurrentIndex(proxy_idx.row())
+                combo.blockSignals(False)
+            return
+
+        idx = combo.findText(target)
+        if idx >= 0:
+            combo.blockSignals(True)
+            combo.setCurrentIndex(idx)
+            combo.blockSignals(False)
 
     # Automatic rename helpers --------------------------------------------------
 
@@ -697,6 +842,7 @@ class MainWindow(QMainWindow):
         self._refresh_cells_list_labels()
         combo = getattr(self, "laminate_name_combo", None)
         if isinstance(combo, QComboBox):
+            self._reset_laminate_filter(clear_text=True)
             combo.blockSignals(True)
             idx = combo.findText(old_name)
             if idx >= 0:
@@ -765,7 +911,10 @@ class MainWindow(QMainWindow):
             checkbox.setEnabled(False)
             checkbox.hide()
         if isinstance(name_combo, QComboBox):
-            name_combo.setEditable(False)
+            name_combo.setEditable(True)
+            line_edit = name_combo.lineEdit()
+            if line_edit is not None:
+                line_edit.setReadOnly(False)
         if isinstance(color_combo, QComboBox):
             color_combo.setEnabled(not enabled)
 
@@ -2211,6 +2360,7 @@ class MainWindow(QMainWindow):
         current_name = getattr(binding, "_current_laminate", None) if binding else None
         self._on_binding_laminate_changed(current_name)
         if hasattr(self, "laminate_name_combo"):
+            self._reset_laminate_filter(clear_text=True)
             idx = self.laminate_name_combo.findText(laminate_name)
             if idx >= 0:
                 self.laminate_name_combo.setCurrentIndex(idx)
@@ -2267,21 +2417,13 @@ class MainWindow(QMainWindow):
         selected_name = combo.itemText(index)
         
         if selected_name == "--":
+            self._reset_laminate_filter(clear_text=True)
             return
 
         if hasattr(self, "_grid_binding"):
-             self._grid_binding._on_laminate_selected(selected_name)
-             
-             # Optionally reset to "--" if we want to enforce "Trocar Laminado" metaphor
-             # But keeping it selected gives feedback.
-             # However, if we select another cell, it should go back to "--" (which it does because we don't update it in _apply_laminate)
-             # Wait, if we don't update it in _apply_laminate, it stays at whatever it was.
-             # So if I select "L1" for Cell 1, combo shows "L1".
-             # Then I select Cell 2. _apply_laminate runs, but doesn't update combo. Combo still shows "L1".
-             # This is BAD. It should reset to "--" when cell changes.
-             
-             # So I DO need to update combo in _apply_laminate, but set it to "--".
-             pass
+            self._grid_binding._on_laminate_selected(selected_name)
+
+        self._reset_laminate_filter(clear_text=True)
 
     def _clone_laminate(self, laminado: Laminado) -> Laminado:
         clone = copy.deepcopy(laminado)
@@ -2292,11 +2434,18 @@ class MainWindow(QMainWindow):
         self, select_name: Optional[str] = None
     ) -> None:
         combo = getattr(self, "laminate_name_combo", None)
+        source = getattr(self, "_laminate_source_model", None)
+        proxy = getattr(self, "_laminate_filter_model", None)
         if not isinstance(combo, QComboBox):
             return
         if self._grid_model is None:
-            combo.clear()
-            combo.addItem("--")
+            if isinstance(source, QStandardItemModel):
+                source.clear()
+                source.appendRow(QStandardItem("--"))
+            else:
+                combo.clear()
+                combo.addItem("--")
+            self._reset_laminate_filter(clear_text=True)
             return
         
         # Natural sort key function
@@ -2306,30 +2455,40 @@ class MainWindow(QMainWindow):
 
         names = [laminado.nome for laminado in self._grid_model.laminados.values()]
         sorted_names = sorted(names, key=natural_sort_key)
-        
-        combo.blockSignals(True)
-        combo.clear()
-        combo.addItem("--")
-        combo.addItems(sorted_names)
-        
-        # If select_name is provided, select it.
-        # Otherwise, default to "--" (index 0).
-        # The user requirement says: "O valor exibido no QComboBox deve ser ÔÇ£--ÔÇØ por padr├úo sempre ao carregar a janela."
-        # But also: "O texto n├úo deve exibir automaticamente o nome do laminado da c├®lula ÔÇö isso vir├í apenas ap├│s a sele├º├úo do usu├írio."
-        # However, if we are refreshing the list because we added a laminate or renamed it, we might want to keep selection?
-        # The requirement seems to imply that this combo is purely for *changing* the laminate, not for *displaying* the current one.
-        # So we should probably always reset to "--" unless specifically asked to select something (e.g. after creating a new laminate).
-        
-        if select_name:
-            idx = combo.findText(select_name)
-            if idx >= 0:
-                combo.setCurrentIndex(idx)
+
+        if isinstance(source, QStandardItemModel) and isinstance(proxy, LaminateFilterProxy):
+            source.blockSignals(True)
+            source.clear()
+            source.appendRow(QStandardItem("--"))
+            for name in sorted_names:
+                item = QStandardItem(name)
+                item.setEditable(False)
+                source.appendRow(item)
+            source.blockSignals(False)
+            proxy.invalidate()
+            if select_name:
+                self._set_laminate_combo_selection(select_name)
             else:
-                combo.setCurrentIndex(0) # Default to "--"
+                self._clear_laminate_combo_display()
         else:
-            combo.setCurrentIndex(0) # Default to "--"
-            
-        combo.blockSignals(False)
+            combo.blockSignals(True)
+            combo.clear()
+            combo.addItem("--")
+            combo.addItems(sorted_names)
+            if select_name:
+                idx = combo.findText(select_name)
+                if idx >= 0:
+                    combo.setCurrentIndex(idx)
+                else:
+                    combo.setCurrentIndex(0)
+            else:
+                combo.setCurrentIndex(-1)
+            combo.blockSignals(False)
+
+        if select_name:
+            self._reset_laminate_filter(clear_text=True)
+        else:
+            self._clear_laminate_combo_display()
 
     def _open_associated_cells_dialog(self) -> None:
         laminate = self._current_laminate_instance()
@@ -3086,6 +3245,7 @@ class MainWindow(QMainWindow):
         if target_name:
             combo = getattr(self, "laminate_name_combo", None)
             if isinstance(combo, QComboBox):
+                self._reset_laminate_filter(clear_text=True)
                 idx = combo.findText(target_name)
                 if idx >= 0:
                     combo.setCurrentIndex(idx)
@@ -3328,6 +3488,7 @@ class MainWindow(QMainWindow):
         ):
             combo = getattr(self, "laminate_name_combo", None)
             if isinstance(combo, QComboBox):
+                self._reset_laminate_filter(clear_text=True)
                 if combo.currentText() != laminate_name:
                     combo.blockSignals(True)
                     index = combo.findText(laminate_name)
@@ -3342,6 +3503,8 @@ class MainWindow(QMainWindow):
                     binding._apply_laminate(laminate_name)  # type: ignore[attr-defined]
                 except Exception as exc:  # pragma: no cover - defensive
                     logger.debug("Falha ao aplicar estado de laminado: %s", exc)
+        else:
+            self._clear_laminate_combo_display()
 
     def _snapshot_from_model(self) -> None:
         if self._grid_model is None:

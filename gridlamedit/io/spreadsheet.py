@@ -20,9 +20,18 @@ from PySide6.QtCore import (
     QModelIndex,
     QPoint,
     QRect,
+    QSortFilterProxyModel,
     Qt,
 )
-from PySide6.QtGui import QColor, QPalette, QUndoCommand, QUndoStack, QIcon
+from PySide6.QtGui import (
+    QColor,
+    QPalette,
+    QStandardItem,
+    QStandardItemModel,
+    QUndoCommand,
+    QUndoStack,
+    QIcon,
+)
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QComboBox,
@@ -1944,6 +1953,24 @@ class _GridUiBinding:
         )
 
     def _configure_name_combo(self, combo: QComboBox, names: list[str]) -> None:
+        model = combo.model()
+        if isinstance(model, QSortFilterProxyModel):
+            source = model.sourceModel()
+            if isinstance(source, QStandardItemModel):
+                source.blockSignals(True)
+                source.clear()
+                source.appendRow(QStandardItem("--"))
+                for name in names:
+                    item = QStandardItem(name)
+                    item.setEditable(False)
+                    source.appendRow(item)
+                source.blockSignals(False)
+                model.invalidate()
+                combo.blockSignals(True)
+                combo.setCurrentIndex(-1)
+                combo.blockSignals(False)
+                return
+
         combo.blockSignals(True)
         combo.clear()
         combo.addItem("--")
@@ -1952,13 +1979,17 @@ class _GridUiBinding:
         view = combo.view()
         if isinstance(view, QAbstractItemView):
             view.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        combo.setCurrentIndex(0) # Default to "--"
+        combo.setCurrentIndex(-1)
         combo.blockSignals(False)
 
     def _setup_widgets(self) -> None:
         name_combo = getattr(self.ui, "laminate_name_combo", None)
         if isinstance(name_combo, QComboBox):
-            self._configure_name_combo(name_combo, self._sorted_laminate_names())
+            refresh_dropdown = getattr(self.ui, "_refresh_main_laminate_dropdown", None)
+            if callable(refresh_dropdown):
+                refresh_dropdown()
+            else:
+                self._configure_name_combo(name_combo, self._sorted_laminate_names())
 
         color_combo = getattr(self.ui, "laminate_color_combo", None)
         if isinstance(color_combo, QComboBox):
@@ -2085,9 +2116,16 @@ class _GridUiBinding:
             # Reset laminate_name_combo to "--" when loading a cell
             name_combo = getattr(self.ui, "laminate_name_combo", None)
             if isinstance(name_combo, QComboBox):
-                name_combo.blockSignals(True)
-                name_combo.setCurrentIndex(0) # "--"
-                name_combo.blockSignals(False)
+                reset_filter = getattr(self.ui, "_reset_laminate_filter", None)
+                clear_display = getattr(self.ui, "_clear_laminate_combo_display", None)
+                if callable(clear_display):
+                    clear_display()
+                else:
+                    if callable(reset_filter):
+                        reset_filter(clear_text=True)
+                    name_combo.blockSignals(True)
+                    name_combo.setCurrentIndex(-1)
+                    name_combo.blockSignals(False)
 
             color_combo = getattr(self.ui, "laminate_color_combo", None)
             if isinstance(color_combo, QComboBox):
