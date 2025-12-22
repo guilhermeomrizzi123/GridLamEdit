@@ -119,7 +119,7 @@ from gridlamedit.io.spreadsheet import (
     count_oriented_layers,
     NO_LAMINATE_COMBO_OPTION,
 )
-from gridlamedit.services.excel_io import export_grid_xlsx
+from gridlamedit.services.excel_io import export_grid_xlsx, ensure_layers_have_material
 from gridlamedit.services.laminate_batch_import import (
     BatchLaminateInput,
     create_blank_batch_template,
@@ -3596,6 +3596,16 @@ class MainWindow(QMainWindow):
                 self,
                 "Exportar planilha",
                 "Carregue uma planilha ou projeto antes de exportar.",
+            )
+            return False
+
+        try:
+            ensure_layers_have_material(self._grid_model)
+        except ValueError as exc:
+            QMessageBox.warning(
+                self,
+                "Exportar planilha",
+                str(exc),
             )
             return False
 

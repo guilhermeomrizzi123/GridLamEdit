@@ -55,6 +55,7 @@ from gridlamedit.services.project_query import (
     project_distinct_orientations,
     project_most_used_material,
 )
+from gridlamedit.services.excel_io import ensure_layers_have_material
 from gridlamedit.services.virtual_stacking_export import export_virtual_stacking
 
 
@@ -1316,6 +1317,16 @@ class VirtualStackingWindow(QtWidgets.QDialog):
                 self,
                 "Export Virtual Stacking",
                 "Nenhum dado de Virtual Stacking disponivel para exportar.",
+            )
+            return
+
+        try:
+            ensure_layers_have_material(self._project)
+        except ValueError as exc:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Export Virtual Stacking",
+                str(exc),
             )
             return
 

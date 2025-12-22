@@ -43,6 +43,7 @@ def export_grid_xlsx(
     if template_info:
         logger.info("Ignorando template_info nao utilizado: keys=%s", list(template_info))
 
+    ensure_layers_have_material(model)
     _ensure_original_available(model)
 
     save_grid_spreadsheet(str(output_path), model)
@@ -50,7 +51,35 @@ def export_grid_xlsx(
     return output_path
 
 
-__all__ = ["export_grid_xlsx"]
+__all__ = ["export_grid_xlsx", "ensure_layers_have_material"]
+
+
+def ensure_layers_have_material(model: GridModel) -> None:
+    missing: list[str] = []
+
+    for laminado in model.laminados.values():
+        for idx, camada in enumerate(laminado.camadas, start=1):
+            orientation_raw = getattr(camada, "orientacao", None)
+            if orientation_raw is None:
+                continue
+            if isinstance(orientation_raw, str):
+                orientation_text = orientation_raw.strip().lower()
+                if not orientation_text or orientation_text == "empty":
+                    continue
+
+            material_text = str(getattr(camada, "material", "") or "").strip()
+            if not material_text:
+                missing.append(f"{laminado.nome} - camada {idx}")
+
+    if missing:
+        preview = ", ".join(missing[:5])
+        remaining = len(missing) - 5
+        if remaining > 0:
+            preview += f" (+{remaining} camada(s))"
+        raise ValueError(
+            "Existem camadas sem material aplicado: "
+            f"{preview}. Atribua materiais antes de exportar; o CATIA nao aceita camadas sem material."
+        )
 
 
 def _ensure_original_available(model: GridModel) -> None:
@@ -76,6 +105,13 @@ def _restore_preserved_columns(
     """
     Copia os valores das colunas preservadas (C-F) do arquivo original para a exportacao.
     """
+
+    output_suffix = output_path.suffix.lower()
+    if output_suffix == ".xls":
+        _restore_preserved_columns_xls(
+            source_excel, output_path, sheet_name, preserved_columns
+        )
+        return
 
     from openpyxl import load_workbook
 
@@ -106,6 +142,72 @@ def _restore_preserved_columns(
             ws_out.cell(row=row_idx, column=col_idx, value=value)
 
     wb_out.save(output_path)
+
+
+def _restore_preserved_columns_xls(
+    source_excel: str | Path,
+    output_path: Path,
+    sheet_name: str,
+    preserved_columns: tuple[int, ...],
+) -> None:
+    """Reaplica colunas preservadas em exportacoes .xls sem usar openpyxl."""
+    try:
+        import xlrd  # type: ignore
+        import xlwt  # type: ignore
+    except ImportError as exc:  # pragma: no cover - dependencias opcionais
+        raise ValueError(
+            "Preservar colunas C-F de '.xls' requer as dependencias 'xlrd==1.2.0' e 'xlwt'."
+        ) from exc
+
+    original_path = Path(source_excel)
+
+    output_book = xlrd.open_workbook(output_path)  # type: ignore[arg-type]
+    try:
+        sheet_out = output_book.sheet_by_name(sheet_name)
+    except xlrd.biffh.XLRDError as exc:  # type: ignore[attr-defined]
+        raise ValueError(
+            f"Aba '{sheet_name}' nao encontrada no arquivo exportado '{output_path.name}'."
+        ) from exc
+
+    max_row_out = sheet_out.nrows
+
+    original_suffix = original_path.suffix.lower()
+    if original_suffix == ".xls":
+        preserved_data = _read_preserved_columns_from_xls(
+            original_path, sheet_name, preserved_columns, max_row_out
+        )
+    else:
+        preserved_data = _read_preserved_columns_from_xlsx(
+            original_path, sheet_name, preserved_columns, max_row_out
+        )
+
+    data_out: list[list[Optional[object]]] = []
+    max_cols = max(sheet_out.ncols, max(preserved_columns, default=sheet_out.ncols))
+    for r_idx in range(max_row_out):
+        row_data = [sheet_out.cell_value(r_idx, c_idx) for c_idx in range(sheet_out.ncols)]
+        # Garantir que a linha tenha colunas suficientes para sobrescrever.
+        if len(row_data) < max_cols:
+            row_data.extend([None] * (max_cols - len(row_data)))
+        data_out.append(row_data)
+
+    for r_idx, row_values in enumerate(preserved_data):
+        while len(data_out) <= r_idx:
+            data_out.append([None] * max_cols)
+        row = data_out[r_idx]
+        if len(row) < max_cols:
+            row.extend([None] * (max_cols - len(row)))
+        for col_idx, value in zip(preserved_columns, row_values, strict=True):
+            dest_idx = col_idx - 1
+            if dest_idx >= len(row):
+                row.extend([None] * (dest_idx - len(row) + 1))
+            row[dest_idx] = value
+
+    wb_new = xlwt.Workbook()
+    ws_new = wb_new.add_sheet(sheet_name)
+    for r_idx, row in enumerate(data_out):
+        for c_idx, value in enumerate(row):
+            ws_new.write(r_idx, c_idx, value)
+    wb_new.save(str(output_path))
 
 
 def _read_preserved_columns_from_xlsx(
