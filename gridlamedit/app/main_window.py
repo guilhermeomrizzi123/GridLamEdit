@@ -117,6 +117,7 @@ from gridlamedit.io.spreadsheet import (
     PLY_TYPE_OPTIONS,
     orientation_highlight_color,
     count_oriented_layers,
+    NO_LAMINATE_COMBO_OPTION,
 )
 from gridlamedit.services.excel_io import export_grid_xlsx
 from gridlamedit.services.laminate_batch_import import (
@@ -163,11 +164,13 @@ COL_ORIENTATION = StackingTableModel.COL_ORIENTATION
 class LaminateFilterProxy(QSortFilterProxyModel):
     """Case-insensitive filter that matches raw or normalized text and keeps the sentinel."""
 
-    def __init__(self, parent: QObject | None = None) -> None:
+    def __init__(
+        self, parent: QObject | None = None, *, sentinel: str = NO_LAMINATE_COMBO_OPTION
+    ) -> None:
         super().__init__(parent)
         self._filter_text: str = ""
         self._filter_norm: str = ""
-        self._sentinel: str = "--"
+        self._sentinel: str = sentinel
         self.setFilterCaseSensitivity(Qt.CaseInsensitive)
 
     @staticmethod
@@ -666,7 +669,7 @@ class MainWindow(QMainWindow):
             return
 
         source_model = QStandardItemModel(combo)
-        proxy_model = LaminateFilterProxy(combo)
+        proxy_model = LaminateFilterProxy(combo, sentinel=NO_LAMINATE_COMBO_OPTION)
         proxy_model.setSourceModel(source_model)
         proxy_model.setFilterKeyColumn(0)
 
@@ -718,7 +721,7 @@ class MainWindow(QMainWindow):
         for row in range(proxy.rowCount()):
             idx = proxy.index(row, 0)
             text = str(idx.data() or "")
-            if text and text != "--":
+            if text and text != NO_LAMINATE_COMBO_OPTION:
                 combo.blockSignals(True)
                 combo.setCurrentIndex(row)
                 combo.blockSignals(False)
@@ -729,7 +732,7 @@ class MainWindow(QMainWindow):
         combo = getattr(self, "laminate_name_combo", None)
         proxy = getattr(self, "_laminate_filter_model", None)
         source = getattr(self, "_laminate_source_model", None)
-        target = name or "--"
+        target = name or NO_LAMINATE_COMBO_OPTION
 
         if not isinstance(combo, QComboBox):
             return
@@ -1823,9 +1826,11 @@ class MainWindow(QMainWindow):
             self._update_undo_buttons_state()
 
     def _current_laminate_instance(self) -> Optional[Laminado]:
-        _, _, laminate = self._stacking_binding_context()
+        binding, _, laminate = self._stacking_binding_context()
         if laminate is not None:
             return laminate
+        if binding is not None:
+            return None
         if self._grid_model is None:
             return None
         if not self._grid_model.laminados:
@@ -2416,7 +2421,16 @@ class MainWindow(QMainWindow):
         combo = self.laminate_name_combo
         selected_name = combo.itemText(index)
         
-        if selected_name == "--":
+        if selected_name == NO_LAMINATE_COMBO_OPTION:
+            binding = getattr(self, "_grid_binding", None)
+            clear_func = getattr(binding, "set_current_cell_without_laminate", None)
+            if callable(clear_func):
+                try:
+                    clear_func()
+                except Exception as exc:  # pragma: no cover - defensive
+                    logger.warning(
+                        "Nao foi possivel limpar o laminado associado: %s", exc
+                    )
             self._reset_laminate_filter(clear_text=True)
             return
 
@@ -2441,10 +2455,10 @@ class MainWindow(QMainWindow):
         if self._grid_model is None:
             if isinstance(source, QStandardItemModel):
                 source.clear()
-                source.appendRow(QStandardItem("--"))
+                source.appendRow(QStandardItem(NO_LAMINATE_COMBO_OPTION))
             else:
                 combo.clear()
-                combo.addItem("--")
+                combo.addItem(NO_LAMINATE_COMBO_OPTION)
             self._reset_laminate_filter(clear_text=True)
             return
         
@@ -2459,7 +2473,7 @@ class MainWindow(QMainWindow):
         if isinstance(source, QStandardItemModel) and isinstance(proxy, LaminateFilterProxy):
             source.blockSignals(True)
             source.clear()
-            source.appendRow(QStandardItem("--"))
+            source.appendRow(QStandardItem(NO_LAMINATE_COMBO_OPTION))
             for name in sorted_names:
                 item = QStandardItem(name)
                 item.setEditable(False)
@@ -2473,7 +2487,7 @@ class MainWindow(QMainWindow):
         else:
             combo.blockSignals(True)
             combo.clear()
-            combo.addItem("--")
+            combo.addItem(NO_LAMINATE_COMBO_OPTION)
             combo.addItems(sorted_names)
             if select_name:
                 idx = combo.findText(select_name)

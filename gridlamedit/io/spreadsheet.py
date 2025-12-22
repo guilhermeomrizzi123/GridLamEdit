@@ -87,6 +87,7 @@ INDEX_ALIASES = ("Index", "#", "Idx", "Ordem", "SequAancia", "Sequencia")
 CELL_MAPPING_ALIASES = ("Cell", "Cells", "Celula", "CAlula", "C")
 CELL_ID_PATTERN = re.compile(r"^C\d+$", re.IGNORECASE)
 NO_LAMINATE_LABEL = "(sem laminado)"
+NO_LAMINATE_COMBO_OPTION = "Sem Laminado Associado"
 PLY_TYPE_OPTIONS: tuple[str, str] = ("Considerar", "N\u00e3o Considerar")
 DEFAULT_PLY_TYPE = PLY_TYPE_OPTIONS[0]
 DEFAULT_ROSETTE_LABEL = "Rosette.1"
@@ -1959,7 +1960,7 @@ class _GridUiBinding:
             if isinstance(source, QStandardItemModel):
                 source.blockSignals(True)
                 source.clear()
-                source.appendRow(QStandardItem("--"))
+                source.appendRow(QStandardItem(NO_LAMINATE_COMBO_OPTION))
                 for name in names:
                     item = QStandardItem(name)
                     item.setEditable(False)
@@ -1973,7 +1974,7 @@ class _GridUiBinding:
 
         combo.blockSignals(True)
         combo.clear()
-        combo.addItem("--")
+        combo.addItem(NO_LAMINATE_COMBO_OPTION)
         combo.addItems(names)
         combo.setMaxVisibleItems(max(10, min(len(names), 25)))
         view = combo.view()
@@ -2065,6 +2066,13 @@ class _GridUiBinding:
             return
         self._current_cell_id = cell_id
         self._laminates_by_cell = self._build_cell_index()
+        explicit_mapping = self.model.cell_to_laminate.get(cell_id)
+        if (
+            cell_id in self.model.cell_to_laminate
+            and not (explicit_mapping or "").strip()
+        ):
+            self._set_cell_without_laminate(cell_id, persist=False)
+            return
         laminate_name = self._laminate_for_cell(cell_id)
         if laminate_name:
             self._apply_laminate(laminate_name)
@@ -2075,8 +2083,12 @@ class _GridUiBinding:
     def _laminate_for_cell(self, cell_id: str) -> Optional[str]:
         """Resolve o laminado associado a uma celula priorizando o mapeamento explicito."""
         mapped = self.model.cell_to_laminate.get(cell_id)
-        if mapped and mapped in self.model.laminados:
-            return mapped
+        if cell_id in self.model.cell_to_laminate:
+            normalized = (mapped or "").strip()
+            if not normalized:
+                return None
+            if normalized in self.model.laminados:
+                return normalized
         for candidate in self._laminates_by_cell.get(cell_id, []):
             if candidate in self.model.laminados:
                 return candidate
@@ -2113,7 +2125,7 @@ class _GridUiBinding:
 
         self._updating = True
         try:
-            # Reset laminate_name_combo to "--" when loading a cell
+            # Reset laminate_name_combo to the sentinel option when loading a cell
             name_combo = getattr(self.ui, "laminate_name_combo", None)
             if isinstance(name_combo, QComboBox):
                 reset_filter = getattr(self.ui, "_reset_laminate_filter", None)
@@ -2194,7 +2206,8 @@ class _GridUiBinding:
         if laminate_name:
             self.model.cell_to_laminate[cell_id] = laminate_name
         else:
-            self.model.cell_to_laminate.pop(cell_id, None)
+            # Empty string keeps a deliberate "sem laminado" choice persisted
+            self.model.cell_to_laminate[cell_id] = ""
         if old and old != laminate_name:
             self._update_associated_cells_text(old)
         self._update_associated_cells_text(laminate_name)
@@ -2202,6 +2215,67 @@ class _GridUiBinding:
         if hasattr(self.ui, "_mark_dirty"):
             self.ui._mark_dirty()
         self._refresh_cell_item_label(cell_id)
+
+    def _set_cell_without_laminate(self, cell_id: str, *, persist: bool) -> None:
+        """Limpa a associacao da celula atual e ajusta a UI para o estado vazio."""
+        if not cell_id:
+            return
+
+        if persist:
+            old = self.model.cell_to_laminate.get(cell_id)
+            if old:
+                old_lam = self.model.laminados.get(old)
+                if old_lam and cell_id in old_lam.celulas:
+                    old_lam.celulas.remove(cell_id)
+            for laminado in self.model.laminados.values():
+                if cell_id in laminado.celulas:
+                    laminado.celulas.remove(cell_id)
+            self.model.cell_to_laminate[cell_id] = ""
+            if old:
+                self._update_associated_cells_text(old)
+            self._laminates_by_cell = self._build_cell_index()
+            self._refresh_cell_item_label(cell_id)
+            if hasattr(self.ui, "_mark_dirty"):
+                self.ui._mark_dirty()
+
+        self._current_laminate = None
+        self._updating = True
+        try:
+            self._update_associated_cells_widget([])
+            self.stacking_model.update_layers([])
+
+            name_combo = getattr(self.ui, "laminate_name_combo", None)
+            if isinstance(name_combo, QComboBox):
+                reset_filter = getattr(self.ui, "_reset_laminate_filter", None)
+                if callable(reset_filter):
+                    reset_filter(clear_text=True)
+                name_combo.blockSignals(True)
+                idx = name_combo.findText(NO_LAMINATE_COMBO_OPTION)
+                name_combo.setCurrentIndex(idx if idx >= 0 else -1)
+                name_combo.blockSignals(False)
+
+            tag_edit = getattr(self.ui, "laminate_tag_edit", None)
+            if isinstance(tag_edit, QLineEdit):
+                tag_edit.blockSignals(True)
+                tag_edit.clear()
+                tag_edit.blockSignals(False)
+        finally:
+            self._updating = False
+            self._update_layers_count()
+            callback = getattr(self.ui, "_on_binding_laminate_changed", None)
+            if callable(callback):
+                try:
+                    callback(None)
+                except Exception:  # pragma: no cover - defensive
+                    logger.debug(
+                        "Falha ao notificar laminado vazio.", exc_info=True
+                    )
+
+    def set_current_cell_without_laminate(self) -> None:
+        """Permite que a tela principal remova a associacao da celula selecionada."""
+        if not self._current_cell_id:
+            return
+        self._set_cell_without_laminate(self._current_cell_id, persist=True)
 
     def _update_associated_cells_text(self, laminate_name: str) -> None:
         lam = self.model.laminados.get(laminate_name)
