@@ -2615,10 +2615,18 @@ class VirtualStackingWindow(QtWidgets.QDialog):
         cell_layers: dict[str, list[Camada]],
         cell_order: list[str],
         order_index: dict[str, int],
+        passive_cells: set[str],
     ) -> list[dict[str, object]]:
-        """Agrupa células com orientação preenchida por conectividade e orientação."""
+        """Agrupa células com orientação preenchida por conectividade e orientação.
+
+        Células sem vizinhos definidos (passivas) são ignoradas aqui para que
+        permaneçam no laminado original, evitando que sejam tratadas como
+        componentes isolados na reorganização.
+        """
         oriented: dict[str, object] = {}
         for cid in cell_order:
+            if cid in passive_cells:
+                continue
             layer = self._layer_for_cell(cell_layers, cid, row_idx)
             if getattr(layer, "orientacao", None) is None:
                 continue
@@ -2655,8 +2663,10 @@ class VirtualStackingWindow(QtWidgets.QDialog):
         group: Optional[dict[str, object]],
         cell_layers: dict[str, list[Camada]],
         cell_order: list[str],
+        passive_cells: set[str],
         *,
         use_original_when_empty: bool = False,
+        include_passive: bool = False,
     ) -> dict[str, Camada]:
         """Gera uma linha virtual com base em um grupo específico ou mantém original."""
         snapshot: dict[str, Camada] = {}
@@ -2664,7 +2674,7 @@ class VirtualStackingWindow(QtWidgets.QDialog):
             base_layer = self._layer_for_cell(cell_layers, cid, row_idx)
             layer_copy = copy.deepcopy(base_layer)
             if group is None:
-                if use_original_when_empty:
+                if use_original_when_empty or (include_passive and cid in passive_cells):
                     snapshot[cid] = layer_copy
                 else:
                     layer_copy.orientacao = None
@@ -2672,6 +2682,10 @@ class VirtualStackingWindow(QtWidgets.QDialog):
                 continue
             if cid in group.get("cells", set()):
                 layer_copy.orientacao = group.get("orientation")
+            elif include_passive and cid in passive_cells:
+                # Mantém a orientação original apenas na primeira linha gerada
+                # para esse índice, evitando replicar camadas para células passivas.
+                layer_copy.orientacao = getattr(layer_copy, "orientacao", None)
             else:
                 layer_copy.orientacao = None
             snapshot[cid] = layer_copy
@@ -2684,6 +2698,7 @@ class VirtualStackingWindow(QtWidgets.QDialog):
         slot_count: int,
         cell_layers: dict[str, list[Camada]],
         cell_order: list[str],
+        passive_cells: set[str],
         *,
         preserve_when_empty: bool,
     ) -> list[dict[str, Camada]]:
@@ -2697,7 +2712,9 @@ class VirtualStackingWindow(QtWidgets.QDialog):
                     group,
                     cell_layers,
                     cell_order,
+                    passive_cells,
                     use_original_when_empty=keep_original,
+                    include_passive=pos == 0,
                 )
             )
         return rows
@@ -2724,11 +2741,12 @@ class VirtualStackingWindow(QtWidgets.QDialog):
         adjacency: dict[str, set[str]],
         cell_order: list[str],
         order_index: dict[str, int],
+        passive_cells: set[str],
     ) -> list[dict[str, Camada]]:
         oriented: dict[str, object] = {}
         for cid in cell_order:
             layer = row.get(cid)
-            if layer is None:
+            if layer is None or cid in passive_cells:
                 continue
             orientation = getattr(layer, "orientacao", None)
             if orientation is None:
@@ -2773,14 +2791,17 @@ class VirtualStackingWindow(QtWidgets.QDialog):
                 layer_copy = copy.deepcopy(base)
                 if cid in oriented:
                     layer_copy.orientacao = oriented[cid]
+                elif cid in passive_cells:
+                    layer_copy.orientacao = getattr(base, "orientacao", None)
                 else:
                     layer_copy.orientacao = None
                 normalized_row[cid] = layer_copy
             return [normalized_row]
 
         split_rows: list[dict[str, Camada]] = []
-        for _, cells in groups:
+        for idx_group, (_, cells) in enumerate(groups):
             new_row: dict[str, Camada] = {}
+            include_passive = idx_group == 0
             for cid in cell_order:
                 base = row.get(cid)
                 if base is None:
@@ -2788,6 +2809,8 @@ class VirtualStackingWindow(QtWidgets.QDialog):
                 layer_copy = copy.deepcopy(base)
                 if cid in cells:
                     layer_copy.orientacao = oriented[cid]
+                elif include_passive and cid in passive_cells:
+                    layer_copy.orientacao = getattr(base, "orientacao", None)
                 else:
                     layer_copy.orientacao = None
                 new_row[cid] = layer_copy
@@ -2800,6 +2823,7 @@ class VirtualStackingWindow(QtWidgets.QDialog):
         rows: list[dict[str, Camada]],
         adjacency: dict[str, set[str]],
         cell_order: list[str],
+        passive_cells: set[str],
     ) -> list[dict[str, Camada]]:
         if not rows:
             return rows
@@ -2818,7 +2842,7 @@ class VirtualStackingWindow(QtWidgets.QDialog):
             if idx < 0 or idx >= len(result):
                 continue
             split_rows = self._split_center_row_groups(
-                result[idx], adjacency, cell_order, order_index
+                result[idx], adjacency, cell_order, order_index, passive_cells
             )
             if len(split_rows) == 1:
                 result[idx] = split_rows[0]
@@ -2836,6 +2860,19 @@ class VirtualStackingWindow(QtWidgets.QDialog):
             return
 
         adjacency = self._neighbors_adjacency()
+        missing_cells = [cid for cid, neighbors in adjacency.items() if not neighbors]
+        if missing_cells:
+            formatted = "\n".join(f"- {cid}" for cid in missing_cells)
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Vizinhanças não definidas",
+                (
+                    "As seguintes células do Virtual Stacking não possuem vizinhança definida:\n"
+                    f"{formatted}\n\n"
+                    "Defina as vizinhanças dessas células antes de reordenar por vizinhança."
+                ),
+            )
+            return
         has_neighbors = any(neighbors for neighbors in adjacency.values())
         if not has_neighbors:
             QtWidgets.QMessageBox.information(
@@ -2844,6 +2881,8 @@ class VirtualStackingWindow(QtWidgets.QDialog):
                 "No neighbor cells are registered. Define cell neighbors before reorganizing by neighborhood.",
             )
             return
+
+        passive_cells: set[str] = {cid for cid, neighbors in adjacency.items() if not neighbors}
 
         # Habilitar desfazer
         self._push_virtual_snapshot()
@@ -2869,8 +2908,12 @@ class VirtualStackingWindow(QtWidgets.QDialog):
         back_rows: list[list[dict[str, Camada]]] = []
 
         while top < bottom:
-            top_groups = self._build_row_groups(top, adjacency, cell_layers, cell_order, order_index)
-            bottom_groups = self._build_row_groups(bottom, adjacency, cell_layers, cell_order, order_index)
+            top_groups = self._build_row_groups(
+                top, adjacency, cell_layers, cell_order, order_index, passive_cells
+            )
+            bottom_groups = self._build_row_groups(
+                bottom, adjacency, cell_layers, cell_order, order_index, passive_cells
+            )
             slot_count = max(len(top_groups), len(bottom_groups), 1)
 
             top_rows = self._rows_for_side(
@@ -2879,6 +2922,7 @@ class VirtualStackingWindow(QtWidgets.QDialog):
                 slot_count,
                 cell_layers,
                 cell_order,
+                passive_cells,
                 preserve_when_empty=not bool(top_groups),
             )
             bottom_rows = self._rows_for_side(
@@ -2887,6 +2931,7 @@ class VirtualStackingWindow(QtWidgets.QDialog):
                 slot_count,
                 cell_layers,
                 cell_order,
+                passive_cells,
                 preserve_when_empty=not bool(bottom_groups),
             )
 
@@ -2904,7 +2949,9 @@ class VirtualStackingWindow(QtWidgets.QDialog):
                     None,
                     cell_layers,
                     cell_order,
+                    passive_cells,
                     use_original_when_empty=True,
+                    include_passive=True,
                 )
             )
 
@@ -2916,7 +2963,7 @@ class VirtualStackingWindow(QtWidgets.QDialog):
                 final_rows.append(row)
 
         # Após aplicar as regras existentes, tratar as sequências centrais para separar orientações e blocos desconectados
-        final_rows = self._process_center_sequences(final_rows, adjacency, cell_order)
+        final_rows = self._process_center_sequences(final_rows, adjacency, cell_order, passive_cells)
 
         self._apply_virtual_rows_to_laminates(final_rows)
         self._notify_changes([cell.laminate.nome for cell in self._cells])
