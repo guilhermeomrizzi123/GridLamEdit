@@ -6,9 +6,9 @@ grid cells visually using square nodes and '+' buttons around them.
 The scene is intentionally simple and self-contained to avoid coupling
 with the rest of the app for now. It exposes one public method:
 
-    get_neighbors_mapping() -> dict[str, dict[str, Optional[str]]]
+    get_neighbors_mapping() -> dict[str, dict[str, list[str]]]
 
-which returns the current neighbor map in memory.
+which returns the current neighbor map in memory (listas para suportar múltiplas conexões).
 """
 
 from __future__ import annotations
@@ -143,17 +143,14 @@ class AddNeighborCommand(QUndoCommand):
             if rec.cell_id == self.src_cell or rec.cell_id == self.dst_cell:
                 self.window._update_node_neighbors(rec)
         self.window._update_all_plus_buttons_visibility()
+        self.window._recalculate_cell_neighbors_from_scene()
         # Update colors for current sequence if one is selected
         if self.window._current_sequence_index is not None:
             self.window.update_cell_colors_for_sequence(self.window._current_sequence_index)
     
     def undo(self):
         """Undo: remove the neighbor relationship."""
-        opposite_dir = opposite(self.direction)
-        if self.src_cell in self.window._neighbors:
-            self.window._neighbors[self.src_cell][self.direction] = None
-        if self.dst_cell in self.window._neighbors:
-            self.window._neighbors[self.dst_cell][opposite_dir] = None
+        self.window._remove_neighbor_relation(self.src_cell, self.direction, self.dst_cell)
         # Remove line
         key = (self.src_pos, self.dst_pos) if self.src_pos <= self.dst_pos else (self.dst_pos, self.src_pos)
         line = self.window._lines_between_nodes.get(key)
@@ -165,6 +162,7 @@ class AddNeighborCommand(QUndoCommand):
             if rec.cell_id == self.src_cell or rec.cell_id == self.dst_cell:
                 self.window._update_node_neighbors(rec)
         self.window._update_all_plus_buttons_visibility()
+        self.window._recalculate_cell_neighbors_from_scene()
         # Update colors for current sequence if one is selected
         if self.window._current_sequence_index is not None:
             self.window.update_cell_colors_for_sequence(self.window._current_sequence_index)
@@ -179,7 +177,11 @@ class DeleteCellCommand(QUndoCommand):
         self.grid_pos = record.grid_pos
         # Save the rect position, not item.pos() which may be (0,0)
         self.rect_topleft = record.item.rect().topLeft()
-        self.neighbors = dict(window._neighbors.get(record.cell_id, {}))
+        # Deep copy aggregated neighbors (sets)
+        raw_neighbors = window._neighbors.get(record.cell_id, {})
+        self.neighbors: dict[str, set[str]] = {
+            direction: set(values or []) for direction, values in raw_neighbors.items()
+        }
     
     def redo(self):
         """Execute: delete the cell."""
@@ -188,14 +190,14 @@ class DeleteCellCommand(QUndoCommand):
             return
         
         # Update neighbors
-        for direction, neighbor_id in self.neighbors.items():
-            if neighbor_id and neighbor_id in self.window._neighbors:
-                opposite_dir = opposite(direction)
-                self.window._neighbors[neighbor_id][opposite_dir] = None
-                # Update visual state
-                for rec in self.window._nodes_by_grid.values():
-                    if rec.cell_id == neighbor_id:
-                        self.window._update_node_neighbors(rec)
+        for direction, neighbor_ids in self.neighbors.items():
+            for neighbor_id in neighbor_ids:
+                if neighbor_id and neighbor_id in self.window._neighbors:
+                    self.window._remove_neighbor_relation(self.cell_id, direction, neighbor_id)
+                    # Update visual state
+                    for rec in self.window._nodes_by_grid.values():
+                        if rec.cell_id == neighbor_id:
+                            self.window._update_node_neighbors(rec)
         
         # Remove from neighbors dict
         if self.cell_id in self.window._neighbors:
@@ -211,6 +213,7 @@ class DeleteCellCommand(QUndoCommand):
         # Remove node
         self.window.scene.removeItem(record.item)
         del self.window._nodes_by_grid[self.grid_pos]
+        self.window._recalculate_cell_neighbors_from_scene()
         self.window._update_all_plus_buttons_visibility()
         # Update colors for current sequence if one is selected
         if self.window._current_sequence_index is not None:
@@ -243,23 +246,26 @@ class DeleteCellCommand(QUndoCommand):
         item.on_change_orientation = on_change_orientation
         
         # Restore neighbors
-        self.window._neighbors[self.cell_id] = dict(self.neighbors)
-        for direction, neighbor_id in self.neighbors.items():
-            if neighbor_id:
-                opposite_dir = opposite(direction)
-                if neighbor_id in self.window._neighbors:
-                    self.window._neighbors[neighbor_id][opposite_dir] = self.cell_id
-                # Redraw connection
-                neighbor_rec = None
-                for rec in self.window._nodes_by_grid.values():
-                    if rec.cell_id == neighbor_id:
-                        neighbor_rec = rec
-                        break
-                if neighbor_rec:
-                    self.window._draw_connection_between(self.grid_pos, neighbor_rec.grid_pos)
-                    self.window._update_node_neighbors(neighbor_rec)
+        self.window._neighbors[self.cell_id] = {
+            direction: set(values or []) for direction, values in self.neighbors.items()
+        }
+        for direction, neighbor_ids in self.neighbors.items():
+            for neighbor_id in neighbor_ids:
+                if neighbor_id:
+                    opposite_dir = opposite(direction)
+                    self.window._add_neighbor_relation(self.cell_id, direction, neighbor_id)
+                    # Redraw connection
+                    neighbor_rec = None
+                    for rec in self.window._nodes_by_grid.values():
+                        if rec.cell_id == neighbor_id:
+                            neighbor_rec = rec
+                            break
+                    if neighbor_rec:
+                        self.window._draw_connection_between(self.grid_pos, neighbor_rec.grid_pos)
+                        self.window._update_node_neighbors(neighbor_rec)
         
         self.window._update_node_neighbors(record)
+        self.window._recalculate_cell_neighbors_from_scene()
         self.window._update_all_plus_buttons_visibility()
         # Update colors for current sequence if one is selected
         if self.window._current_sequence_index is not None:
@@ -640,8 +646,8 @@ class CellNeighborsWindow(QDialog):
         self._nodes_by_grid: Dict[tuple[int, int], _NodeRecord] = {}
         self._lines_between_nodes: dict[tuple[tuple[int, int], tuple[int, int]], QGraphicsLineItem] = {}
 
-        # neighbors mapping public structure
-        self._neighbors: Dict[str, dict[str, Optional[str]]] = {}
+        # neighbors mapping aggregated por célula (cada direção guarda um set de IDs vizinhos)
+        self._neighbors: Dict[str, dict[str, set[str]]] = {}
         
         # Track disconnected blocks for removal warnings
         self._disconnected_highlight_rects: list[QGraphicsRectItem] = []
@@ -710,6 +716,7 @@ class CellNeighborsWindow(QDialog):
         # Always start with AML highlight disabled for a fresh load
         self.aml_toggle_button.setChecked(False)
         cells = []
+        self._neighbors = {}
         if model is not None:
             try:
                 cells = list(getattr(model, "celulas_ordenadas", []) or [])
@@ -720,13 +727,17 @@ class CellNeighborsWindow(QDialog):
                     cells = list(getattr(model, "cell_to_laminate", {}).keys())
                 except Exception:
                     cells = []
-            
-            # Load existing neighbors from the model
-            existing_neighbors = getattr(model, "cell_neighbors", {})
-            if existing_neighbors:
-                self._neighbors = {cell: dict(mapping) for cell, mapping in existing_neighbors.items()}
-                # Rebuild the visual graph from saved neighbors
-                self._rebuild_graph_from_neighbors()
+            # Load existing neighbors from the model (prefer detailed node graph)
+            node_payload = list(getattr(model, "cell_neighbor_nodes", []) or [])
+            if node_payload:
+                self._rebuild_graph_from_nodes_payload(node_payload)
+                self._recalculate_cell_neighbors_from_scene()
+            else:
+                existing_neighbors = getattr(model, "cell_neighbors", {}) or {}
+                if existing_neighbors:
+                    self._neighbors = self._convert_legacy_neighbors(existing_neighbors)
+                    # Rebuild the visual graph from saved neighbors
+                    self._rebuild_graph_from_neighbors()
         self._cells = cells
         # Update all plus buttons visibility after loading project
         self._update_all_plus_buttons_visibility()
@@ -736,13 +747,38 @@ class CellNeighborsWindow(QDialog):
         # Center view on cells after loading
         self._center_view_on_cells()
 
-    def get_neighbors_mapping(self) -> Dict[str, dict[str, Optional[str]]]:
-        """Return neighbors mapping including cells without any neighbors (disconnected cells)."""
-        # Return a deep-ish copy to avoid external mutation surprises
-        result: Dict[str, dict[str, Optional[str]]] = {}
+    def get_neighbors_mapping(self) -> Dict[str, dict[str, list[str]]]:
+        """Return neighbors mapping including cells without any neighbors (disconnected cells).
+
+        Values are stored as lists to support múltiplas conexões por direção e manter compatibilidade
+        com serialização JSON.
+        """
+        result: Dict[str, dict[str, list[str]]] = {}
         for cell, mapping in self._neighbors.items():
-            result[cell] = dict(mapping)
+            bucket: dict[str, list[str]] = {}
+            for direction in DIR_OFFSETS.keys():
+                values = mapping.get(direction, set()) if isinstance(mapping, dict) else set()
+                bucket[direction] = sorted(list(values)) if values else []
+            result[cell] = bucket
         return result
+
+    def _convert_legacy_neighbors(self, mapping: dict) -> Dict[str, dict[str, set[str]]]:
+        """Convert legacy mapping (str/None or list) into set-based structure."""
+        normalized: Dict[str, dict[str, set[str]]] = {}
+        for cell, directions in mapping.items():
+            bucket = self._empty_neighbor_bucket()
+            if not isinstance(directions, dict):
+                continue
+            for direction in DIR_OFFSETS.keys():
+                raw_value = directions.get(direction)
+                if raw_value is None:
+                    bucket[direction] = set()
+                elif isinstance(raw_value, (list, tuple, set)):
+                    bucket[direction] = {str(v) for v in raw_value if v}
+                else:
+                    bucket[direction] = {str(raw_value)}
+            normalized[cell] = bucket
+        return normalized
 
     def _mark_as_modified(self) -> None:
         """Mark that there are unsaved changes."""
@@ -1033,8 +1069,14 @@ class CellNeighborsWindow(QDialog):
         # Check for disconnected blocks before saving
         if not self._check_and_handle_disconnected_blocks():
             return  # User cancelled or no valid blocks
+        # Validate that duplicated IDs stay connected
+        if not self._validate_duplicate_cells_connected():
+            return
+        # Keep aggregated neighbors in sync with what is drawn
+        self._recalculate_cell_neighbors_from_scene()
         
         if self._model is not None:
+            self._model.cell_neighbor_nodes = self._build_neighbor_nodes_payload()
             self._model.cell_neighbors = self.get_neighbors_mapping()
             if self._project_manager is not None:
                 try:
@@ -1354,6 +1396,7 @@ class CellNeighborsWindow(QDialog):
         if not all_cells:
             return []
         
+        adjacency = self._build_cell_adjacency_from_lines()
         visited = set()
         components = []
         
@@ -1372,9 +1415,8 @@ class CellNeighborsWindow(QDialog):
                 visited.add(current)
                 component.add(current)
                 
-                # Check all neighbors
-                neighbors = self._neighbors.get(current, {})
-                for neighbor_id in neighbors.values():
+                # Check all neighbors (by cell ID)
+                for neighbor_id in adjacency.get(current, set()):
                     if neighbor_id and neighbor_id not in visited:
                         queue.append(neighbor_id)
             
@@ -1498,11 +1540,10 @@ class CellNeighborsWindow(QDialog):
             # Remove neighbors references
             if record.cell_id in self._neighbors:
                 neighbors = self._neighbors[record.cell_id]
-                for direction, neighbor_id in neighbors.items():
-                    if neighbor_id and neighbor_id in self._neighbors:
-                        opposite_dir = opposite(direction)
-                        self._neighbors[neighbor_id][opposite_dir] = None
-                del self._neighbors[record.cell_id]
+                for direction, neighbor_ids in neighbors.items():
+                    for neighbor_id in neighbor_ids:
+                        self._remove_neighbor_relation(record.cell_id, direction, neighbor_id)
+                self._neighbors.pop(record.cell_id, None)
             
             # Remove lines
             keys_to_remove = [key for key in self._lines_between_nodes.keys() if record.grid_pos in key]
@@ -1525,7 +1566,8 @@ class CellNeighborsWindow(QDialog):
                 # Remove node normally
                 self.scene.removeItem(record.item)
                 del self._nodes_by_grid[record.grid_pos]
-        
+        # Rebuild aggregated neighbors after removals
+        self._recalculate_cell_neighbors_from_scene()
         # Update visual state
         self._update_all_plus_buttons_visibility()
         
@@ -1582,33 +1624,34 @@ class CellNeighborsWindow(QDialog):
             current_pos = cell_to_grid[current_cell]
             neighbors = self._neighbors.get(current_cell, {})
             
-            for direction, neighbor_cell in neighbors.items():
-                if not neighbor_cell or neighbor_cell in visited:
-                    continue
-                
-                # Calculate neighbor position
-                offset = DIR_OFFSETS[direction]
-                neighbor_pos = (current_pos[0] + offset[0], current_pos[1] + offset[1])
-                cell_to_grid[neighbor_cell] = neighbor_pos
-                
-                # Create node if doesn't exist
-                if neighbor_pos not in self._nodes_by_grid:
-                    origin_node = self._nodes_by_grid.get((0, 0))
-                    if origin_node:
-                        base = origin_node.item.rect().topLeft()
-                        top_left = QPointF(
-                            base.x() + (CELL_SIZE + GAP + PLUS_SIZE) * neighbor_pos[0],
-                            base.y() + (CELL_SIZE + GAP + PLUS_SIZE) * neighbor_pos[1],
-                        )
-                        self._create_node(neighbor_pos, top_left)
-                
-                # Assign cell to node
-                neighbor_node = self._nodes_by_grid[neighbor_pos]
-                neighbor_node.cell_id = neighbor_cell
-                neighbor_node.item.set_text(neighbor_cell)
-                
-                visited.add(neighbor_cell)
-                queue.append(neighbor_cell)
+            for direction, neighbor_cells in neighbors.items():
+                for neighbor_cell in neighbor_cells:
+                    if not neighbor_cell or neighbor_cell in visited:
+                        continue
+                    
+                    # Calculate neighbor position
+                    offset = DIR_OFFSETS[direction]
+                    neighbor_pos = (current_pos[0] + offset[0], current_pos[1] + offset[1])
+                    cell_to_grid[neighbor_cell] = neighbor_pos
+                    
+                    # Create node if doesn't exist
+                    if neighbor_pos not in self._nodes_by_grid:
+                        origin_node = self._nodes_by_grid.get((0, 0))
+                        if origin_node:
+                            base = origin_node.item.rect().topLeft()
+                            top_left = QPointF(
+                                base.x() + (CELL_SIZE + GAP + PLUS_SIZE) * neighbor_pos[0],
+                                base.y() + (CELL_SIZE + GAP + PLUS_SIZE) * neighbor_pos[1],
+                            )
+                            self._create_node(neighbor_pos, top_left)
+                    
+                    # Assign cell to node
+                    neighbor_node = self._nodes_by_grid[neighbor_pos]
+                    neighbor_node.cell_id = neighbor_cell
+                    neighbor_node.item.set_text(neighbor_cell)
+                    
+                    visited.add(neighbor_cell)
+                    queue.append(neighbor_cell)
         
         # Update visual state and draw connections
         for cell_id, grid_pos in cell_to_grid.items():
@@ -1617,12 +1660,14 @@ class CellNeighborsWindow(QDialog):
                 self._update_node_neighbors(record)
                 # Draw connections to neighbors (use internal to avoid undo stack on load)
                 neighbors = self._neighbors.get(cell_id, {})
-                for direction, neighbor_cell in neighbors.items():
-                    if neighbor_cell:
-                        neighbor_pos = cell_to_grid.get(neighbor_cell)
-                        if neighbor_pos:
-                            self._draw_connection_between(grid_pos, neighbor_pos)
+                for direction, neighbor_cells in neighbors.items():
+                    for neighbor_cell in neighbor_cells:
+                        if neighbor_cell:
+                            neighbor_pos = cell_to_grid.get(neighbor_cell)
+                            if neighbor_pos:
+                                self._draw_connection_between(grid_pos, neighbor_pos)
         
+        self._recalculate_cell_neighbors_from_scene()
         # Expand scene to fit all loaded nodes
         self._expand_scene_rect()
         
@@ -1677,6 +1722,18 @@ class CellNeighborsWindow(QDialog):
         selected = dialog.selected_cell()
         if not selected:
             return
+
+        # If the same cell ID already exists elsewhere, require adjacency before assignment
+        existing_positions = [pos for pos, rec in self._nodes_by_grid.items() if rec.cell_id == selected and pos != record.grid_pos]
+        if existing_positions:
+            is_adjacent = any(abs(pos[0] - record.grid_pos[0]) + abs(pos[1] - record.grid_pos[1]) == 1 for pos in existing_positions)
+            if not is_adjacent:
+                QMessageBox.warning(
+                    self,
+                    "Posicionamento inválido",
+                    f"Células iguais devem ser vizinhas entre si. Coloque {selected} ao lado de outra {selected} ou conecte-as antes de reutilizar.",
+                )
+                return
         record.cell_id = selected
         record.item.set_text(record.cell_id)
         # Always ensure cell is in neighbors dict, even without connections
@@ -1691,6 +1748,7 @@ class CellNeighborsWindow(QDialog):
         self._update_node_neighbors(record)
         self._expand_scene_rect()
         # Update all plus buttons visibility after selecting a cell
+        self._recalculate_cell_neighbors_from_scene()
         self._update_all_plus_buttons_visibility()
         # Update colors for current sequence if one is selected
         if self._current_sequence_index is not None:
@@ -1724,6 +1782,7 @@ class CellNeighborsWindow(QDialog):
             self._draw_connection_between(record.grid_pos, neighbor.grid_pos)
             self._update_node_neighbors(record)
             self._update_node_neighbors(neighbor)
+            self._recalculate_cell_neighbors_from_scene()
             self._expand_scene_rect()
             return
 
@@ -1753,6 +1812,7 @@ class CellNeighborsWindow(QDialog):
         self._draw_connection_between(record.grid_pos, neighbor.grid_pos)
         self._update_node_neighbors(record)
         self._update_node_neighbors(neighbor)
+        self._recalculate_cell_neighbors_from_scene()
         self._expand_scene_rect()
         # Update all plus buttons visibility after creating neighbor
         self._update_all_plus_buttons_visibility()
@@ -1761,17 +1821,32 @@ class CellNeighborsWindow(QDialog):
             self.update_cell_colors_for_sequence(self._current_sequence_index)
 
 
+    def _empty_neighbor_bucket(self) -> dict[str, set[str]]:
+        return {dir_name: set() for dir_name in DIR_OFFSETS.keys()}
+
     def _ensure_cell_mapping_entry(self, cell_id: str) -> None:
         """Ensure a cell has an entry in neighbors dict, even if it has no neighbors."""
         if cell_id not in self._neighbors:
-            self._neighbors[cell_id] = {"up": None, "down": None, "left": None, "right": None}
+            self._neighbors[cell_id] = self._empty_neighbor_bucket()
+
+    def _add_neighbor_relation(self, src: str, direction: str, dst: str) -> None:
+        """Add a bidirectional relation between src->dst respecting direction."""
+        self._ensure_cell_mapping_entry(src)
+        self._ensure_cell_mapping_entry(dst)
+        self._neighbors[src][direction].add(dst)
+        self._neighbors[dst][opposite(direction)].add(src)
+
+    def _remove_neighbor_relation(self, src: str, direction: str, dst: str) -> None:
+        """Remove a bidirectional relation if it exists."""
+        if src in self._neighbors:
+            self._neighbors[src].setdefault(direction, set()).discard(dst)
+        opposite_dir = opposite(direction)
+        if dst in self._neighbors:
+            self._neighbors[dst].setdefault(opposite_dir, set()).discard(src)
 
     def _link_cells_internal(self, src: str, direction: str, dst: str) -> None:
         """Internal method to link cells without undo."""
-        self._ensure_cell_mapping_entry(src)
-        self._ensure_cell_mapping_entry(dst)
-        self._neighbors[src][direction] = dst
-        self._neighbors[dst][opposite(direction)] = src
+        self._add_neighbor_relation(src, direction, dst)
         # Update visual state of nodes
         for rec in self._nodes_by_grid.values():
             if rec.cell_id == src:
@@ -1863,6 +1938,212 @@ class CellNeighborsWindow(QDialog):
         line.setOpacity(0.7)  # Subtle glow effect
         self.scene.addItem(line)
         self._lines_between_nodes[key] = line
+
+    def _direction_between(self, a: tuple[int, int], b: tuple[int, int]) -> Optional[str]:
+        dx = b[0] - a[0]
+        dy = b[1] - a[1]
+        for name, (ox, oy) in DIR_OFFSETS.items():
+            if (dx, dy) == (ox, oy):
+                return name
+        return None
+
+    def _recalculate_cell_neighbors_from_scene(self) -> None:
+        """Rebuild aggregated neighbors from the currently drawn lines."""
+        self._neighbors = {}
+        for record in self._nodes_by_grid.values():
+            if record.cell_id:
+                self._ensure_cell_mapping_entry(record.cell_id)
+        for (pos_a, pos_b), _line in list(self._lines_between_nodes.items()):
+            rec_a = self._nodes_by_grid.get(pos_a)
+            rec_b = self._nodes_by_grid.get(pos_b)
+            if not rec_a or not rec_b or not rec_a.cell_id or not rec_b.cell_id:
+                continue
+            dir_ab = self._direction_between(pos_a, pos_b)
+            dir_ba = self._direction_between(pos_b, pos_a)
+            if dir_ab:
+                self._add_neighbor_relation(rec_a.cell_id, dir_ab, rec_b.cell_id)
+            if dir_ba:
+                self._add_neighbor_relation(rec_b.cell_id, dir_ba, rec_a.cell_id)
+
+    def _build_cell_adjacency_from_lines(self) -> dict[str, set[str]]:
+        """Graph of cell IDs based on the drawn connections between nodes."""
+        adjacency: dict[str, set[str]] = {}
+        for record in self._nodes_by_grid.values():
+            if record.cell_id:
+                adjacency.setdefault(record.cell_id, set())
+        for (pos_a, pos_b) in self._lines_between_nodes.keys():
+            rec_a = self._nodes_by_grid.get(pos_a)
+            rec_b = self._nodes_by_grid.get(pos_b)
+            if not rec_a or not rec_b or not rec_a.cell_id or not rec_b.cell_id:
+                continue
+            adjacency.setdefault(rec_a.cell_id, set()).add(rec_b.cell_id)
+            adjacency.setdefault(rec_b.cell_id, set()).add(rec_a.cell_id)
+        return adjacency
+
+    def _grid_adjacency(self) -> dict[tuple[int, int], set[tuple[int, int]]]:
+        """Adjacency between node positions for reachability checks."""
+        adjacency: dict[tuple[int, int], set[tuple[int, int]]] = {}
+        for record in self._nodes_by_grid.values():
+            adjacency.setdefault(record.grid_pos, set())
+        for pos_a, pos_b in self._lines_between_nodes.keys():
+            adjacency.setdefault(pos_a, set()).add(pos_b)
+            adjacency.setdefault(pos_b, set()).add(pos_a)
+        return adjacency
+
+    def _cell_positions_by_id(self) -> dict[str, list[tuple[int, int]]]:
+        mapping: dict[str, list[tuple[int, int]]] = {}
+        for pos, record in self._nodes_by_grid.items():
+            if record.cell_id:
+                mapping.setdefault(record.cell_id, []).append(pos)
+        return mapping
+
+    def _validate_duplicate_cells_connected(self) -> bool:
+        """Ensure that every duplicated cell ID belongs to a single connected component."""
+        adjacency = self._grid_adjacency()
+        positions_by_cell = self._cell_positions_by_id()
+        problematic: list[str] = []
+        for cell_id, positions in positions_by_cell.items():
+            if len(positions) <= 1:
+                continue
+            # BFS from the first instance through the full graph (connections may pass through outras células)
+            start = positions[0]
+            visited: set[tuple[int, int]] = set()
+            queue = [start]
+            while queue:
+                current = queue.pop(0)
+                if current in visited:
+                    continue
+                visited.add(current)
+                for neighbor in adjacency.get(current, set()):
+                    if neighbor not in visited:
+                        queue.append(neighbor)
+            if not all(pos in visited for pos in positions):
+                problematic.append(cell_id)
+        if problematic:
+            cell_list = ", ".join(sorted(problematic))
+            QMessageBox.warning(
+                self,
+                "Células duplicadas desconectadas",
+                f"As células duplicadas precisam estar conectadas entre si. Conecte as instâncias de: {cell_list}.",
+            )
+            return False
+        return True
+
+    def _build_neighbor_nodes_payload(self) -> list[dict[str, object]]:
+        """Serialize the current scene with positions to persist múltiplas instâncias."""
+        payload: list[dict[str, object]] = []
+        for record in self._nodes_by_grid.values():
+            if not record.cell_id:
+                continue
+            neighbors: dict[str, object] = {}
+            for direction, (dx, dy) in DIR_OFFSETS.items():
+                if not self._has_grid_connection(record, direction):
+                    continue
+                neighbor_pos = (record.grid_pos[0] + dx, record.grid_pos[1] + dy)
+                neighbor_rec = self._nodes_by_grid.get(neighbor_pos)
+                if neighbor_rec and neighbor_rec.cell_id:
+                    neighbors[direction] = {
+                        "grid": [neighbor_pos[0], neighbor_pos[1]],
+                        "cell": neighbor_rec.cell_id,
+                    }
+            payload.append(
+                {
+                    "cell": record.cell_id,
+                    "grid": [record.grid_pos[0], record.grid_pos[1]],
+                    "neighbors": neighbors,
+                }
+            )
+        return payload
+
+    def _rebuild_graph_from_nodes_payload(self, payload: list[dict[str, object]]) -> None:
+        """Rebuild scene preserving múltiplas instâncias e conexões explícitas."""
+        if not payload:
+            return
+
+        # Ensure origin exists and capture its base coordinate
+        origin = self._nodes_by_grid.get((0, 0))
+        if origin is None:
+            anchor_x = 300.0
+            anchor_y = 200.0
+            origin = self._create_node((0, 0), QPointF(anchor_x, anchor_y))
+        base_top_left = origin.item.rect().topLeft()
+
+        # Clear other nodes and lines
+        nodes_to_remove = [pos for pos in self._nodes_by_grid.keys() if pos != (0, 0)]
+        for pos in nodes_to_remove:
+            rec = self._nodes_by_grid[pos]
+            self.scene.removeItem(rec.item)
+            del self._nodes_by_grid[pos]
+        for line in list(self._lines_between_nodes.values()):
+            self.scene.removeItem(line)
+        self._lines_between_nodes.clear()
+        self._neighbors = {}
+
+        # Create all nodes
+        for entry in payload:
+            grid_raw = entry.get("grid", [0, 0])
+            try:
+                grid_pos = (int(grid_raw[0]), int(grid_raw[1]))
+            except Exception:
+                continue
+            if grid_pos not in self._nodes_by_grid:
+                top_left = QPointF(
+                    base_top_left.x() + (CELL_SIZE + GAP + PLUS_SIZE) * grid_pos[0],
+                    base_top_left.y() + (CELL_SIZE + GAP + PLUS_SIZE) * grid_pos[1],
+                )
+                self._create_node(grid_pos, top_left)
+            rec = self._nodes_by_grid[grid_pos]
+            rec.cell_id = str(entry.get("cell", "")) or None
+            if rec.cell_id:
+                rec.item.set_text(rec.cell_id)
+                self._ensure_cell_mapping_entry(rec.cell_id)
+
+        # Create connections
+        processed_edges: set[tuple[tuple[int, int], tuple[int, int]]] = set()
+        for entry in payload:
+            grid_raw = entry.get("grid", [0, 0])
+            try:
+                src_pos = (int(grid_raw[0]), int(grid_raw[1]))
+            except Exception:
+                continue
+            neighbors = entry.get("neighbors", {}) or {}
+            if not isinstance(neighbors, dict):
+                continue
+            for direction, data in neighbors.items():
+                target_grid = None
+                if isinstance(data, dict) and "grid" in data:
+                    try:
+                        target_grid = (int(data["grid"][0]), int(data["grid"][1]))
+                    except Exception:
+                        target_grid = None
+                elif isinstance(data, (list, tuple)) and len(data) >= 2:
+                    try:
+                        target_grid = (int(data[0]), int(data[1]))
+                    except Exception:
+                        target_grid = None
+                if target_grid is None:
+                    continue
+                key = (src_pos, target_grid) if src_pos <= target_grid else (target_grid, src_pos)
+                if key in processed_edges:
+                    continue
+                processed_edges.add(key)
+                self._draw_connection_between(src_pos, target_grid)
+                src_rec = self._nodes_by_grid.get(src_pos)
+                dst_rec = self._nodes_by_grid.get(target_grid)
+                if src_rec and dst_rec and src_rec.cell_id and dst_rec.cell_id:
+                    if direction in DIR_OFFSETS:
+                        self._add_neighbor_relation(src_rec.cell_id, direction, dst_rec.cell_id)
+                    else:
+                        dir_guess = self._direction_between(src_pos, target_grid)
+                        if dir_guess:
+                            self._add_neighbor_relation(src_rec.cell_id, dir_guess, dst_rec.cell_id)
+        self._recalculate_cell_neighbors_from_scene()
+        # Update visuals and bounds
+        for rec in self._nodes_by_grid.values():
+            self._update_node_neighbors(rec)
+        self._expand_scene_rect()
+        if self._current_sequence_index is not None:
+            self.update_cell_colors_for_sequence(self._current_sequence_index)
 
     def _update_node_neighbors(self, record: _NodeRecord) -> None:
         """Update the visual state of plus buttons based on current neighbors."""

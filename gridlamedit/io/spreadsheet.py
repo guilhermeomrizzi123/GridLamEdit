@@ -365,7 +365,10 @@ class GridModel:
     laminados: Dict[str, Laminado] = field(default_factory=OrderedDict)
     celulas_ordenadas: list[str] = field(default_factory=list)
     cell_to_laminate: Dict[str, str] = field(default_factory=dict)
-    cell_neighbors: Dict[str, Dict[str, Optional[str]]] = field(default_factory=dict)
+    # Lista detalhada de instâncias (posicionadas) usadas na tela de vizinhanças.
+    cell_neighbor_nodes: list[dict[str, object]] = field(default_factory=list)
+    # Usamos listas para permitir múltiplas conexões por direção; leitura continua aceitando o formato legado
+    cell_neighbors: Dict[str, Dict[str, list[str]]] = field(default_factory=dict)
     compat_warnings: list[str] = field(default_factory=list)
     source_excel_path: Optional[str] = None
     dirty: bool = False

@@ -2546,17 +2546,40 @@ class VirtualStackingWindow(QtWidgets.QDialog):
         """Converte o mapeamento de vizinhos do projeto em um grafo não direcionado."""
         cell_ids = [cell.cell_id for cell in self._cells]
         adjacency: dict[str, set[str]] = {cid: set() for cid in cell_ids}
-        mapping = getattr(self._project, "cell_neighbors", {}) if self._project is not None else {}
-        for src, neighbors in mapping.items():
-            if src not in adjacency:
-                continue
-            for dst in (neighbors or {}).values():
-                if not dst:
+        project = self._project
+        node_payload = list(getattr(project, "cell_neighbor_nodes", []) or []) if project is not None else []
+        if node_payload:
+            for entry in node_payload:
+                src_cell = str(entry.get("cell", "")).strip()
+                if not src_cell or src_cell not in adjacency:
                     continue
-                if dst not in adjacency:
+                neighbors = entry.get("neighbors", {}) or {}
+                if not isinstance(neighbors, dict):
                     continue
-                adjacency[src].add(dst)
-                adjacency.setdefault(dst, set()).add(src)
+                for data in neighbors.values():
+                    if isinstance(data, dict):
+                        dst_cell = str(data.get("cell", "") or "").strip()
+                    else:
+                        dst_cell = str(data or "").strip()
+                    if not dst_cell or dst_cell not in adjacency:
+                        continue
+                    adjacency[src_cell].add(dst_cell)
+                    adjacency.setdefault(dst_cell, set()).add(src_cell)
+        else:
+            mapping = getattr(project, "cell_neighbors", {}) if project is not None else {}
+            for src, neighbors in mapping.items():
+                if src not in adjacency or not isinstance(neighbors, dict):
+                    continue
+                for raw in (neighbors or {}).values():
+                    values: list[str] = []
+                    if isinstance(raw, (list, tuple, set)):
+                        values = [str(v) for v in raw if v]
+                    elif raw:
+                        values = [str(raw)]
+                    for dst in values:
+                        if dst and dst in adjacency:
+                            adjacency[src].add(dst)
+                            adjacency.setdefault(dst, set()).add(src)
         return adjacency
 
     def _normalize_orientation_value(self, value: object) -> object:
