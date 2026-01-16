@@ -11,9 +11,9 @@ from gridlamedit.io.spreadsheet import DEFAULT_ROSETTE_LABEL, normalize_angle
 
 __all__ = ["export_virtual_stacking"]
 
-# Fixed headers taken from the reference template ``Virtual Stacking.xls``.
-_HEADER_ROW_ZERO = ["Ply", "SA"]
-_HEADER_ROW_ONE = ["Virtual Sequence", "Sequence", "Virtual Ply", "Ply", "Material", "Rosette"]
+# Fixed headers taken from the reference template ``Grid Lam Vs Exported_RevC.xls``.
+_HEADER_ROW_ZERO = ["Sequence", "Cell"]
+_HEADER_ROW_ONE = ["Virtual Sequence", "Sequence", "Material", "Rosette"]
 
 
 def _normalize_orientation(value: object) -> float | str | int | None:
@@ -46,13 +46,13 @@ def export_virtual_stacking(
 ) -> Path:
     """
     Persist the current Virtual Stacking view into a spreadsheet that mirrors
-    the bundled ``Virtual Stacking.xls`` template used by CATIA V5.
+    the bundled ``Grid Lam Vs Exported_RevC.xls`` template used by CATIA V5.
 
     Parameters
     ----------
     layers:
         Ordered collection of layer descriptors. Each item must expose the
-        attributes ``sequence_label``, ``ply_label``, ``material`` and ``rosette``.
+        attributes ``sequence_label``, ``material`` and ``rosette``.
     cells:
         Ordered collection of cell descriptors. Each item must expose ``cell_id``
         and ``laminate``; the laminate must have a ``camadas`` list containing
@@ -94,16 +94,13 @@ def export_virtual_stacking(
     # Data rows start at row index 2.
     for row_idx, layer in enumerate(layers, start=2):
         sequence_label = getattr(layer, "sequence_label", "") or f"Seq.{row_idx - 1}"
-        ply_label = getattr(layer, "ply_label", "") or f"Ply.{row_idx - 1}"
         material = getattr(layer, "material", "") or ""
         rosette = _safe_rosette(getattr(layer, "rosette", ""))
 
         sheet.write(row_idx, 0, sequence_label)
         sheet.write(row_idx, 1, "")  # Keep the second column empty as in the template
-        sheet.write(row_idx, 2, ply_label)
-        sheet.write(row_idx, 3, "")  # Keep the fourth column empty as in the template
-        sheet.write(row_idx, 4, material)
-        sheet.write(row_idx, 5, rosette)
+        sheet.write(row_idx, 2, material)
+        sheet.write(row_idx, 3, rosette)
 
         for cell_offset, cell in enumerate(cells):
             target_col = len(_HEADER_ROW_ONE) + cell_offset

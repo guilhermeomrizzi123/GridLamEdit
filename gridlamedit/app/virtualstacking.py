@@ -1245,7 +1245,7 @@ class VirtualStackingWindow(QtWidgets.QDialog):
         self.btn_export_virtual = QtWidgets.QToolButton(self)
         self.btn_export_virtual.setText("Export Virtual Stacking")
         self.btn_export_virtual.setToolTip(
-            "Exporta a planilha no formato do template Virtual Stacking.xls para importacao no CATIA."
+            "Exporta a planilha no formato do template Grid Lam Vs Exported_RevC.xls para importacao no CATIA."
         )
         self.btn_export_virtual.clicked.connect(self._export_virtual_stacking)
         toolbar.addWidget(self.btn_export_virtual)
@@ -1309,10 +1309,10 @@ class VirtualStackingWindow(QtWidgets.QDialog):
             last = ""
         if last:
             return str(last)
-        return str(Path.home() / "Virtual Stacking.xls")
+        return str(Path.home() / "Grid Lam Vs Exported_RevC.xls")
 
     def _export_virtual_stacking(self) -> None:
-        if self._project is None or not self._cells or not self._layers:
+        if self._project is None or not getattr(self._project, "celulas_ordenadas", []):
             QtWidgets.QMessageBox.information(
                 self,
                 "Export Virtual Stacking",
@@ -1345,7 +1345,20 @@ class VirtualStackingWindow(QtWidgets.QDialog):
             pass
 
         try:
-            output_path = export_virtual_stacking(self._layers, self._cells, Path(path))
+            from types import SimpleNamespace
+
+            export_cells = [
+                SimpleNamespace(
+                    cell_id=cell_id,
+                    laminate=self._laminate_for_cell(self._project, cell_id),
+                )
+                for cell_id in self._project.celulas_ordenadas
+            ]
+            if self._sorted_cell_ids:
+                order = {cell_id: pos for pos, cell_id in enumerate(self._sorted_cell_ids)}
+                export_cells.sort(key=lambda c: order.get(c.cell_id, len(order)))
+
+            output_path = export_virtual_stacking(self._layers, export_cells, Path(path))
         except Exception as exc:
             QtWidgets.QMessageBox.critical(
                 self,
