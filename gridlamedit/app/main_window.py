@@ -374,6 +374,34 @@ class MainWindow(QMainWindow):
         geo.moveCenter(screen.availableGeometry().center())
         self.move(geo.topLeft())
 
+    def _ensure_within_available_geometry(self) -> None:
+        handle = self.windowHandle()
+        screen = handle.screen() if handle is not None else None
+        if screen is None:
+            screen = QGuiApplication.primaryScreen()
+        if screen is None:
+            return
+
+        available = screen.availableGeometry()
+        rect = self.frameGeometry()
+        if not rect.isValid():
+            rect = self.geometry()
+
+        new_width = min(rect.width(), available.width())
+        new_height = min(rect.height(), available.height())
+        if new_width != rect.width() or new_height != rect.height():
+            self.resize(new_width, new_height)
+
+        max_x = available.x() + available.width() - new_width
+        max_y = available.y() + available.height() - new_height
+        new_x = min(max(rect.x(), available.x()), max_x)
+        new_y = min(max(rect.y(), available.y()), max_y)
+        self.move(new_x, new_y)
+
+    def showEvent(self, event: QEvent) -> None:  # type: ignore[override]
+        super().showEvent(event)
+        QTimer.singleShot(0, self._ensure_within_available_geometry)
+
     def _create_actions(self) -> None:
         action_specs: List[
             tuple[str, str, callable, str, Optional[QKeySequence]]
