@@ -13,7 +13,7 @@ REM ============================================================
 
 echo Limpando e gerando executavel GridLamEdit...
 
-pyinstaller ^
+"%~dp0.venv\Scripts\python.exe" -m PyInstaller ^
   --noconfirm ^
   --clean ^
   GridLamEdit.spec
