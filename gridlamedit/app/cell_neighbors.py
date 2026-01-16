@@ -93,6 +93,7 @@ COLOR_PLUS = QColor(108, 117, 125)  # Steel gray
 COLOR_PLUS_HOVER = QColor(173, 181, 189)  # Light steel on hover
 COLOR_DASH = QColor(134, 142, 150)  # Medium steel gray lines
 COLOR_CENTER_BORDER = QColor(250, 128, 114)  # Salmon highlight for central sequences
+COLOR_CONTOUR_TEXT = QColor(55, 65, 81)  # Dark gray for contour labels
 
 COLOR_AML_SOFT = QColor(78, 153, 223)  # Clear blue for Soft
 COLOR_AML_QUASI = QColor(147, 112, 219)  # Purple for Quasi-iso
@@ -438,6 +439,17 @@ class CellNodeItem(QGraphicsRectItem):
         of.setPointSize(max(8, of.pointSize() - 2))
         self._orientation_label.setFont(of)
         self._orientation_label.setBrush(COLOR_TEXT)
+        # Contour labels around the cell
+        self._contour_labels: dict[str, QGraphicsSimpleTextItem] = {}
+        contour_font = QFont(f)
+        contour_font.setBold(False)
+        contour_font.setPointSize(max(7, f.pointSize() - 4))
+        for key in ("top", "right", "bottom", "left"):
+            label = QGraphicsSimpleTextItem("", self)
+            label.setFont(contour_font)
+            label.setBrush(COLOR_CONTOUR_TEXT)
+            label.setVisible(False)
+            self._contour_labels[key] = label
         self._recenter_label()
         self.on_select_cell = None
         self.on_add_neighbor = None
@@ -454,6 +466,22 @@ class CellNodeItem(QGraphicsRectItem):
 
     def set_laminate_text(self, text: str) -> None:
         self._laminate_label.setText(text or "")
+        self._recenter_label()
+
+    def set_contour_texts(self, contours: Tuple[str, str, str, str]) -> None:
+        mapping = {
+            "top": contours[0],
+            "right": contours[1],
+            "bottom": contours[2],
+            "left": contours[3],
+        }
+        for key, value in mapping.items():
+            label = self._contour_labels.get(key)
+            if not label:
+                continue
+            text = (value or "").strip()
+            label.setText(text)
+            label.setVisible(bool(text))
         self._recenter_label()
 
     def paint(self, painter, option, widget=None):
@@ -524,6 +552,47 @@ class CellNodeItem(QGraphicsRectItem):
             rect.x() + (rect.width() - ab.width()) / 2,
             rect.y() + margin,
         )
+        self._position_contour_labels(rect)
+
+    def _position_contour_labels(self, rect: QRectF) -> None:
+        margin = 4.0
+        top_label = self._contour_labels.get("top")
+        if top_label and top_label.isVisible():
+            tb = top_label.boundingRect()
+            top_label.setRotation(0)
+            top_label.setTransformOriginPoint(tb.center())
+            top_label.setPos(
+                rect.center().x() - tb.width() / 2,
+                rect.top() - margin - tb.height(),
+            )
+
+        bottom_label = self._contour_labels.get("bottom")
+        if bottom_label and bottom_label.isVisible():
+            bb = bottom_label.boundingRect()
+            bottom_label.setRotation(0)
+            bottom_label.setTransformOriginPoint(bb.center())
+            bottom_label.setPos(
+                rect.center().x() - bb.width() / 2,
+                rect.bottom() + margin,
+            )
+
+        right_label = self._contour_labels.get("right")
+        if right_label and right_label.isVisible():
+            rb = right_label.boundingRect()
+            right_label.setTransformOriginPoint(rb.center())
+            right_label.setRotation(90)
+            target_x = rect.right() + margin + rb.height() / 2
+            target_y = rect.center().y()
+            right_label.setPos(target_x - rb.center().x(), target_y - rb.center().y())
+
+        left_label = self._contour_labels.get("left")
+        if left_label and left_label.isVisible():
+            lb = left_label.boundingRect()
+            left_label.setTransformOriginPoint(lb.center())
+            left_label.setRotation(-90)
+            target_x = rect.left() - margin - lb.height() / 2
+            target_y = rect.center().y()
+            left_label.setPos(target_x - lb.center().x(), target_y - lb.center().y())
 
     def _update_text_contrast(self, base_color: QColor) -> None:
         r, g, b = base_color.red(), base_color.green(), base_color.blue()
@@ -1994,13 +2063,26 @@ class CellNeighborsWindow(QDialog):
         except Exception:
             return ""
 
+    def _format_contour_labels(self, cell_id: Optional[str]) -> Tuple[str, str, str, str]:
+        if not cell_id or self._model is None:
+            return ("", "", "", "")
+        contours = getattr(self._model, "cell_contours", {}).get(cell_id, [])
+        values: list[str] = []
+        for value in contours:
+            values.append(str(value) if value is not None else "")
+        while len(values) < 4:
+            values.append("")
+        return (values[0], values[1], values[2], values[3])
+
     def _update_node_cell_display(self, record: _NodeRecord) -> None:
         if record.cell_id:
             record.item.set_text(record.cell_id)
             record.item.set_laminate_text(self._format_laminate_label(record.cell_id))
+            record.item.set_contour_texts(self._format_contour_labels(record.cell_id))
         else:
             record.item.set_text("Select\nCell")
             record.item.set_laminate_text("")
+            record.item.set_contour_texts(("", "", "", ""))
 
     def _prompt_select_cell(self, record: _NodeRecord) -> None:
         if not self._cells:
