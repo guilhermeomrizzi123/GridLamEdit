@@ -625,9 +625,9 @@ def load_grid_spreadsheet(path: str) -> GridModel:
     config_section = df.iloc[separator_idx + 1 :]
 
     if config_section.empty:
-        raise ValueError("Planilha1: secao de configuracao de laminados estA vazia.")
-
-    laminados = _parse_configuration_section(config_section)
+        laminados = OrderedDict()
+    else:
+        laminados = _parse_configuration_section(config_section, allow_empty=True)
 
     for cell_id, laminate_name in cell_to_laminate.items():
         laminado = laminados.get(laminate_name)
@@ -1700,6 +1700,8 @@ def _extract_cells_section(df: pd.DataFrame) -> _CellsSection:
 
 def _parse_configuration_section(
     df: pd.DataFrame,
+    *,
+    allow_empty: bool = False,
 ) -> OrderedDict[str, Laminado]:
     df = df.reset_index(drop=True)
     laminados: OrderedDict[str, Laminado] = OrderedDict()
@@ -1861,6 +1863,8 @@ def _parse_configuration_section(
         )
 
     if not laminados:
+        if allow_empty:
+            return laminados
         raise ValueError(
             "Planilha1: secao de configuracao nAo definiu nenhum laminado."
         )
