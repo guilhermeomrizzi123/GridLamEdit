@@ -499,19 +499,20 @@ class MainWindow(QMainWindow):
         file_menu = menu_bar.addMenu("Arquivo")
         file_menu.addAction(self.open_project_action)
         file_menu.addAction(self.load_spreadsheet_action)
-        file_menu.addAction(self.batch_import_action)
         file_menu.addSeparator()
         file_menu.addAction(self.save_action)
         file_menu.addAction(self.save_as_action)
         file_menu.addAction(self.export_excel_action)
-        file_menu.addAction(self.register_material_action)
         file_menu.addSeparator()
         file_menu.addAction(self.exit_action)
 
-        virtual_menu = menu_bar.addMenu("Virtual Stacking")
-        virtual_menu.addAction(self.virtual_stacking_action)
-        virtual_menu.addAction(self.cell_neighbors_action)
-        virtual_menu.addAction(self.reassociate_contours_action)
+        tools_menu = menu_bar.addMenu("Tools")
+        tools_menu.addAction(self.virtual_stacking_action)
+        tools_menu.addAction(self.cell_neighbors_action)
+        tools_menu.addAction(self.reassociate_contours_action)
+        tools_menu.addSeparator()
+        tools_menu.addAction(self.register_material_action)
+        tools_menu.addAction(self.batch_import_action)
 
     def open_virtual_stacking(self) -> None:
         """Open the Virtual Stacking dialog populated with the current project."""
