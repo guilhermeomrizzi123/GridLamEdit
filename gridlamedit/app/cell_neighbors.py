@@ -2074,6 +2074,69 @@ class CellNeighborsWindow(QDialog):
             values.append("")
         return (values[0], values[1], values[2], values[3])
 
+    @staticmethod
+    def _normalize_contour_value(value: str) -> str:
+        return (value or "").strip().lower()
+
+    def _build_preferred_neighbor_cells(
+        self,
+        source_cell_id: str,
+        direction: str,
+        available_cells: list[str],
+    ) -> list[str]:
+        if not source_cell_id:
+            return []
+        source_contours = self._format_contour_labels(source_cell_id)
+        if not any(self._normalize_contour_value(value) for value in source_contours):
+            return []
+        src_top, src_right, src_bottom, src_left = (
+            self._normalize_contour_value(source_contours[0]),
+            self._normalize_contour_value(source_contours[1]),
+            self._normalize_contour_value(source_contours[2]),
+            self._normalize_contour_value(source_contours[3]),
+        )
+
+        preferred: list[str] = []
+        for cell_id in available_cells:
+            contours = self._format_contour_labels(cell_id)
+            cand_top, cand_right, cand_bottom, cand_left = (
+                self._normalize_contour_value(contours[0]),
+                self._normalize_contour_value(contours[1]),
+                self._normalize_contour_value(contours[2]),
+                self._normalize_contour_value(contours[3]),
+            )
+
+            match = False
+            if direction == "right":
+                match = (
+                    cand_left == src_right
+                    and cand_top == src_top
+                    and cand_bottom == src_bottom
+                )
+            elif direction == "left":
+                match = (
+                    cand_right == src_left
+                    and cand_top == src_top
+                    and cand_bottom == src_bottom
+                )
+            elif direction == "up":
+                match = (
+                    cand_bottom == src_top
+                    and cand_left == src_left
+                    and cand_right == src_right
+                )
+            elif direction == "down":
+                match = (
+                    cand_top == src_bottom
+                    and cand_left == src_left
+                    and cand_right == src_right
+                )
+
+            if match:
+                preferred.append(cell_id)
+
+        return preferred
+
     def _update_node_cell_display(self, record: _NodeRecord) -> None:
         if record.cell_id:
             record.item.set_text(record.cell_id)
@@ -2084,7 +2147,13 @@ class CellNeighborsWindow(QDialog):
             record.item.set_laminate_text("")
             record.item.set_contour_texts(("", "", "", ""))
 
-    def _prompt_select_cell(self, record: _NodeRecord) -> None:
+    def _prompt_select_cell(
+        self,
+        record: _NodeRecord,
+        *,
+        source_record: Optional[_NodeRecord] = None,
+        direction: Optional[str] = None,
+    ) -> None:
         if not self._cells:
             return
         
@@ -2094,7 +2163,25 @@ class CellNeighborsWindow(QDialog):
         if not available_cells:
             return
         
-        dialog = SelectCellDialog(available_cells, current=record.cell_id, parent=self)
+        preferred_cells: list[str] = []
+        if (
+            source_record
+            and direction
+            and source_record.cell_id
+            and source_record.cell_id in self._cells
+        ):
+            preferred_cells = self._build_preferred_neighbor_cells(
+                source_record.cell_id,
+                direction,
+                available_cells,
+            )
+
+        dialog = SelectCellDialog(
+            available_cells,
+            current=record.cell_id,
+            preferred=preferred_cells,
+            parent=self,
+        )
         if dialog.exec() != QDialog.Accepted:
             return
         selected = dialog.selected_cell()
@@ -2147,7 +2234,11 @@ class CellNeighborsWindow(QDialog):
         if target_grid in self._nodes_by_grid:
             neighbor = self._nodes_by_grid[target_grid]
             if not neighbor.cell_id:
-                self._prompt_select_cell(neighbor)
+                self._prompt_select_cell(
+                    neighbor,
+                    source_record=record,
+                    direction=direction,
+                )
                 if not neighbor.cell_id:
                     return
             self._link_cells(
@@ -2174,7 +2265,11 @@ class CellNeighborsWindow(QDialog):
             base.y() + (CELL_SIZE + GAP + PLUS_SIZE) * target_grid[1],
         )
         neighbor = self._create_node(target_grid, top_left)
-        self._prompt_select_cell(neighbor)
+        self._prompt_select_cell(
+            neighbor,
+            source_record=record,
+            direction=direction,
+        )
         if not neighbor.cell_id:
             # User cancelled - remove the created node
             self.scene.removeItem(neighbor.item)
@@ -2542,17 +2637,52 @@ class CellNeighborsWindow(QDialog):
 class SelectCellDialog(QDialog):
     """Dialog listing available cells for selection."""
 
-    def __init__(self, cells: list[str], *, current: Optional[str] = None, parent=None) -> None:
+    def __init__(
+        self,
+        cells: list[str],
+        *,
+        current: Optional[str] = None,
+        preferred: Optional[list[str]] = None,
+        parent=None,
+    ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Selecionar Celula")
         self.resize(320, 400)
         layout = QVBoxLayout(self)
         self.list = QListWidget(self)
+        preferred = preferred or []
+        filtered_preferred = [cell for cell in preferred if cell in cells]
+        preferred_set = {cell for cell in filtered_preferred}
+
+        ordered_cells: list[str] = []
+        ordered_cells.extend(filtered_preferred)
         for cell in cells:
-            item = QListWidgetItem(cell)
-            self.list.addItem(item)
-            if current and cell == current:
-                self.list.setCurrentItem(item)
+            if cell not in preferred_set:
+                ordered_cells.append(cell)
+
+        if filtered_preferred and len(ordered_cells) > len(filtered_preferred):
+            for cell in filtered_preferred:
+                item = QListWidgetItem(cell)
+                self.list.addItem(item)
+                if current and cell == current:
+                    self.list.setCurrentItem(item)
+            separator = QListWidgetItem("---")
+            separator.setFlags(Qt.NoItemFlags)
+            separator.setTextAlignment(Qt.AlignCenter)
+            separator.setForeground(QColor(140, 140, 140))
+            self.list.addItem(separator)
+            for cell in cells:
+                if cell not in preferred_set:
+                    item = QListWidgetItem(cell)
+                    self.list.addItem(item)
+                    if current and cell == current:
+                        self.list.setCurrentItem(item)
+        else:
+            for cell in ordered_cells:
+                item = QListWidgetItem(cell)
+                self.list.addItem(item)
+                if current and cell == current:
+                    self.list.setCurrentItem(item)
         layout.addWidget(self.list)
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel, parent=self)
         buttons.accepted.connect(self.accept)
