@@ -19,8 +19,8 @@ import re
 from dataclasses import dataclass
 from typing import Dict, Optional, Tuple
 
-from PySide6.QtCore import QPointF, QRectF, Qt
-from PySide6.QtGui import QColor, QFont, QPainterPath, QPen, QAction, QUndoStack, QUndoCommand, QLinearGradient, QRadialGradient, QBrush
+from PySide6.QtCore import QPointF, QRectF, Qt, QSize, QLineF
+from PySide6.QtGui import QColor, QFont, QPainterPath, QPen, QAction, QUndoStack, QUndoCommand, QLinearGradient, QRadialGradient, QBrush, QIcon, QPainter
 from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
@@ -29,6 +29,7 @@ from PySide6.QtWidgets import (
     QGraphicsRectItem,
     QGraphicsScene,
     QGraphicsSimpleTextItem,
+    QGraphicsTextItem,
     QGraphicsView,
     QHBoxLayout,
     QVBoxLayout,
@@ -43,6 +44,8 @@ from PySide6.QtWidgets import (
     QComboBox,
     QInputDialog,
 )
+
+from gridlamedit.core.paths import package_path
 
 try:
     # Optional: reference to the GridModel and orientation colour map
@@ -104,6 +107,20 @@ AML_TYPE_COLORS = {
 
 BASE_BORDER_WIDTH = 2
 CENTER_BORDER_WIDTH = 4
+
+DRAWING_ITEM_ROLE = 0
+DRAWING_ITEM_TAG = "drawing_item"
+DRAW_LINE_PEN = QPen(QColor(40, 40, 40), 2)
+TEXTBOX_HANDLE_SIZE = 6
+
+RESOURCES_ICONS_DIR = package_path("resources", "icons")
+
+
+def _load_drawing_icon(filename: str) -> QIcon:
+    icon_path = RESOURCES_ICONS_DIR / filename
+    if icon_path.is_file():
+        return QIcon(str(icon_path))
+    return QIcon()
 
 DIR_OFFSETS: dict[str, tuple[int, int]] = {
     "up": (0, -1),
@@ -326,6 +343,53 @@ class PlusButtonItem(QGraphicsRectItem):
         if callable(self.on_click):
             self.on_click()
         event.accept()
+
+
+class DrawingLineItem(QGraphicsLineItem):
+    """Movable line item for drawing tool."""
+
+    def __init__(self, line, parent: Optional[QGraphicsItem] = None) -> None:
+        super().__init__(line, parent)
+        self.setFlag(QGraphicsItem.ItemIsMovable, True)
+        self.setFlag(QGraphicsItem.ItemIsSelectable, True)
+        self.setFlag(QGraphicsItem.ItemSendsGeometryChanges, True)
+        self.setData(DRAWING_ITEM_ROLE, DRAWING_ITEM_TAG)
+
+
+class TextBoxItem(QGraphicsRectItem):
+    """Movable text box with small handle markers when selected."""
+
+    def __init__(self, rect: QRectF, parent: Optional[QGraphicsItem] = None) -> None:
+        super().__init__(rect, parent)
+        self.setFlag(QGraphicsItem.ItemIsMovable, True)
+        self.setFlag(QGraphicsItem.ItemIsSelectable, True)
+        self.setFlag(QGraphicsItem.ItemSendsGeometryChanges, True)
+        self.setData(DRAWING_ITEM_ROLE, DRAWING_ITEM_TAG)
+
+    def paint(self, painter: QPainter, option, widget=None) -> None:
+        super().paint(painter, option, widget)
+        if not self.isSelected():
+            return
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        handle = TEXTBOX_HANDLE_SIZE
+        half = handle / 2.0
+        rect = self.rect()
+        points = [
+            rect.topLeft(),
+            QPointF(rect.center().x(), rect.top()),
+            rect.topRight(),
+            QPointF(rect.left(), rect.center().y()),
+            QPointF(rect.right(), rect.center().y()),
+            rect.bottomLeft(),
+            QPointF(rect.center().x(), rect.bottom()),
+            rect.bottomRight(),
+        ]
+        painter.setBrush(QColor(52, 58, 64))
+        painter.setPen(QPen(QColor(255, 255, 255), 1))
+        for point in points:
+            painter.drawRect(
+                QRectF(point.x() - half, point.y() - half, handle, handle)
+            )
 
 
 class CellNodeItem(QGraphicsRectItem):
@@ -619,6 +683,40 @@ class CellNeighborsWindow(QDialog):
         self.aml_toggle_button.toggled.connect(self._on_aml_toggle)
         toolbar.addWidget(self.aml_toggle_button)
 
+        # Drawing tools palette
+        self._drawing_tool: Optional[str] = None
+        self._drawing_line_item: Optional[QGraphicsLineItem] = None
+        self._drawing_line_start: Optional[QPointF] = None
+        self._drawing_actions: dict[str, QAction] = {}
+
+        drawing_toolbar = QToolBar(self)
+        drawing_toolbar.setMovable(False)
+        drawing_toolbar.setToolButtonStyle(Qt.ToolButtonIconOnly)
+        drawing_toolbar.setIconSize(QSize(22, 22))
+        drawing_toolbar.setWindowTitle("Ferramentas de Desenho")
+        drawing_toolbar.addWidget(QLabel("Desenho:", self))
+
+        line_action = QAction(_load_drawing_icon("line_tool.svg"), "Linha", self)
+        line_action.setCheckable(True)
+        line_action.setToolTip("Ferramenta de linha")
+        line_action.toggled.connect(lambda checked, tool="line": self._on_drawing_tool_toggled(tool, checked))
+        drawing_toolbar.addAction(line_action)
+        self._drawing_actions["line"] = line_action
+
+        text_action = QAction(_load_drawing_icon("text_tool.svg"), "Texto", self)
+        text_action.setCheckable(True)
+        text_action.setToolTip("Adicionar caixa de texto")
+        text_action.toggled.connect(lambda checked, tool="text": self._on_drawing_tool_toggled(tool, checked))
+        drawing_toolbar.addAction(text_action)
+        self._drawing_actions["text"] = text_action
+
+        erase_action = QAction(_load_drawing_icon("erase_tool.svg"), "Apagar", self)
+        erase_action.setCheckable(True)
+        erase_action.setToolTip("Apagar linhas ou caixas de texto")
+        erase_action.toggled.connect(lambda checked, tool="erase": self._on_drawing_tool_toggled(tool, checked))
+        drawing_toolbar.addAction(erase_action)
+        self._drawing_actions["erase"] = erase_action
+
         self._current_sequence_index: Optional[int] = None  # 1-based; None => no colouring
         self._aml_highlight_enabled = False
         self._previous_sequence_index_for_aml: int = 0
@@ -629,6 +727,7 @@ class CellNeighborsWindow(QDialog):
         self._undo_stack.indexChanged.connect(self._mark_as_modified)
         
         main_layout.addWidget(toolbar)
+        main_layout.addWidget(drawing_toolbar)
         
         # Graphics view
         self.view = QGraphicsView(self)
@@ -665,10 +764,149 @@ class CellNeighborsWindow(QDialog):
         view.setDragMode(QGraphicsView.NoDrag)
         view.viewport().installEventFilter(self)
 
+    def _on_drawing_tool_toggled(self, tool: str, checked: bool) -> None:
+        if checked:
+            for name, action in self._drawing_actions.items():
+                if name != tool and action.isChecked():
+                    action.blockSignals(True)
+                    action.setChecked(False)
+                    action.blockSignals(False)
+            self._drawing_tool = tool
+        else:
+            if all(not action.isChecked() for action in self._drawing_actions.values()):
+                self._drawing_tool = None
+        if self._drawing_tool != "line":
+            self._cancel_active_line()
+        self._apply_drawing_cursor()
+
+    def _apply_drawing_cursor(self) -> None:
+        if self._drawing_tool == "line":
+            cursor = Qt.CrossCursor
+        elif self._drawing_tool == "text":
+            cursor = Qt.IBeamCursor
+        elif self._drawing_tool == "erase":
+            cursor = Qt.PointingHandCursor
+        else:
+            cursor = Qt.ArrowCursor
+        self.view.viewport().setCursor(cursor)
+
+    def _cancel_active_line(self) -> None:
+        if self._drawing_line_item is not None:
+            self.scene.removeItem(self._drawing_line_item)
+            self._drawing_line_item = None
+            self._drawing_line_start = None
+
+    def _start_drawing_line(self, scene_pos: QPointF) -> None:
+        self._cancel_active_line()
+        self._drawing_line_start = scene_pos
+        line_item = DrawingLineItem(
+            QLineF(scene_pos, scene_pos)
+        )
+        line_item.setPen(DRAW_LINE_PEN)
+        line_item.setZValue(0.5)
+        self.scene.addItem(line_item)
+        self._drawing_line_item = line_item
+
+    def _update_drawing_line(self, scene_pos: QPointF) -> None:
+        if self._drawing_line_item is None or self._drawing_line_start is None:
+            return
+        self._drawing_line_item.setLine(
+            self._drawing_line_start.x(),
+            self._drawing_line_start.y(),
+            scene_pos.x(),
+            scene_pos.y(),
+        )
+
+    def _finish_drawing_line(self, scene_pos: QPointF) -> None:
+        if self._drawing_line_item is None:
+            return
+        self._update_drawing_line(scene_pos)
+        self._drawing_line_item = None
+        self._drawing_line_start = None
+
+    def _add_text_box(self, scene_pos: QPointF) -> None:
+        text, ok = QInputDialog.getText(self, "Adicionar texto", "Texto:")
+        if not ok:
+            return
+        text = (text or "").strip()
+        if not text:
+            return
+        text_item = QGraphicsTextItem(text)
+        text_item.setDefaultTextColor(QColor(33, 37, 41))
+        text_item.setTextInteractionFlags(Qt.NoTextInteraction)
+        font = text_item.font()
+        font.setPointSize(max(9, font.pointSize()))
+        text_item.setFont(font)
+
+        padding = 6
+        text_rect = text_item.boundingRect()
+        rect_item = TextBoxItem(
+            QRectF(
+                0,
+                0,
+                text_rect.width() + padding * 2,
+                text_rect.height() + padding * 2,
+            )
+        )
+        rect_item.setBrush(QColor(255, 255, 255, 230))
+        rect_item.setPen(QPen(QColor(120, 120, 120), 1))
+        rect_item.setZValue(1)
+        text_item.setParentItem(rect_item)
+        text_item.setPos(padding, padding)
+        self.scene.addItem(rect_item)
+
+        rect_item.setPos(
+            scene_pos
+            - QPointF(rect_item.rect().width() / 2.0, rect_item.rect().height() / 2.0)
+        )
+
+    def _find_drawing_item(self, item: Optional[QGraphicsItem]) -> Optional[QGraphicsItem]:
+        if item is None:
+            return None
+        if item.data(DRAWING_ITEM_ROLE) == DRAWING_ITEM_TAG:
+            return item
+        parent = item.parentItem()
+        if parent and parent.data(DRAWING_ITEM_ROLE) == DRAWING_ITEM_TAG:
+            return parent
+        return None
+
+    def _erase_at(self, scene_pos: QPointF) -> None:
+        item = self.scene.itemAt(scene_pos, self.view.transform())
+        target = self._find_drawing_item(item)
+        if target is not None:
+            self.scene.removeItem(target)
+
     def eventFilter(self, obj, event):
         from PySide6.QtCore import QEvent
         from PySide6.QtGui import QWheelEvent, QMouseEvent
         if obj is self.view.viewport():
+            if self._drawing_tool is not None:
+                if event.type() == QEvent.MouseButtonPress and event.button() == Qt.LeftButton:
+                    scene_pos = self.view.mapToScene(event.pos())
+                    if self._drawing_tool == "line":
+                        self._start_drawing_line(scene_pos)
+                        return True
+                    if self._drawing_tool == "text":
+                        self._add_text_box(scene_pos)
+                        return True
+                    if self._drawing_tool == "erase":
+                        self._erase_at(scene_pos)
+                        return True
+                elif (
+                    event.type() == QEvent.MouseMove
+                    and self._drawing_tool == "line"
+                    and self._drawing_line_item is not None
+                ):
+                    self._update_drawing_line(self.view.mapToScene(event.pos()))
+                    return True
+                elif (
+                    event.type() == QEvent.MouseButtonRelease
+                    and event.button() == Qt.LeftButton
+                    and self._drawing_tool == "line"
+                    and self._drawing_line_item is not None
+                ):
+                    self._finish_drawing_line(self.view.mapToScene(event.pos()))
+                    return True
             if event.type() == QEvent.MouseButtonPress:
                 if event.button() == Qt.MiddleButton:
                     self._is_panning = True
