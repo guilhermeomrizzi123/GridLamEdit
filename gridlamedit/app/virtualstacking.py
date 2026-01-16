@@ -1283,23 +1283,6 @@ class VirtualStackingWindow(QtWidgets.QDialog):
         self.btn_move_right.clicked.connect(lambda: self._move_selected_column(1))
         toolbar.addWidget(self.btn_move_right)
 
-        toolbar.addSpacing(6)
-
-        # Controles de desfazer/refazer.
-        self.btn_undo = QtWidgets.QToolButton(self)
-        self.btn_undo.setText("Undo")
-        self.btn_undo.setToolTip("Undo change (Ctrl+Z)")
-        self.btn_undo.clicked.connect(self.undo_stack.undo)
-        self.btn_undo.setEnabled(self.undo_stack.canUndo())
-        toolbar.addWidget(self.btn_undo)
-
-        self.btn_redo = QtWidgets.QToolButton(self)
-        self.btn_redo.setText("Redo")
-        self.btn_redo.setToolTip("Redo change (Ctrl+Y)")
-        self.btn_redo.clicked.connect(self.undo_stack.redo)
-        self.btn_redo.setEnabled(self.undo_stack.canRedo())
-        toolbar.addWidget(self.btn_redo)
-
         return toolbar
 
     def _default_export_path(self) -> str:
