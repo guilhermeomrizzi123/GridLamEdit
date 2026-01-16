@@ -1089,7 +1089,7 @@ class CellNeighborsWindow(QDialog):
                 max_layers = 0
         center_sequences = self._find_center_sequence_indices(max_layers)
         for i in range(1, max_layers + 1):
-            label = f"{i} Center Sequence" if i in center_sequences else str(i)
+            label = str(i)
             self.sequence_combo.addItem(label)
         # Reset selection & colours
         self.sequence_combo.setCurrentIndex(0)
