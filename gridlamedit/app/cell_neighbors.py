@@ -241,11 +241,11 @@ class DeleteCellCommand(QUndoCommand):
         # Recreate node at same position using rect coordinates
         rect = QRectF(self.rect_topleft.x(), self.rect_topleft.y(), CELL_SIZE, CELL_SIZE)
         item = CellNodeItem(rect)
-        item.set_text(self.cell_id)
         self.window.scene.addItem(item)
         
         record = _NodeRecord(item=item, grid_pos=self.grid_pos, cell_id=self.cell_id)
         self.window._nodes_by_grid[self.grid_pos] = record
+        self.window._update_node_cell_display(record)
         
         # Setup callbacks
         def on_select_cell():
@@ -419,6 +419,12 @@ class CellNodeItem(QGraphicsRectItem):
         f.setPointSize(f.pointSize() + 2)
         self._label.setFont(f)
         self._label.setBrush(COLOR_TEXT)
+        # Laminate name label (smaller, below cell id)
+        self._laminate_label = QGraphicsSimpleTextItem("", self)
+        lf: QFont = self._laminate_label.font()
+        lf.setPointSize(max(8, f.pointSize() - 2))
+        self._laminate_label.setFont(lf)
+        self._laminate_label.setBrush(COLOR_TEXT)
         # AML type overlay at top-center
         self._aml_label = QGraphicsSimpleTextItem("", self)
         af: QFont = self._aml_label.font()
@@ -444,6 +450,10 @@ class CellNodeItem(QGraphicsRectItem):
 
     def set_text(self, text: str) -> None:
         self._label.setText(text)
+        self._recenter_label()
+
+    def set_laminate_text(self, text: str) -> None:
+        self._laminate_label.setText(text or "")
         self._recenter_label()
 
     def paint(self, painter, option, widget=None):
@@ -482,10 +492,27 @@ class CellNodeItem(QGraphicsRectItem):
     def _recenter_label(self) -> None:
         rect = self.rect()
         tb = self._label.boundingRect()
-        self._label.setPos(
-            rect.x() + (rect.width() - tb.width()) / 2,
-            rect.y() + (rect.height() - tb.height()) / 2,
-        )
+        lam_text = self._laminate_label.text()
+        spacing = 2.0
+        if lam_text:
+            self._laminate_label.setVisible(True)
+            lb = self._laminate_label.boundingRect()
+            total_h = tb.height() + spacing + lb.height()
+            start_y = rect.y() + (rect.height() - total_h) / 2
+            self._label.setPos(
+                rect.x() + (rect.width() - tb.width()) / 2,
+                start_y,
+            )
+            self._laminate_label.setPos(
+                rect.x() + (rect.width() - lb.width()) / 2,
+                start_y + tb.height() + spacing,
+            )
+        else:
+            self._laminate_label.setVisible(False)
+            self._label.setPos(
+                rect.x() + (rect.width() - tb.width()) / 2,
+                rect.y() + (rect.height() - tb.height()) / 2,
+            )
         ob = self._orientation_label.boundingRect()
         margin = 4.0
         self._orientation_label.setPos(
@@ -507,6 +534,7 @@ class CellNodeItem(QGraphicsRectItem):
         self._label.setBrush(chosen)
         self._orientation_label.setBrush(chosen)
         self._aml_label.setBrush(chosen)
+        self._laminate_label.setBrush(chosen)
 
     def set_border_highlight(self, color: Optional[QColor], width: int) -> None:
         """Apply a border style keeping rounded corners."""
@@ -977,6 +1005,9 @@ class CellNeighborsWindow(QDialog):
                     # Rebuild the visual graph from saved neighbors
                     self._rebuild_graph_from_neighbors()
         self._cells = cells
+        # Refresh cell labels/laminate tags using latest model data
+        for rec in self._nodes_by_grid.values():
+            self._update_node_cell_display(rec)
         # Update all plus buttons visibility after loading project
         self._update_all_plus_buttons_visibility()
         # Populate sequence combo (max layers among laminados)
@@ -1794,7 +1825,7 @@ class CellNeighborsWindow(QDialog):
             # Instead, just clear its cell assignment
             if record.grid_pos == (0, 0):
                 record.cell_id = None
-                record.item.set_text("Select\nCell")
+                self._update_node_cell_display(record)
                 # Clear all neighbors for this node
                 record.item.set_neighbor("up", None)
                 record.item.set_neighbor("down", None)
@@ -1851,7 +1882,7 @@ class CellNeighborsWindow(QDialog):
         initial_node = self._nodes_by_grid.get((0, 0))
         if initial_node:
             initial_node.cell_id = first_cell
-            initial_node.item.set_text(first_cell)
+            self._update_node_cell_display(initial_node)
         
         # BFS to position all connected cells
         queue = [first_cell]
@@ -1886,7 +1917,7 @@ class CellNeighborsWindow(QDialog):
                     # Assign cell to node
                     neighbor_node = self._nodes_by_grid[neighbor_pos]
                     neighbor_node.cell_id = neighbor_cell
-                    neighbor_node.item.set_text(neighbor_cell)
+                    self._update_node_cell_display(neighbor_node)
                     
                     visited.add(neighbor_cell)
                     queue.append(neighbor_cell)
@@ -1944,6 +1975,33 @@ class CellNeighborsWindow(QDialog):
         
         return record
 
+    def _format_laminate_label(self, cell_id: Optional[str]) -> str:
+        if not cell_id or self._model is None:
+            return ""
+        try:
+            laminate_name = self._model.cell_to_laminate.get(cell_id)
+            laminado = self._model.laminados.get(laminate_name) if laminate_name else None
+            if laminado is None and hasattr(self._model, "laminados_da_celula"):
+                candidates = self._model.laminados_da_celula(cell_id)
+                laminado = candidates[0] if candidates else None
+            if laminado is not None:
+                base_name = getattr(laminado, "nome", laminate_name) or ""
+                tag = str(getattr(laminado, "tag", "") or "").strip()
+                if tag and f"({tag})" not in base_name:
+                    return f"{base_name}({tag})"
+                return base_name
+            return laminate_name or ""
+        except Exception:
+            return ""
+
+    def _update_node_cell_display(self, record: _NodeRecord) -> None:
+        if record.cell_id:
+            record.item.set_text(record.cell_id)
+            record.item.set_laminate_text(self._format_laminate_label(record.cell_id))
+        else:
+            record.item.set_text("Select\nCell")
+            record.item.set_laminate_text("")
+
     def _prompt_select_cell(self, record: _NodeRecord) -> None:
         if not self._cells:
             return
@@ -1973,7 +2031,7 @@ class CellNeighborsWindow(QDialog):
                 )
                 return
         record.cell_id = selected
-        record.item.set_text(record.cell_id)
+        self._update_node_cell_display(record)
         # Always ensure cell is in neighbors dict, even without connections
         self._ensure_cell_mapping_entry(record.cell_id)
         # Check for adjacent cells and auto-connect (without undo - this is part of cell selection)
@@ -2332,8 +2390,8 @@ class CellNeighborsWindow(QDialog):
                 self._create_node(grid_pos, top_left)
             rec = self._nodes_by_grid[grid_pos]
             rec.cell_id = str(entry.get("cell", "")) or None
+            self._update_node_cell_display(rec)
             if rec.cell_id:
-                rec.item.set_text(rec.cell_id)
                 self._ensure_cell_mapping_entry(rec.cell_id)
 
         # Create connections
