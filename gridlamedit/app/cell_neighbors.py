@@ -443,7 +443,7 @@ class CellNodeItem(QGraphicsRectItem):
         self._contour_labels: dict[str, QGraphicsSimpleTextItem] = {}
         contour_font = QFont(f)
         contour_font.setBold(False)
-        contour_font.setPointSize(max(7, f.pointSize() - 4))
+        contour_font.setPointSize(max(5, f.pointSize() - 7))
         for key in ("top", "right", "bottom", "left"):
             label = QGraphicsSimpleTextItem("", self)
             label.setFont(contour_font)
