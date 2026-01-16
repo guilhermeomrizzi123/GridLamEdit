@@ -375,6 +375,8 @@ class GridModel:
     laminados: Dict[str, Laminado] = field(default_factory=OrderedDict)
     celulas_ordenadas: list[str] = field(default_factory=list)
     cell_to_laminate: Dict[str, str] = field(default_factory=dict)
+    # Colunas de contorno (ex.: 1-4) por célula para re-associação futura.
+    cell_contours: Dict[str, list[str]] = field(default_factory=dict)
     # Lista detalhada de instâncias (posicionadas) usadas na tela de vizinhanças.
     cell_neighbor_nodes: list[dict[str, object]] = field(default_factory=list)
     # Usamos listas para permitir múltiplas conexões por direção; leitura continua aceitando o formato legado
@@ -618,6 +620,7 @@ def load_grid_spreadsheet(path: str) -> GridModel:
     celulas_ordenadas = parse_cells_from_planilha1(df)
     cells_info = _extract_cells_section(df)
     cell_to_laminate = cells_info.mapping
+    cell_contours = cells_info.contours
     separator_idx = cells_info.separator_idx
     config_section = df.iloc[separator_idx + 1 :]
 
@@ -653,6 +656,7 @@ def load_grid_spreadsheet(path: str) -> GridModel:
         laminados=laminados,
         celulas_ordenadas=celulas_ordenadas,
         cell_to_laminate=dict(cell_to_laminate),
+        cell_contours=dict(cell_contours),
     )
     model.source_excel_path = str(file_path)
     return model
@@ -1639,9 +1643,16 @@ def _extract_cells_section(df: pd.DataFrame) -> _CellsSection:
     if cell_col is None:
         cell_col = 0
 
+    contour_cols = [
+        idx
+        for idx, key in enumerate(header_keys)
+        if key and idx not in {cell_col, laminate_col}
+    ]
+
     cells_ordered: list[str] = []
     seen_cells: set[str] = set()
     cell_to_laminate: Dict[str, str] = {}
+    cell_contours: Dict[str, list[str]] = {}
 
     for row_idx in range(data_start, separator_idx):
         row = df.iloc[row_idx]
@@ -1665,6 +1676,13 @@ def _extract_cells_section(df: pd.DataFrame) -> _CellsSection:
             if not _is_blank(laminate_value) and cell_id not in cell_to_laminate:
                 cell_to_laminate[cell_id] = str(laminate_value).strip()
 
+        if contour_cols:
+            contours: list[str] = []
+            for col_idx in contour_cols:
+                value = row.iloc[col_idx] if col_idx < len(row) else None
+                contours.append(_string_or_empty(value))
+            cell_contours[cell_id] = contours
+
     if not cells_ordered:
         raise ValueError("NAo hA celulas vAlidas entre 'Cells' e '#' em Planilha1.")
 
@@ -1672,7 +1690,12 @@ def _extract_cells_section(df: pd.DataFrame) -> _CellsSection:
         "Secao 'Cells' processada com %d celulas distintas.",
         len(cells_ordered),
     )
-    return _CellsSection(cells=cells_ordered, mapping=cell_to_laminate, separator_idx=separator_idx)
+    return _CellsSection(
+        cells=cells_ordered,
+        mapping=cell_to_laminate,
+        contours=cell_contours,
+        separator_idx=separator_idx,
+    )
 
 
 def _parse_configuration_section(
@@ -2652,6 +2675,7 @@ def _string_or_empty(value: object) -> str:
 class _CellsSection:
     cells: list[str]
     mapping: Dict[str, str]
+    contours: Dict[str, list[str]]
     separator_idx: int
 
 

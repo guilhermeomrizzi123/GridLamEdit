@@ -138,6 +138,8 @@ from gridlamedit.services.laminate_checks import (
     evaluate_symmetry_for_layers,
     run_all_checks,
 )
+from gridlamedit.services.laminate_reassociation import reassociate_laminates_by_contours
+from gridlamedit.ui.dialogs.reassociation_report_dialog import ReassociationReportDialog
 from gridlamedit.services.laminate_service import (
     auto_name_for_laminate,
     auto_name_for_layers,
@@ -440,6 +442,13 @@ class MainWindow(QMainWindow):
                 QKeySequence("Ctrl+Shift+N"),
             ),
             (
+                "reassociate_contours_action",
+                "Reassociar Laminados por Contorno",
+                self._reassociate_by_contours,
+                "Importa um novo grid e reassocia laminados pelos contornos.",
+                QKeySequence("Ctrl+Shift+R"),
+            ),
+            (
                 "exit_action",
                 "Close",
                 self.close,
@@ -474,6 +483,7 @@ class MainWindow(QMainWindow):
         virtual_menu = menu_bar.addMenu("Virtual Stacking")
         virtual_menu.addAction(self.virtual_stacking_action)
         virtual_menu.addAction(self.cell_neighbors_action)
+        virtual_menu.addAction(self.reassociate_contours_action)
 
     def open_virtual_stacking(self) -> None:
         """Open the Virtual Stacking dialog populated with the current project."""
@@ -3420,6 +3430,92 @@ class MainWindow(QMainWindow):
         if self.statusBar() and not warnings_shown:
             self.statusBar().showMessage(
                 f"Planilha carregada: {Path(path).name}", 5000
+            )
+
+    def _reassociate_by_contours(self, checked: bool = False) -> None:  # noqa: ARG002
+        """Importa um novo grid e reassocia laminados pelos contornos."""
+        if self._grid_model is None:
+            QMessageBox.information(
+                self,
+                "Sem projeto",
+                "Carregue um projeto antes de reassociar laminados.",
+            )
+            return
+
+        if not getattr(self._grid_model, "cell_contours", {}):
+            QMessageBox.warning(
+                self,
+                "Contornos ausentes",
+                "O projeto atual nao possui contornos importados. "
+                "Reimporte a planilha original antes de tentar a reassociacao.",
+            )
+
+        if not self._confirm_discard_changes():
+            return
+
+        options = self._file_dialog_options()
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Importar grid para reassociacao",
+            "",
+            "Planilhas Excel (*.xlsx *.xls);;Todos os arquivos (*)",
+            options=options,
+        )
+        if not path:
+            return
+
+        try:
+            model = load_grid_spreadsheet(path)
+        except ValueError as exc:
+            logger.error("Falha ao carregar planilha: %s", exc)
+            QMessageBox.critical(self, "Erro", str(exc))
+            if self.statusBar():
+                self.statusBar().showMessage("Falha ao carregar planilha.", 4000)
+            return
+
+        previous_model = self._grid_model
+        previous_laminates = dict(previous_model.laminados) if previous_model else {}
+        if previous_laminates:
+            for name, laminate in previous_laminates.items():
+                if name not in model.laminados:
+                    model.laminados[name] = laminate
+
+        model.source_excel_path = path
+        model.dirty = False
+
+        report = reassociate_laminates_by_contours(previous_model, model)
+
+        self._grid_model = model
+        self.project_manager.current_path = None
+
+        if self.ui_state == UiState.CREATING:
+            self._exit_creating_mode()
+
+        self._clear_undo_history()
+        bind_model_to_ui(self._grid_model, self)
+        binding = getattr(self, "_grid_binding", None)
+        if binding is not None:
+            self._configure_stacking_table(binding)
+        self._sync_all_auto_renamed_laminates()
+        bind_cells_to_ui(self._grid_model, self)
+        current_name = getattr(binding, "_current_laminate", None) if binding else None
+        self._on_binding_laminate_changed(current_name)
+        self._refresh_virtual_stacking_view()
+        self._apply_ui_state(self.project_manager.get_ui_state())
+        self.project_manager.capture_from_model(
+            self._grid_model, self._collect_ui_state()
+        )
+        self.project_manager.mark_dirty(True)
+        self._update_save_actions_enabled()
+        self._update_window_title()
+
+        dialog = ReassociationReportDialog(self)
+        dialog.set_report(report)
+        dialog.exec()
+
+        if self.statusBar():
+            self.statusBar().showMessage(
+                f"Reassociacao concluida: {Path(path).name}", 5000
             )
 
     def _on_open_project(self, checked: bool = False) -> None:  # noqa: ARG002
