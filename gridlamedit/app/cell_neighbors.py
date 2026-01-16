@@ -290,6 +290,91 @@ class DeleteCellCommand(QUndoCommand):
             self.window.update_cell_colors_for_sequence(self.window._current_sequence_index)
 
 
+class AddNodeCommand(QUndoCommand):
+    """Command to add a new cell node with its connections."""
+
+    def __init__(
+        self,
+        window,
+        grid_pos: tuple[int, int],
+        rect_topleft: QPointF,
+        cell_id: str,
+        connections: list[tuple[str, str, str, tuple[int, int], tuple[int, int]]],
+    ) -> None:
+        super().__init__(f"Adicionar célula {cell_id}")
+        self.window = window
+        self.grid_pos = grid_pos
+        self.rect_topleft = rect_topleft
+        self.cell_id = cell_id
+        self.connections = connections
+
+    def redo(self):
+        record = self.window._nodes_by_grid.get(self.grid_pos)
+        if record is None:
+            record = self.window._create_node(self.grid_pos, self.rect_topleft)
+        record.cell_id = self.cell_id
+        self.window._update_node_cell_display(record)
+        self.window._ensure_cell_mapping_entry(self.cell_id)
+
+        for src_cell, direction, dst_cell, src_pos, dst_pos in self.connections:
+            self.window._link_cells_internal(src_cell, direction, dst_cell)
+            self.window._draw_connection_between(src_pos, dst_pos)
+
+        affected_cells = {self.cell_id}
+        for src_cell, _, dst_cell, _, _ in self.connections:
+            affected_cells.add(src_cell)
+            affected_cells.add(dst_cell)
+        for rec in self.window._nodes_by_grid.values():
+            if rec.cell_id in affected_cells:
+                self.window._update_node_neighbors(rec)
+
+        self.window._recalculate_cell_neighbors_from_scene()
+        self.window._update_all_plus_buttons_visibility()
+        if self.window._current_sequence_index is not None:
+            self.window.update_cell_colors_for_sequence(self.window._current_sequence_index)
+
+    def undo(self):
+        self.window._remove_node_and_connections(
+            self.grid_pos,
+            self.cell_id,
+            self.connections,
+        )
+
+
+class AddDrawingItemCommand(QUndoCommand):
+    """Command to add a drawing item to the scene."""
+
+    def __init__(self, window, item: QGraphicsItem, text: str) -> None:
+        super().__init__(text)
+        self.window = window
+        self.item = item
+
+    def redo(self):
+        if self.item.scene() is None:
+            self.window.scene.addItem(self.item)
+
+    def undo(self):
+        if self.item.scene() is not None:
+            self.window.scene.removeItem(self.item)
+
+
+class RemoveDrawingItemCommand(QUndoCommand):
+    """Command to remove a drawing item from the scene."""
+
+    def __init__(self, window, item: QGraphicsItem, text: str) -> None:
+        super().__init__(text)
+        self.window = window
+        self.item = item
+
+    def redo(self):
+        if self.item.scene() is not None:
+            self.window.scene.removeItem(self.item)
+
+    def undo(self):
+        if self.item.scene() is None:
+            self.window.scene.addItem(self.item)
+
+
 class PlusButtonItem(QGraphicsRectItem):
     """Modern circular "+" button with hover effect."""
 
@@ -736,6 +821,7 @@ class CellNeighborsWindow(QDialog):
         self._project_manager = None  # Will be set via populate_from_project
         self._cells: list[str] = []
         self._undo_stack = QUndoStack(self)
+        self._undo_stack.setUndoLimit(3)
         self._has_unsaved_changes = False
 
         # Main layout
@@ -744,26 +830,24 @@ class CellNeighborsWindow(QDialog):
         # Toolbar with buttons
         toolbar = QToolBar(self)
         toolbar.setMovable(False)
+        toolbar.setToolButtonStyle(Qt.ToolButtonIconOnly)
+        toolbar.setIconSize(QSize(20, 20))
         
-        # Save button
-        self.save_button = QPushButton("Salvar", self)
-        self.save_button.clicked.connect(self._save_to_project)
-        self.save_button.setEnabled(False)  # Start disabled
-        toolbar.addWidget(self.save_button)
-        
+        # Undo action (icon only)
+        self.undo_action = QAction(QIcon(":/icons/undo.svg"), "Desfazer", self)
+        self.undo_action.setToolTip("Desfazer (Ctrl+Z)")
+        self.undo_action.triggered.connect(self._undo_stack.undo)
+        self.undo_action.setEnabled(False)
+        toolbar.addAction(self.undo_action)
+
+        # Redo action (icon only)
+        self.redo_action = QAction(QIcon(":/icons/redo.svg"), "Refazer", self)
+        self.redo_action.setToolTip("Refazer (Ctrl+Y)")
+        self.redo_action.triggered.connect(self._undo_stack.redo)
+        self.redo_action.setEnabled(False)
+        toolbar.addAction(self.redo_action)
+
         toolbar.addSeparator()
-        
-        # Undo button
-        self.undo_button = QPushButton("Desfazer", self)
-        self.undo_button.clicked.connect(self._undo_stack.undo)
-        self.undo_button.setEnabled(False)
-        toolbar.addWidget(self.undo_button)
-        
-        # Redo button
-        self.redo_button = QPushButton("Refazer", self)
-        self.redo_button.clicked.connect(self._undo_stack.redo)
-        self.redo_button.setEnabled(False)
-        toolbar.addWidget(self.redo_button)
 
         # Sequence selection label & combo box
         self.sequence_label = QLabel("Sequência:", self)
@@ -918,8 +1002,11 @@ class CellNeighborsWindow(QDialog):
         if self._drawing_line_item is None:
             return
         self._update_drawing_line(scene_pos)
+        line_item = self._drawing_line_item
         self._drawing_line_item = None
         self._drawing_line_start = None
+        self._undo_stack.push(AddDrawingItemCommand(self, line_item, "Adicionar linha"))
+        self._mark_as_modified()
 
     def _add_text_box(self, scene_pos: QPointF) -> None:
         text, ok = QInputDialog.getText(self, "Adicionar texto", "Texto:")
@@ -956,6 +1043,7 @@ class CellNeighborsWindow(QDialog):
             scene_pos
             - QPointF(rect_item.rect().width() / 2.0, rect_item.rect().height() / 2.0)
         )
+        self._undo_stack.push(AddDrawingItemCommand(self, rect_item, "Adicionar texto"))
 
     def _find_drawing_item(self, item: Optional[QGraphicsItem]) -> Optional[QGraphicsItem]:
         if item is None:
@@ -971,7 +1059,7 @@ class CellNeighborsWindow(QDialog):
         item = self.scene.itemAt(scene_pos, self.view.transform())
         target = self._find_drawing_item(item)
         if target is not None:
-            self.scene.removeItem(target)
+            self._undo_stack.push(RemoveDrawingItemCommand(self, target, "Remover desenho"))
 
     def eventFilter(self, obj, event):
         from PySide6.QtCore import QEvent
@@ -1122,17 +1210,24 @@ class CellNeighborsWindow(QDialog):
         """Mark that there are unsaved changes."""
         self._has_unsaved_changes = True
         self._update_command_buttons()
+        self._auto_save_if_needed()
 
     def _update_command_buttons(self, *args) -> None:
-        """Enable/disable Save/Undo/Redo respecting AML lock state."""
+        """Enable/disable Undo/Redo respecting AML lock state."""
         if self._aml_highlight_enabled:
-            self.save_button.setEnabled(False)
-            self.undo_button.setEnabled(False)
-            self.redo_button.setEnabled(False)
+            self.undo_action.setEnabled(False)
+            self.redo_action.setEnabled(False)
             return
-        self.save_button.setEnabled(self._has_unsaved_changes)
-        self.undo_button.setEnabled(self._undo_stack.canUndo())
-        self.redo_button.setEnabled(self._undo_stack.canRedo())
+        self.undo_action.setEnabled(self._undo_stack.canUndo())
+        self.redo_action.setEnabled(self._undo_stack.canRedo())
+
+    def _auto_save_if_needed(self) -> None:
+        """Auto-save changes immediately when possible."""
+        if self._aml_highlight_enabled:
+            return
+        if not self._has_unsaved_changes:
+            return
+        self._save_to_project()
 
     # ---------- Sequence colouring ----------
     def _find_center_sequence_indices(self, max_layers: int) -> set[int]:
@@ -1401,7 +1496,7 @@ class CellNeighborsWindow(QDialog):
             item._recenter_label()
 
     def _save_to_project(self) -> None:
-        """Save current neighbors mapping to the project (manual save)."""
+        """Save current neighbors mapping to the project."""
         if self._aml_highlight_enabled:
             return
         # Check for disconnected blocks before saving
@@ -1532,6 +1627,67 @@ class CellNeighborsWindow(QDialog):
                         if line:
                             line.setVisible(has_available)
         self._update_command_buttons()
+
+    def _remove_line_between(self, a: tuple[int, int], b: tuple[int, int]) -> None:
+        key = (a, b) if a <= b else (b, a)
+        line = self._lines_between_nodes.get(key)
+        if line:
+            self.scene.removeItem(line)
+            del self._lines_between_nodes[key]
+
+    def _remove_node_and_connections(
+        self,
+        grid_pos: tuple[int, int],
+        cell_id: str,
+        connections: list[tuple[str, str, str, tuple[int, int], tuple[int, int]]],
+    ) -> None:
+        affected_cells = {cell_id}
+        for src_cell, direction, dst_cell, src_pos, dst_pos in connections:
+            self._remove_neighbor_relation(src_cell, direction, dst_cell)
+            self._remove_line_between(src_pos, dst_pos)
+            affected_cells.add(src_cell)
+            affected_cells.add(dst_cell)
+
+        record = self._nodes_by_grid.get(grid_pos)
+        if record is not None:
+            self.scene.removeItem(record.item)
+            del self._nodes_by_grid[grid_pos]
+
+        if not any(rec.cell_id == cell_id for rec in self._nodes_by_grid.values()):
+            if cell_id in self._neighbors:
+                del self._neighbors[cell_id]
+
+        for rec in self._nodes_by_grid.values():
+            if rec.cell_id in affected_cells:
+                self._update_node_neighbors(rec)
+
+        self._recalculate_cell_neighbors_from_scene()
+        self._update_all_plus_buttons_visibility()
+        if self._current_sequence_index is not None:
+            self.update_cell_colors_for_sequence(self._current_sequence_index)
+
+    def _collect_node_connections(
+        self, record: _NodeRecord
+    ) -> list[tuple[str, str, str, tuple[int, int], tuple[int, int]]]:
+        connections: list[tuple[str, str, str, tuple[int, int], tuple[int, int]]] = []
+        if not record.cell_id:
+            return connections
+        for direction, (dx, dy) in DIR_OFFSETS.items():
+            if not self._has_grid_connection(record, direction):
+                continue
+            neighbor_pos = (record.grid_pos[0] + dx, record.grid_pos[1] + dy)
+            neighbor_rec = self._nodes_by_grid.get(neighbor_pos)
+            if neighbor_rec and neighbor_rec.cell_id:
+                connections.append(
+                    (
+                        record.cell_id,
+                        direction,
+                        neighbor_rec.cell_id,
+                        record.grid_pos,
+                        neighbor_pos,
+                    )
+                )
+        return connections
 
     def _delete_cell(self, record: _NodeRecord) -> None:
         """Delete a cell from the scene and update all neighbors."""
@@ -2218,6 +2374,7 @@ class CellNeighborsWindow(QDialog):
         # Update colors for current sequence if one is selected
         if self._current_sequence_index is not None:
             self.update_cell_colors_for_sequence(self._current_sequence_index)
+        self._mark_as_modified()
 
     def _handle_add_neighbor(self, record: _NodeRecord, direction: str) -> None:
         # Check if there are available cells before proceeding
@@ -2275,13 +2432,7 @@ class CellNeighborsWindow(QDialog):
             self.scene.removeItem(neighbor.item)
             del self._nodes_by_grid[target_grid]
             return
-        self._link_cells(
-            record.cell_id,
-            direction,
-            neighbor.cell_id,
-            src_pos=record.grid_pos,
-            dst_pos=neighbor.grid_pos,
-        )
+        self._link_cells_internal(record.cell_id, direction, neighbor.cell_id)
         self._draw_connection_between(record.grid_pos, neighbor.grid_pos)
         self._update_node_neighbors(record)
         self._update_node_neighbors(neighbor)
@@ -2292,6 +2443,16 @@ class CellNeighborsWindow(QDialog):
         # Update colors for current sequence if one is selected
         if self._current_sequence_index is not None:
             self.update_cell_colors_for_sequence(self._current_sequence_index)
+        connections = self._collect_node_connections(neighbor)
+        self._undo_stack.push(
+            AddNodeCommand(
+                self,
+                neighbor.grid_pos,
+                neighbor.item.rect().topLeft(),
+                neighbor.cell_id,
+                connections,
+            )
+        )
 
 
     def _empty_neighbor_bucket(self) -> dict[str, set[str]]:
