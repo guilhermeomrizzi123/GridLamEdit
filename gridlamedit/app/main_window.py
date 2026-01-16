@@ -690,6 +690,11 @@ class MainWindow(QMainWindow):
         proxy = getattr(self, "_laminate_filter_model", None)
         if isinstance(proxy, LaminateFilterProxy):
             proxy.set_filter_text(text)
+        combo = getattr(self, "laminate_name_combo", None)
+        if isinstance(combo, QComboBox) and text.strip():
+            view = combo.view()
+            if view is not None and not view.isVisible():
+                combo.showPopup()
 
     def _reset_laminate_filter(self, *, clear_text: bool = False) -> None:
         proxy = getattr(self, "_laminate_filter_model", None)
