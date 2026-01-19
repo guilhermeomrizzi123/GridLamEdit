@@ -1796,6 +1796,13 @@ class CellNeighborsWindow(QDialog):
 
     def _delete_cell(self, record: _NodeRecord) -> None:
         """Delete a cell from the scene and update all neighbors."""
+        if len(self._nodes_by_grid) <= 1:
+            QMessageBox.information(
+                self,
+                "Operação não permitida",
+                "Não é possível remover a última célula. Adicione outra célula antes de excluir.",
+            )
+            return
         if not record.cell_id:
             # Nothing to delete if no cell assigned
             return
