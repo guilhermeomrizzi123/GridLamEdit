@@ -1179,6 +1179,10 @@ class CellNeighborsWindow(QDialog):
             event.ignore()
             return
         
+        # Ensure reorder toggle is off before closing
+        if self.reorder_neighbors_button.isChecked():
+            self.reorder_neighbors_button.setChecked(False)
+
         # Clear highlights and proceed with close
         self._clear_disconnected_highlights()
         event.accept()
