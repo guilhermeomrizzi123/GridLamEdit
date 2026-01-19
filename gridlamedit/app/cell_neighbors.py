@@ -187,27 +187,6 @@ class AddNeighborCommand(QUndoCommand):
             self.window.update_cell_colors_for_sequence(self.window._current_sequence_index)
 
 
-class SwapContoursCommand(QUndoCommand):
-    """Command to swap contour labels for a cell."""
-
-    def __init__(self, window, cell_id: str, old_contours: list[str], new_contours: list[str], label: str):
-        super().__init__(label)
-        self.window = window
-        self.cell_id = cell_id
-        self.old_contours = list(old_contours)
-        self.new_contours = list(new_contours)
-
-    def redo(self):
-        self.window._set_cell_contours(self.cell_id, self.new_contours)
-        if self.window._current_sequence_index is not None:
-            self.window.update_cell_colors_for_sequence(self.window._current_sequence_index)
-
-    def undo(self):
-        self.window._set_cell_contours(self.cell_id, self.old_contours)
-        if self.window._current_sequence_index is not None:
-            self.window.update_cell_colors_for_sequence(self.window._current_sequence_index)
-
-
 class DeleteCellCommand(QUndoCommand):
     """Command to delete a cell."""
     def __init__(self, window, record):
@@ -279,17 +258,11 @@ class DeleteCellCommand(QUndoCommand):
             self.window._delete_cell(record)
         def on_change_orientation():
             self.window._change_cell_orientation(record)
-        def on_swap_contours_lr():
-            self.window._swap_cell_contours(record, "lr")
-        def on_swap_contours_ud():
-            self.window._swap_cell_contours(record, "ud")
         
         item.on_select_cell = on_select_cell
         item.on_add_neighbor = on_add_neighbor
         item.on_delete_cell = on_delete_cell
         item.on_change_orientation = on_change_orientation
-        item.on_swap_contours_lr = on_swap_contours_lr
-        item.on_swap_contours_ud = on_swap_contours_ud
         
         # Restore neighbors
         self.window._neighbors[self.cell_id] = {
@@ -571,8 +544,6 @@ class CellNodeItem(QGraphicsRectItem):
         self.on_add_neighbor = None
         self.on_delete_cell = None
         self.on_change_orientation = None
-        self.on_swap_contours_lr = None
-        self.on_swap_contours_ud = None
         self.plus_items: dict[str, PlusButtonItem] = {}
         self.plus_lines: dict[str, QGraphicsLineItem] = {}
         self._neighbors: dict[str, Optional[str]] = {"up": None, "down": None, "left": None, "right": None}
@@ -811,15 +782,6 @@ class CellNodeItem(QGraphicsRectItem):
         change_orientation_action = QAction("Trocar orienta\u00e7\u00e3o", menu)
         change_orientation_action.triggered.connect(self._handle_change_orientation)
         menu.addAction(change_orientation_action)
-
-        # Add contour swap options
-        swap_lr_action = QAction("Trocar contorno esquerda/direita", menu)
-        swap_lr_action.triggered.connect(self._handle_swap_contours_lr)
-        menu.addAction(swap_lr_action)
-
-        swap_ud_action = QAction("Trocar contorno cima/baixo", menu)
-        swap_ud_action.triggered.connect(self._handle_swap_contours_ud)
-        menu.addAction(swap_ud_action)
         
         menu.addSeparator()
         
@@ -837,16 +799,6 @@ class CellNodeItem(QGraphicsRectItem):
         """Handle change orientation action from context menu."""
         if callable(self.on_change_orientation):
             self.on_change_orientation()
-
-    def _handle_swap_contours_lr(self) -> None:
-        """Handle swapping left/right contour labels from context menu."""
-        if callable(self.on_swap_contours_lr):
-            self.on_swap_contours_lr()
-
-    def _handle_swap_contours_ud(self) -> None:
-        """Handle swapping top/bottom contour labels from context menu."""
-        if callable(self.on_swap_contours_ud):
-            self.on_swap_contours_ud()
 
 
 @dataclass
@@ -2328,18 +2280,10 @@ class CellNeighborsWindow(QDialog):
         def on_change_orientation():
             self._change_cell_orientation(record)
 
-        def on_swap_contours_lr():
-            self._swap_cell_contours(record, "lr")
-
-        def on_swap_contours_ud():
-            self._swap_cell_contours(record, "ud")
-
         item.on_select_cell = on_select_cell
         item.on_add_neighbor = on_add_neighbor
         item.on_delete_cell = on_delete_cell
         item.on_change_orientation = on_change_orientation
-        item.on_swap_contours_lr = on_swap_contours_lr
-        item.on_swap_contours_ud = on_swap_contours_ud
         
         # Expand scene to accommodate new node
         self._expand_scene_rect()
@@ -2375,64 +2319,6 @@ class CellNeighborsWindow(QDialog):
         while len(values) < 4:
             values.append("")
         return (values[0], values[1], values[2], values[3])
-
-    def _get_cell_contours(self, cell_id: str) -> list[str]:
-        """Return the contour list (top, right, bottom, left) padded to 4 values."""
-        if self._model is None:
-            return ["", "", "", ""]
-        contours = getattr(self._model, "cell_contours", {}).get(cell_id, [])
-        values: list[str] = []
-        for value in contours:
-            values.append(str(value) if value is not None else "")
-        while len(values) < 4:
-            values.append("")
-        if len(values) > 4:
-            values = values[:4]
-        return values
-
-    def _set_cell_contours(self, cell_id: str, contours: list[str]) -> None:
-        """Persist contours to model and refresh any displayed nodes."""
-        if self._model is None:
-            return
-        if not hasattr(self._model, "cell_contours"):
-            self._model.cell_contours = {}
-        self._model.cell_contours[cell_id] = list(contours)
-        for record in self._nodes_by_grid.values():
-            if record.cell_id == cell_id:
-                self._update_node_cell_display(record)
-
-    def _swap_cell_contours(self, record: _NodeRecord, axis: str) -> None:
-        """Swap contour values (left/right or top/bottom) for a given cell."""
-        if not record.cell_id:
-            QMessageBox.information(
-                self,
-                "Célula não atribuída",
-                "Esta célula não possui um ID atribuído. Selecione uma célula primeiro.",
-            )
-            return
-        if self._model is None:
-            QMessageBox.warning(
-                self,
-                "Modelo não disponível",
-                "Não há um modelo de projeto carregado.",
-            )
-            return
-
-        old_contours = self._get_cell_contours(record.cell_id)
-        new_contours = list(old_contours)
-        if axis == "lr":
-            new_contours[1], new_contours[3] = new_contours[3], new_contours[1]
-            label = f"Trocar contorno esquerda/direita ({record.cell_id})"
-        elif axis == "ud":
-            new_contours[0], new_contours[2] = new_contours[2], new_contours[0]
-            label = f"Trocar contorno cima/baixo ({record.cell_id})"
-        else:
-            return
-
-        if new_contours == old_contours:
-            return
-
-        self._undo_stack.push(SwapContoursCommand(self, record.cell_id, old_contours, new_contours, label))
 
     @staticmethod
     def _normalize_contour_value(value: str) -> str:
