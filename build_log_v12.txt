@@ -308,3 +308,23 @@ Limpando e gerando executavel GridLamEdit...
 68122 INFO: Looking for dynamic libraries
 70484 INFO: Extra DLL search directories (AddDllDirectory): ['C:\\Users\\pribe\\OneDrive\\Documents\\GitHub\\GridLamEdit\\.venv\\Lib\\site-packages\\numpy.libs', 'C:\\Users\\pribe\\OneDrive\\Documents\\GitHub\\GridLamEdit\\.venv\\Lib\\site-packages\\pandas.libs', 'C:\\Users\\pribe\\OneDrive\\Documents\\GitHub\\GridLamEdit\\.venv\\Lib\\site-packages\\shiboken6']
 70484 INFO: Extra DLL search directories (PATH): ['C:\\Users\\pribe\\OneDrive\\Documents\\GitHub\\GridLamEdit\\.venv\\Lib\\site-packages\\PySide6']
+158972 INFO: Warnings written to C:\Users\pribe\OneDrive\Documents\GitHub\GridLamEdit\build\GridLamEdit\warn-GridLamEdit.txt
+159576 INFO: Graph cross-reference written to C:\Users\pribe\OneDrive\Documents\GitHub\GridLamEdit\build\GridLamEdit\xref-GridLamEdit.html
+159689 INFO: checking PYZ
+160362 INFO: checking PKG
+160362 INFO: Building PKG because PKG-00.toc is non existent
+160362 INFO: Building PKG (CArchive) GridLamEdit_V12.pkg
+189130 INFO: Building PKG (CArchive) GridLamEdit_V12.pkg completed successfully.
+189176 INFO: Bootloader C:\Users\pribe\OneDrive\Documents\GitHub\GridLamEdit\.venv\Lib\site-packages\PyInstaller\bootloader\Windows-64bit-intel\runw.exe
+189176 INFO: checking EXE
+189247 INFO: Building because toc changed
+189247 INFO: Building EXE from EXE-00.toc
+189268 INFO: Copying bootloader EXE to C:\Users\pribe\OneDrive\Documents\GitHub\GridLamEdit\dist\GridLamEdit_V12.exe
+189414 INFO: Copying icon to EXE
+189570 INFO: Copying 0 resources to EXE
+189570 INFO: Embedding manifest in EXE
+189687 INFO: Appending PKG archive to EXE
+189805 INFO: Fixing EXE headers
+193073 INFO: Building EXE from EXE-00.toc completed successfully.
+
+Build concluido. O executavel unico esta em dist\GridLamEdit.exe
