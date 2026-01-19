@@ -612,6 +612,7 @@ def load_grid_spreadsheet(path: str) -> GridModel:
 
     logger.info("Aba Planilha1 localizada - iniciando leitura.")
     df = _parse_sheet(workbook, "Planilha1")
+    df = _ensure_cells_separator_row(df, file_path, ext, sheet_name="Planilha1")
     df = df.dropna(how="all").reset_index(drop=True)
     if df.empty:
         raise ValueError("Planilha1 nAo contAm dados para importar.")
@@ -1591,6 +1592,161 @@ def _is_separator_token(value: object) -> bool:
     text = str(value).strip().lower()
     text = text.replace(" ", "")
     return text == "#"
+
+
+def _find_cells_header_row_unbounded(df: pd.DataFrame) -> Optional[int]:
+    normalized_aliases = {_normalize_header(alias) for alias in CELL_MAPPING_ALIASES}
+    for idx in range(len(df)):
+        row = df.iloc[idx]
+        for value in row:
+            if _is_blank(value):
+                continue
+            normalized = _normalize_header(str(value))
+            if normalized in normalized_aliases:
+                return idx
+            break
+    return None
+
+
+def _find_separator_insert_index(
+    df: pd.DataFrame,
+    cells_header_idx: int,
+) -> int:
+    normalized_config_tokens = {
+        _normalize_header("Name"),
+        _normalize_header("ColorIdx"),
+        _normalize_header("Type"),
+        _normalize_header("Stacking"),
+    }
+
+    header_row = df.iloc[cells_header_idx]
+    header_keys = [
+        _normalize_header(str(value)) if not _is_blank(value) else ""
+        for value in header_row
+    ]
+    cell_col = _find_column(header_keys, CELL_MAPPING_ALIASES)
+    if cell_col is None:
+        cell_col = 0
+
+    data_start = cells_header_idx + 1
+    for row_idx in range(data_start, len(df)):
+        row = df.iloc[row_idx]
+        if all(_is_blank(value) for value in row):
+            return row_idx
+
+        first_value = _first_non_blank_value(row)
+        if first_value is not None:
+            normalized = _normalize_header(first_value)
+            if normalized in normalized_config_tokens:
+                return row_idx
+
+        cell_value = row.iloc[cell_col] if cell_col < len(row) else None
+        if _is_blank(cell_value):
+            continue
+
+    return len(df)
+
+
+def _insert_separator_row(df: pd.DataFrame, insert_idx: int) -> pd.DataFrame:
+    col_count = df.shape[1] if df.shape[1] > 0 else 1
+    row_values = [None] * col_count
+    row_values[0] = "#"
+    separator_row = pd.DataFrame([row_values])
+    return (
+        pd.concat([df.iloc[:insert_idx], separator_row, df.iloc[insert_idx:]])
+        .reset_index(drop=True)
+    )
+
+
+def _write_separator_row_xlsx(
+    file_path: Path,
+    insert_idx: int,
+    sheet_name: str,
+) -> None:
+    from openpyxl import load_workbook
+
+    workbook = load_workbook(file_path)
+    if sheet_name not in workbook.sheetnames:
+        return
+    sheet = workbook[sheet_name]
+    insert_row = insert_idx + 1
+    sheet.insert_rows(insert_row)
+    sheet.cell(row=insert_row, column=1, value="#")
+    workbook.save(file_path)
+
+
+def _write_separator_row_xls(
+    file_path: Path,
+    insert_idx: int,
+    sheet_name: str,
+) -> None:
+    if xlrd is None:
+        raise ValueError("Leitura de arquivos .xls requer a dependAancia 'xlrd==1.2.0'.")
+    try:
+        import xlwt  # type: ignore
+    except ImportError as exc:  # pragma: no cover - dependAancia opcional
+        raise ValueError("Salvar correcoes em '.xls' requer a dependAancia 'xlwt'.") from exc
+
+    book = xlrd.open_workbook(file_path)  # type: ignore[arg-type]
+    sheet = book.sheet_by_name(sheet_name)
+    max_cols = sheet.ncols if sheet.ncols > 0 else 1
+
+    rows: list[list[object]] = []
+    for row_idx in range(sheet.nrows):
+        row_values = [sheet.cell_value(row_idx, col_idx) for col_idx in range(max_cols)]
+        rows.append(row_values)
+
+    new_row = [None] * max_cols
+    new_row[0] = "#"
+    if insert_idx >= len(rows):
+        rows.append(new_row)
+    else:
+        rows.insert(insert_idx, new_row)
+
+    wb_new = xlwt.Workbook()
+    ws_new = wb_new.add_sheet(sheet_name)
+    for r_idx, row in enumerate(rows):
+        for c_idx, value in enumerate(row):
+            ws_new.write(r_idx, c_idx, value)
+    wb_new.save(str(file_path))
+
+
+def _ensure_cells_separator_row(
+    df: pd.DataFrame,
+    file_path: Path,
+    ext: str,
+    *,
+    sheet_name: str,
+) -> pd.DataFrame:
+    separator_idx = _find_separator_row(df)
+    cells_header_idx = _find_cells_header_row_unbounded(df)
+    if cells_header_idx is None:
+        return df
+
+    insert_idx = _find_separator_insert_index(df, cells_header_idx)
+
+    if separator_idx is not None and cells_header_idx < separator_idx <= insert_idx:
+        return df
+
+    logger.info(
+        "Separador '#' ausente na secao 'Cells'. Inserindo na linha %d.",
+        insert_idx + 1,
+    )
+    updated = _insert_separator_row(df, insert_idx)
+
+    try:
+        if ext == ".xls":
+            _write_separator_row_xls(file_path, insert_idx, sheet_name)
+        else:
+            _write_separator_row_xlsx(file_path, insert_idx, sheet_name)
+    except Exception as exc:  # pragma: no cover - defesa
+        logger.warning(
+            "Nao foi possivel persistir o separador '#' em '%s': %s",
+            file_path,
+            exc,
+        )
+
+    return updated
 
 
 def _find_cells_header_row(df: pd.DataFrame, separator_idx: int) -> Optional[int]:
