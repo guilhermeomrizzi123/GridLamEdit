@@ -824,6 +824,7 @@ class VirtualStackingWindow(QtWidgets.QDialog):
         self._column_order_key = "virtual_stacking/column_order"
         self._warning_banner_icon = QtGui.QIcon()
         self.undo_stack = undo_stack or QtGui.QUndoStack(self)
+        self._neighbors_reorder_snapshot: Optional[dict] = None
 
         self._build_ui()
 
@@ -1258,7 +1259,8 @@ class VirtualStackingWindow(QtWidgets.QDialog):
         self.btn_reorganize_neighbors.setToolTip(
             "Reorders sequences based on neighborhood and symmetry rules"
         )
-        self.btn_reorganize_neighbors.clicked.connect(self.on_reorganizar_por_vizinhanca_clicked)
+        self.btn_reorganize_neighbors.setCheckable(True)
+        self.btn_reorganize_neighbors.toggled.connect(self._toggle_reorganizar_por_vizinhanca)
         toolbar.addWidget(self.btn_reorganize_neighbors)
 
         # Novo botão: analisar simetria
@@ -2324,8 +2326,8 @@ class VirtualStackingWindow(QtWidgets.QDialog):
     def _on_model_change(self, laminate_names: list[str]) -> None:
         self._notify_changes(laminate_names)
 
-    def _notify_changes(self, laminate_names: list[str]) -> None:
-        if self._project is not None:
+    def _notify_changes(self, laminate_names: list[str], *, mark_dirty: bool = True) -> None:
+        if mark_dirty and self._project is not None:
             try:
                 self._project.mark_dirty(True)
             except Exception:
@@ -2500,7 +2502,7 @@ class VirtualStackingWindow(QtWidgets.QDialog):
             "project": copy.deepcopy(self._project),
         }
 
-    def _restore_virtual_snapshot(self, snapshot: Optional[dict]) -> None:
+    def _restore_virtual_snapshot(self, snapshot: Optional[dict], *, keep_project_ref: bool = False) -> None:
         """Restore a previously captured snapshot (used by undo/redo)."""
         if snapshot is None:
             return
@@ -2516,7 +2518,13 @@ class VirtualStackingWindow(QtWidgets.QDialog):
         else:
             self._symmetry_rows = {symmetry_index}
             self._symmetry_row_index = symmetry_index
-        self._project = copy.deepcopy(snapshot.get("project"))
+        snapshot_project = snapshot.get("project")
+        if keep_project_ref and self._project is not None and snapshot_project is not None:
+            restored_project = copy.deepcopy(snapshot_project)
+            self._project.__dict__.clear()
+            self._project.__dict__.update(restored_project.__dict__)
+        else:
+            self._project = copy.deepcopy(snapshot_project)
         self._rebuild_view()
 
     def _push_virtual_snapshot(self) -> None:
@@ -2547,7 +2555,30 @@ class VirtualStackingWindow(QtWidgets.QDialog):
     # Reorganizar por vizinhança
     def on_reorganizar_por_vizinhanca_clicked(self) -> None:
         """Slot conectado ao botão da toolbar."""
-        self.reorganizar_por_vizinhanca()
+        if hasattr(self, "btn_reorganize_neighbors"):
+            self.btn_reorganize_neighbors.setChecked(
+                not self.btn_reorganize_neighbors.isChecked()
+            )
+        else:
+            self.reorganizar_por_vizinhanca()
+
+    def _toggle_reorganizar_por_vizinhanca(self, checked: bool) -> None:
+        if checked:
+            self._neighbors_reorder_snapshot = self._capture_virtual_snapshot()
+            applied = self.reorganizar_por_vizinhanca()
+            if not applied:
+                self._neighbors_reorder_snapshot = None
+                blocker = QtCore.QSignalBlocker(self.btn_reorganize_neighbors)
+                self.btn_reorganize_neighbors.setChecked(False)
+                del blocker
+            return
+
+        snapshot = self._neighbors_reorder_snapshot
+        self._neighbors_reorder_snapshot = None
+        if snapshot is not None:
+            self._restore_virtual_snapshot(snapshot, keep_project_ref=True)
+            laminate_names = [cell.laminate.nome for cell in self._cells]
+            self._notify_changes(laminate_names, mark_dirty=False)
 
     def _neighbors_adjacency(self) -> dict[str, set[str]]:
         """Converte o mapeamento de vizinhos do projeto em um grafo não direcionado."""
@@ -2861,10 +2892,10 @@ class VirtualStackingWindow(QtWidgets.QDialog):
 
         return result
 
-    def reorganizar_por_vizinhanca(self) -> None:
+    def reorganizar_por_vizinhanca(self) -> bool:
         """Aplica as regras de agrupamento por vizinhança e simetria."""
         if self._project is None or not self._cells:
-            return
+            return False
 
         adjacency = self._neighbors_adjacency()
         missing_cells = [cid for cid, neighbors in adjacency.items() if not neighbors]
@@ -2879,7 +2910,7 @@ class VirtualStackingWindow(QtWidgets.QDialog):
                     "Defina as vizinhanças dessas células antes de reordenar por vizinhança."
                 ),
             )
-            return
+            return False
         has_neighbors = any(neighbors for neighbors in adjacency.values())
         if not has_neighbors:
             QtWidgets.QMessageBox.information(
@@ -2887,7 +2918,7 @@ class VirtualStackingWindow(QtWidgets.QDialog):
                 "Reorder By Neighborhood",
                 "No neighbor cells are registered. Define cell neighbors before reorganizing by neighborhood.",
             )
-            return
+            return False
 
         passive_cells: set[str] = {cid for cid, neighbors in adjacency.items() if not neighbors}
 
@@ -2974,6 +3005,7 @@ class VirtualStackingWindow(QtWidgets.QDialog):
 
         self._apply_virtual_rows_to_laminates(final_rows)
         self._notify_changes([cell.laminate.nome for cell in self._cells])
+        return True
 
     # ---------------------------------------------------------------
     # Nova funcionalidade: analisar simetria
