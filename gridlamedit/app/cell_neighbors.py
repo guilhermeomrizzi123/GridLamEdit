@@ -19,7 +19,7 @@ import re
 from dataclasses import dataclass
 from typing import Dict, Optional, Tuple
 
-from PySide6.QtCore import QPointF, QRectF, Qt, QSize, QLineF
+from PySide6.QtCore import QPointF, QRectF, Qt, QSize, QLineF, QSignalBlocker
 from PySide6.QtGui import QColor, QFont, QPainterPath, QPen, QAction, QUndoStack, QUndoCommand, QLinearGradient, QRadialGradient, QBrush, QIcon, QPainter
 from PySide6.QtWidgets import (
     QDialog,
@@ -823,6 +823,7 @@ class CellNeighborsWindow(QDialog):
         self._undo_stack = QUndoStack(self)
         self._undo_stack.setUndoLimit(3)
         self._has_unsaved_changes = False
+        self._virtual_stacking_proxy = None
 
         # Main layout
         main_layout = QVBoxLayout(self)
@@ -856,6 +857,15 @@ class CellNeighborsWindow(QDialog):
         self.sequence_combo.addItem("Nenhuma")  # index 0 => no colouring
         self.sequence_combo.currentIndexChanged.connect(self._on_sequence_changed)
         toolbar.addWidget(self.sequence_combo)
+
+        # Reorder by neighborhood (same behavior as Virtual Stacking)
+        self.reorder_neighbors_button = QPushButton("Reorder by Neighborhood", self)
+        self.reorder_neighbors_button.setCheckable(True)
+        self.reorder_neighbors_button.setToolTip(
+            "Reorders sequences based on neighborhood and symmetry rules"
+        )
+        self.reorder_neighbors_button.toggled.connect(self._on_reorder_neighbors_toggle)
+        toolbar.addWidget(self.reorder_neighbors_button)
 
         # AML type highlight toggle
         self.aml_toggle_button = QPushButton("Tipo AML", self)
@@ -1311,6 +1321,60 @@ class CellNeighborsWindow(QDialog):
         else:
             self._current_sequence_index = combo_index  # 1-based sequence
         self.update_cell_colors_for_sequence(self._current_sequence_index)
+
+    def _ensure_virtual_stacking_window(self):
+        parent = self.parent()
+        window = None
+        if parent is not None and hasattr(parent, "_virtual_stacking_window"):
+            window = getattr(parent, "_virtual_stacking_window", None)
+            if window is None:
+                try:
+                    undo_stack = getattr(parent, "undo_stack", None)
+                except Exception:
+                    undo_stack = None
+                from gridlamedit.app.virtualstacking import VirtualStackingWindow
+
+                window = VirtualStackingWindow(parent, undo_stack=undo_stack)
+                setattr(parent, "_virtual_stacking_window", window)
+
+        if window is None:
+            if self._virtual_stacking_proxy is None:
+                from gridlamedit.app.virtualstacking import VirtualStackingWindow
+
+                self._virtual_stacking_proxy = VirtualStackingWindow(self)
+            window = self._virtual_stacking_proxy
+
+        if self._model is not None:
+            try:
+                if getattr(window, "_project", None) is not self._model:
+                    window.populate_from_project(self._model)
+            except Exception:
+                window.populate_from_project(self._model)
+
+        return window
+
+    def _on_reorder_neighbors_toggle(self, checked: bool) -> None:
+        window = self._ensure_virtual_stacking_window()
+        if window is None:
+            return
+
+        if hasattr(window, "btn_reorganize_neighbors"):
+            blocker = QSignalBlocker(window.btn_reorganize_neighbors)
+            window.btn_reorganize_neighbors.setChecked(checked)
+            del blocker
+
+        window._toggle_reorganizar_por_vizinhanca(checked)
+
+        actual_checked = checked
+        if hasattr(window, "btn_reorganize_neighbors"):
+            actual_checked = window.btn_reorganize_neighbors.isChecked()
+        else:
+            actual_checked = bool(getattr(window, "_neighbors_reorder_snapshot", None))
+
+        if actual_checked != checked:
+            blocker = QSignalBlocker(self.reorder_neighbors_button)
+            self.reorder_neighbors_button.setChecked(actual_checked)
+            del blocker
 
     def _on_aml_toggle(self, enabled: bool) -> None:
         if enabled:
