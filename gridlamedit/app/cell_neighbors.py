@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from typing import Dict, Optional, Tuple
 
 from PySide6.QtCore import QPointF, QRectF, Qt, QSize, QLineF, QSignalBlocker
-from PySide6.QtGui import QColor, QFont, QPainterPath, QPen, QAction, QUndoStack, QUndoCommand, QLinearGradient, QRadialGradient, QBrush, QIcon, QPainter
+from PySide6.QtGui import QColor, QFont, QPainterPath, QPen, QAction, QUndoStack, QUndoCommand, QLinearGradient, QRadialGradient, QBrush, QIcon, QPainter, QTextOption
 from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
@@ -81,6 +81,7 @@ CELL_SIZE = 80.0
 PLUS_SIZE = 20.0
 GAP = 28.0
 MARGIN = 24.0
+SCENE_PAN_MARGIN = 3000.0
 
 # Technical grayscale palette
 COLOR_BG = QColor(248, 249, 250)  # Clean light gray
@@ -499,12 +500,15 @@ class CellNodeItem(QGraphicsRectItem):
         # Hover events disabled to preserve orientation colors
         self.setAcceptHoverEvents(False)
         
-        self._label = QGraphicsSimpleTextItem("Select\nCell", self)
+        self._label = QGraphicsTextItem("Select\nCell", self)
         f: QFont = self._label.font()
         f.setBold(True)
         f.setPointSize(f.pointSize() + 2)
         self._label.setFont(f)
-        self._label.setBrush(COLOR_TEXT)
+        self._label.setDefaultTextColor(COLOR_TEXT)
+        text_option = self._label.document().defaultTextOption()
+        text_option.setAlignment(Qt.AlignCenter)
+        self._label.document().setDefaultTextOption(text_option)
         # Laminate name label (smaller, below cell id)
         self._laminate_label = QGraphicsSimpleTextItem("", self)
         lf: QFont = self._laminate_label.font()
@@ -546,7 +550,7 @@ class CellNodeItem(QGraphicsRectItem):
         self._create_plus_buttons()
 
     def set_text(self, text: str) -> None:
-        self._label.setText(text)
+        self._label.setPlainText(text)
         self._recenter_label()
 
     def set_laminate_text(self, text: str) -> None:
@@ -604,6 +608,7 @@ class CellNodeItem(QGraphicsRectItem):
 
     def _recenter_label(self) -> None:
         rect = self.rect()
+        self._label.setTextWidth(rect.width())
         tb = self._label.boundingRect()
         lam_text = self._laminate_label.text()
         spacing = 2.0
@@ -613,7 +618,7 @@ class CellNodeItem(QGraphicsRectItem):
             total_h = tb.height() + spacing + lb.height()
             start_y = rect.y() + (rect.height() - total_h) / 2
             self._label.setPos(
-                rect.x() + (rect.width() - tb.width()) / 2,
+                rect.x(),
                 start_y,
             )
             self._laminate_label.setPos(
@@ -623,7 +628,7 @@ class CellNodeItem(QGraphicsRectItem):
         else:
             self._laminate_label.setVisible(False)
             self._label.setPos(
-                rect.x() + (rect.width() - tb.width()) / 2,
+                rect.x(),
                 rect.y() + (rect.height() - tb.height()) / 2,
             )
         ob = self._orientation_label.boundingRect()
@@ -685,7 +690,7 @@ class CellNodeItem(QGraphicsRectItem):
         light = QColor(248, 249, 250)
         dark = QColor(33, 37, 41)
         chosen = light if luminance < 150 else dark
-        self._label.setBrush(chosen)
+        self._label.setDefaultTextColor(chosen)
         self._orientation_label.setBrush(chosen)
         self._aml_label.setBrush(chosen)
         self._laminate_label.setBrush(chosen)
@@ -1629,7 +1634,7 @@ class CellNeighborsWindow(QDialog):
             max_y = max(max_y, rect.bottom())
         
         # Add margin for plus buttons and safety space (100px on each side)
-        margin = 100.0
+        margin = 100.0 + SCENE_PAN_MARGIN
         new_rect = QRectF(
             min_x - margin,
             min_y - margin,
