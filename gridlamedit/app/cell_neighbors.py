@@ -539,6 +539,13 @@ class CellNodeItem(QGraphicsRectItem):
             label.setBrush(COLOR_CONTOUR_TEXT)
             label.setVisible(False)
             self._contour_labels[key] = label
+        self._contour_text_values: dict[str, str] = {
+            "top": "",
+            "right": "",
+            "bottom": "",
+            "left": "",
+        }
+        self._contour_suppressed: set[str] = set()
         self._recenter_label()
         self.on_select_cell = None
         self.on_add_neighbor = None
@@ -569,8 +576,16 @@ class CellNodeItem(QGraphicsRectItem):
             if not label:
                 continue
             text = (value or "").strip()
+            self._contour_text_values[key] = text
             label.setText(text)
-            label.setVisible(bool(text))
+            label.setVisible(bool(text) and key not in self._contour_suppressed)
+        self._recenter_label()
+
+    def set_contour_suppressed(self, directions: set[str]) -> None:
+        self._contour_suppressed = set(directions or set())
+        for key, label in self._contour_labels.items():
+            text = self._contour_text_values.get(key, "")
+            label.setVisible(bool(text) and key not in self._contour_suppressed)
         self._recenter_label()
 
     def paint(self, painter, option, widget=None):
@@ -2875,14 +2890,27 @@ class CellNeighborsWindow(QDialog):
             # No cell assigned yet, show all plus buttons
             for dir_name in DIR_OFFSETS.keys():
                 record.item.set_neighbor(dir_name, None)
+            record.item.set_contour_suppressed(set())
             return
         
+        suppressed: set[str] = set()
+        dir_to_contour = {
+            "up": "top",
+            "down": "bottom",
+            "left": "left",
+            "right": "right",
+        }
         for dir_name, (dx, dy) in DIR_OFFSETS.items():
             neighbor_pos = (record.grid_pos[0] + dx, record.grid_pos[1] + dy)
             neighbor_rec = self._nodes_by_grid.get(neighbor_pos)
             has_connection = self._has_grid_connection(record, dir_name)
             neighbor_id = neighbor_rec.cell_id if (has_connection and neighbor_rec and neighbor_rec.cell_id) else None
             record.item.set_neighbor(dir_name, neighbor_id)
+            if neighbor_id and neighbor_id == record.cell_id:
+                contour_side = dir_to_contour.get(dir_name)
+                if contour_side:
+                    suppressed.add(contour_side)
+        record.item.set_contour_suppressed(suppressed)
 
 
 class SelectCellDialog(QDialog):
