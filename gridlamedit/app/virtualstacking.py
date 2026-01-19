@@ -2782,11 +2782,36 @@ class VirtualStackingWindow(QtWidgets.QDialog):
                 new_layers_by_cell.setdefault(cid, []).append(layer)
         for cell in self._cells:
             layers = new_layers_by_cell.get(cell.cell_id, [])
+            self._sync_sequence_and_ply_labels(layers)
             cell.laminate.camadas = layers
             model = self._stacking_model_for(cell.laminate)
             if model is not None:
                 model.update_layers(copy.deepcopy(layers))
             self._after_laminate_changed(cell.laminate)
+
+    def _sync_sequence_and_ply_labels(self, layers: list[Camada]) -> None:
+        if not layers:
+            return
+        seq_prefix, seq_sep = self._label_prefix_and_separator(layers, "sequence", "Seq")
+        ply_prefix, ply_sep = self._label_prefix_and_separator(layers, "ply_label", "Ply")
+        for idx, layer in enumerate(layers):
+            layer.sequence = f"{seq_prefix}{seq_sep}{idx + 1}"
+            layer.ply_label = f"{ply_prefix}{ply_sep}{idx + 1}"
+
+    def _label_prefix_and_separator(
+        self,
+        layers: list[Camada],
+        attr: str,
+        default_prefix: str,
+    ) -> tuple[str, str]:
+        for layer in layers:
+            text = str(getattr(layer, attr, "") or "").strip()
+            match = _PREFIX_NUMBER_PATTERN.fullmatch(text)
+            if match:
+                prefix = match.group(1) or default_prefix
+                separator = "." if "." in text else ""
+                return prefix, separator
+        return default_prefix, "."
 
     def _split_center_row_groups(
         self,
