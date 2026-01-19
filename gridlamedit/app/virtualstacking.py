@@ -1248,6 +1248,7 @@ class VirtualStackingWindow(QtWidgets.QDialog):
         self.btn_export_virtual.setToolTip(
             "Exporta a planilha no formato do template Grid Lam Vs Exported_RevC.xls para importacao no CATIA."
         )
+        self.btn_export_virtual.setEnabled(False)
         self.btn_export_virtual.clicked.connect(self._export_virtual_stacking)
         toolbar.addWidget(self.btn_export_virtual)
 
@@ -1297,6 +1298,13 @@ class VirtualStackingWindow(QtWidgets.QDialog):
         return str(Path.home() / "Grid Lam Vs Exported_RevC.xls")
 
     def _export_virtual_stacking(self) -> None:
+        if hasattr(self, "btn_reorganize_neighbors") and not self.btn_reorganize_neighbors.isChecked():
+            QtWidgets.QMessageBox.information(
+                self,
+                "Export Virtual Stacking",
+                "Selecione 'Reorder by Neighborhood' para habilitar a exportacao.",
+            )
+            return
         if self._project is None or not getattr(self._project, "celulas_ordenadas", []):
             QtWidgets.QMessageBox.information(
                 self,
@@ -2571,6 +2579,11 @@ class VirtualStackingWindow(QtWidgets.QDialog):
                 blocker = QtCore.QSignalBlocker(self.btn_reorganize_neighbors)
                 self.btn_reorganize_neighbors.setChecked(False)
                 del blocker
+                if hasattr(self, "btn_export_virtual"):
+                    self.btn_export_virtual.setEnabled(False)
+            else:
+                if hasattr(self, "btn_export_virtual"):
+                    self.btn_export_virtual.setEnabled(True)
             return
 
         snapshot = self._neighbors_reorder_snapshot
@@ -2579,6 +2592,8 @@ class VirtualStackingWindow(QtWidgets.QDialog):
             self._restore_virtual_snapshot(snapshot, keep_project_ref=True)
             laminate_names = [cell.laminate.nome for cell in self._cells]
             self._notify_changes(laminate_names, mark_dirty=False)
+        if hasattr(self, "btn_export_virtual"):
+            self.btn_export_virtual.setEnabled(False)
 
     def _neighbors_adjacency(self) -> dict[str, set[str]]:
         """Converte o mapeamento de vizinhos do projeto em um grafo não direcionado."""
