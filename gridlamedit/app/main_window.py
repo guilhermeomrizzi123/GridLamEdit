@@ -79,6 +79,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from gridlamedit import APP_NAME, __version__, __version_date__, __contact__
 from gridlamedit.app.delegates import (
     CenteredCheckBoxDelegate,
     MaterialComboDelegate,
@@ -483,6 +484,13 @@ class MainWindow(QMainWindow):
                 "Close the application.",
                 QKeySequence.Quit,
             ),
+            (
+                "about_action",
+                "About",
+                self._show_about_dialog,
+                "About GridLamEdit.",
+                None,
+            ),
         ]
 
         for attr_name, text, handler, tip, shortcut in action_specs:
@@ -513,6 +521,18 @@ class MainWindow(QMainWindow):
         tools_menu.addSeparator()
         tools_menu.addAction(self.register_material_action)
         tools_menu.addAction(self.batch_import_action)
+
+        help_menu = menu_bar.addMenu("Help")
+        help_menu.addAction(self.about_action)
+
+    def _show_about_dialog(self) -> None:
+        text = (
+            f"{APP_NAME}\n\n"
+            f"Versao: {__version__}\n"
+            f"Data do versionamento: {__version_date__}\n\n"
+            f"Contato para duvidas e sugestoes:\n{__contact__}"
+        )
+        QMessageBox.information(self, "About", text)
 
     def open_virtual_stacking(self) -> None:
         """Open the Virtual Stacking dialog populated with the current project."""
