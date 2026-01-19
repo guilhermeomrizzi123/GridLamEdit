@@ -1305,6 +1305,25 @@ class CellNeighborsWindow(QDialog):
             self.update_cell_colors_for_sequence(None)
         self._update_command_buttons()
 
+    def _refresh_sequence_combo_preserve_selection(self) -> None:
+        """Refresh sequence options after model changes, keeping selection when possible."""
+        if not hasattr(self, "sequence_combo"):
+            return
+        previous_index = self.sequence_combo.currentIndex()
+        previous_text = self.sequence_combo.currentText()
+        self._populate_sequence_combo()
+
+        if self._aml_highlight_enabled:
+            return
+
+        if previous_index <= 0:
+            return
+
+        for idx in range(1, self.sequence_combo.count()):
+            if self.sequence_combo.itemText(idx) == previous_text:
+                self.sequence_combo.setCurrentIndex(idx)
+                break
+
     def _on_sequence_changed(self, combo_index: int) -> None:
         """Handle combo change: index 0 => no sequence colouring, else 1-based sequence number."""
         if self._aml_highlight_enabled:
@@ -1375,6 +1394,8 @@ class CellNeighborsWindow(QDialog):
             blocker = QSignalBlocker(self.reorder_neighbors_button)
             self.reorder_neighbors_button.setChecked(actual_checked)
             del blocker
+
+        self._refresh_sequence_combo_preserve_selection()
 
     def _on_aml_toggle(self, enabled: bool) -> None:
         if enabled:
