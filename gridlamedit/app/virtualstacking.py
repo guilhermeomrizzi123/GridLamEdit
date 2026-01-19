@@ -3069,6 +3069,12 @@ class VirtualStackingWindow(QtWidgets.QDialog):
             self.model.dataChanged.emit(top_left, bottom_right, [ORIENTATION_SYMMETRY_ROLE])
 
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:  # noqa: N802
+        if hasattr(self, "btn_reorganize_neighbors"):
+            if self.btn_reorganize_neighbors.isChecked() or self._neighbors_reorder_snapshot is not None:
+                self._toggle_reorganizar_por_vizinhanca(False)
+                blocker = QtCore.QSignalBlocker(self.btn_reorganize_neighbors)
+                self.btn_reorganize_neighbors.setChecked(False)
+                del blocker
         super().closeEvent(event)
         try:
             self.persist_column_order()
