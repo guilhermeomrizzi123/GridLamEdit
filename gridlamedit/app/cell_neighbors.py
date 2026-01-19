@@ -92,6 +92,8 @@ COLOR_CELL_BORDER = QColor(108, 117, 125)  # Steel gray border
 COLOR_TEXT = QColor(248, 249, 250)  # Light gray text
 COLOR_PLUS = QColor(108, 117, 125)  # Steel gray
 COLOR_PLUS_HOVER = QColor(173, 181, 189)  # Light steel on hover
+COLOR_PLUS_SUGGEST = QColor(170, 225, 185)  # Light green for suggested neighbor
+COLOR_PLUS_SUGGEST_HOVER = QColor(145, 205, 165)  # Slightly darker on hover
 COLOR_DASH = QColor(134, 142, 150)  # Medium steel gray lines
 COLOR_CENTER_BORDER = QColor(250, 128, 114)  # Salmon highlight for central sequences
 COLOR_CONTOUR_TEXT = QColor(55, 65, 81)  # Dark gray for contour labels
@@ -385,8 +387,14 @@ class PlusButtonItem(QGraphicsRectItem):
         self.setAcceptHoverEvents(True)
         
         # Create circular appearance with rounded rect
-        self._original_brush = QBrush(COLOR_PLUS)
-        self._hover_brush = QBrush(COLOR_PLUS_HOVER)
+        self._default_brush = QBrush(COLOR_PLUS)
+        self._default_hover_brush = QBrush(COLOR_PLUS_HOVER)
+        self._suggested_brush = QBrush(COLOR_PLUS_SUGGEST)
+        self._suggested_hover_brush = QBrush(COLOR_PLUS_SUGGEST_HOVER)
+        self._original_brush = self._default_brush
+        self._hover_brush = self._default_hover_brush
+        self._is_hovered = False
+        self._is_suggested = False
         self.setBrush(self._original_brush)
         
         # Modern border
@@ -418,12 +426,26 @@ class PlusButtonItem(QGraphicsRectItem):
         painter.drawEllipse(self.rect())
 
     def hoverEnterEvent(self, event):  # noqa: N802
+        self._is_hovered = True
         self.setBrush(self._hover_brush)
         super().hoverEnterEvent(event)
 
     def hoverLeaveEvent(self, event):  # noqa: N802
+        self._is_hovered = False
         self.setBrush(self._original_brush)
         super().hoverLeaveEvent(event)
+
+    def set_suggested(self, suggested: bool) -> None:
+        if self._is_suggested == suggested:
+            return
+        self._is_suggested = suggested
+        if suggested:
+            self._original_brush = self._suggested_brush
+            self._hover_brush = self._suggested_hover_brush
+        else:
+            self._original_brush = self._default_brush
+            self._hover_brush = self._default_hover_brush
+        self.setBrush(self._hover_brush if self._is_hovered else self._original_brush)
 
     # Use mousePress to emulate a simple button
     def mousePressEvent(self, event):  # noqa: N802
@@ -1709,6 +1731,7 @@ class CellNeighborsWindow(QDialog):
                     btn = record.item.plus_items.get(direction)
                     line = record.item.plus_lines.get(direction)
                     if btn:
+                        btn.set_suggested(False)
                         btn.setVisible(has_available)
                     if line:
                         line.setVisible(has_available)
@@ -1718,6 +1741,13 @@ class CellNeighborsWindow(QDialog):
                     has_neighbor = self._has_grid_connection(record, direction)
                     btn = record.item.plus_items.get(direction)
                     line = record.item.plus_lines.get(direction)
+                    if btn:
+                        preferred_cells = self._build_preferred_neighbor_cells(
+                            record.cell_id,
+                            direction,
+                            list(self._cells),
+                        )
+                        btn.set_suggested(bool(preferred_cells))
                     
                     if has_neighbor:
                         # Has neighbor - hide button
