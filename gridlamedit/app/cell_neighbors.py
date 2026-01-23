@@ -1180,12 +1180,28 @@ class CellNeighborsWindow(QDialog):
             return
         
         # Ensure reorder toggle is off before closing
-        if self.reorder_neighbors_button.isChecked():
-            self.reorder_neighbors_button.setChecked(False)
+        self._ensure_reorder_neighbors_off()
 
         # Clear highlights and proceed with close
         self._clear_disconnected_highlights()
         event.accept()
+
+    def hideEvent(self, event) -> None:
+        """Ensure transient toggles are disabled when the window is hidden."""
+        self._ensure_reorder_neighbors_off()
+        super().hideEvent(event)
+
+    def reject(self) -> None:
+        """Handle dialog rejection (Esc/Close) consistently with closeEvent."""
+        if not self._check_and_handle_disconnected_blocks():
+            return
+        self._ensure_reorder_neighbors_off()
+        self._clear_disconnected_highlights()
+        super().reject()
+
+    def _ensure_reorder_neighbors_off(self) -> None:
+        if self.reorder_neighbors_button.isChecked():
+            self.reorder_neighbors_button.setChecked(False)
 
     # -------- Public API ---------
     def populate_from_project(self, model: Optional[GridModel], project_manager=None) -> None:
