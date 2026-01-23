@@ -1113,6 +1113,140 @@ class CellNeighborsWindow(QDialog):
         if target is not None:
             self._undo_stack.push(RemoveDrawingItemCommand(self, target, "Remover desenho"))
 
+    def _clear_drawing_items(self) -> None:
+        """Remove all drawing annotation items from the scene."""
+        items = list(self.scene.items())
+        targets: set[QGraphicsItem] = set()
+        for item in items:
+            if item.data(DRAWING_ITEM_ROLE) == DRAWING_ITEM_TAG:
+                targets.add(item)
+                continue
+            parent = item.parentItem()
+            if parent is not None and parent.data(DRAWING_ITEM_ROLE) == DRAWING_ITEM_TAG:
+                targets.add(parent)
+        for item in targets:
+            try:
+                self.scene.removeItem(item)
+            except Exception:
+                continue
+
+    def _build_drawing_payload(self) -> list[dict[str, object]]:
+        """Serialize drawing annotations (lines and text boxes) in the scene."""
+        payload: list[dict[str, object]] = []
+        for item in self.scene.items():
+            if item.data(DRAWING_ITEM_ROLE) != DRAWING_ITEM_TAG:
+                continue
+            if isinstance(item, QGraphicsLineItem):
+                line = item.line()
+                p1 = item.mapToScene(line.p1())
+                p2 = item.mapToScene(line.p2())
+                pen = item.pen()
+                payload.append(
+                    {
+                        "type": "line",
+                        "p1": [p1.x(), p1.y()],
+                        "p2": [p2.x(), p2.y()],
+                        "color": pen.color().name(),
+                        "width": pen.widthF(),
+                    }
+                )
+            elif isinstance(item, QGraphicsRectItem):
+                rect = item.rect()
+                pos = item.pos()
+                text_value = ""
+                font_size = None
+                text_color = None
+                for child in item.childItems():
+                    if isinstance(child, QGraphicsTextItem):
+                        text_value = child.toPlainText()
+                        font_size = child.font().pointSizeF()
+                        text_color = child.defaultTextColor().name()
+                        break
+                payload.append(
+                    {
+                        "type": "text",
+                        "pos": [pos.x(), pos.y()],
+                        "size": [rect.width(), rect.height()],
+                        "text": text_value,
+                        "font_size": font_size,
+                        "text_color": text_color,
+                    }
+                )
+        return payload
+
+    def _restore_drawings_from_payload(self, payload: list[dict[str, object]]) -> None:
+        """Restore drawing annotations from serialized payload."""
+        self._clear_drawing_items()
+        if not payload:
+            return
+        for entry in payload:
+            if not isinstance(entry, dict):
+                continue
+            item_type = entry.get("type")
+            if item_type == "line":
+                p1_raw = entry.get("p1", [0.0, 0.0])
+                p2_raw = entry.get("p2", [0.0, 0.0])
+                try:
+                    p1 = QPointF(float(p1_raw[0]), float(p1_raw[1]))
+                    p2 = QPointF(float(p2_raw[0]), float(p2_raw[1]))
+                except Exception:
+                    continue
+                line_item = DrawingLineItem(QLineF(p1, p2))
+                color_value = entry.get("color")
+                width_value = entry.get("width")
+                pen = QPen(DRAW_LINE_PEN)
+                if color_value:
+                    try:
+                        pen.setColor(QColor(str(color_value)))
+                    except Exception:
+                        pass
+                try:
+                    pen.setWidthF(float(width_value))
+                except Exception:
+                    pass
+                line_item.setPen(pen)
+                line_item.setZValue(0.5)
+                self.scene.addItem(line_item)
+            elif item_type == "text":
+                pos_raw = entry.get("pos", [0.0, 0.0])
+                size_raw = entry.get("size", [0.0, 0.0])
+                try:
+                    pos = QPointF(float(pos_raw[0]), float(pos_raw[1]))
+                    width = float(size_raw[0])
+                    height = float(size_raw[1])
+                except Exception:
+                    continue
+                text_value = str(entry.get("text", "") or "")
+                rect_item = TextBoxItem(QRectF(0, 0, width, height))
+                rect_item.setBrush(QColor(255, 255, 255, 230))
+                rect_item.setPen(QPen(QColor(120, 120, 120), 1))
+                rect_item.setZValue(1)
+
+                text_item = QGraphicsTextItem(text_value)
+                text_item.setTextInteractionFlags(Qt.NoTextInteraction)
+                if entry.get("text_color"):
+                    try:
+                        text_item.setDefaultTextColor(QColor(str(entry.get("text_color"))))
+                    except Exception:
+                        text_item.setDefaultTextColor(QColor(33, 37, 41))
+                else:
+                    text_item.setDefaultTextColor(QColor(33, 37, 41))
+                font = text_item.font()
+                if entry.get("font_size"):
+                    try:
+                        font.setPointSizeF(float(entry.get("font_size")))
+                    except Exception:
+                        pass
+                else:
+                    font.setPointSize(max(9, font.pointSize()))
+                text_item.setFont(font)
+                text_item.setParentItem(rect_item)
+                padding = 6
+                text_item.setPos(padding, padding)
+
+                rect_item.setPos(pos)
+                self.scene.addItem(rect_item)
+
     def eventFilter(self, obj, event):
         from PySide6.QtCore import QEvent
         from PySide6.QtGui import QWheelEvent, QMouseEvent
@@ -1233,6 +1367,10 @@ class CellNeighborsWindow(QDialog):
                     self._neighbors = self._convert_legacy_neighbors(existing_neighbors)
                     # Rebuild the visual graph from saved neighbors
                     self._rebuild_graph_from_neighbors()
+            drawing_payload = list(getattr(model, "cell_neighbor_drawings", []) or [])
+            self._restore_drawings_from_payload(drawing_payload)
+        else:
+            self._clear_drawing_items()
         self._cells = cells
         # Refresh cell labels/laminate tags using latest model data
         for rec in self._nodes_by_grid.values():
@@ -1657,6 +1795,7 @@ class CellNeighborsWindow(QDialog):
         
         if self._model is not None:
             self._model.cell_neighbor_nodes = self._build_neighbor_nodes_payload()
+            self._model.cell_neighbor_drawings = self._build_drawing_payload()
             self._model.cell_neighbors = self.get_neighbors_mapping()
             if self._project_manager is not None:
                 try:

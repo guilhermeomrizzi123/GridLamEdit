@@ -379,6 +379,8 @@ class GridModel:
     cell_contours: Dict[str, list[str]] = field(default_factory=dict)
     # Lista detalhada de instâncias (posicionadas) usadas na tela de vizinhanças.
     cell_neighbor_nodes: list[dict[str, object]] = field(default_factory=list)
+    # Anotações desenhadas na janela de vizinhanças (linhas e textos).
+    cell_neighbor_drawings: list[dict[str, object]] = field(default_factory=list)
     # Usamos listas para permitir múltiplas conexões por direção; leitura continua aceitando o formato legado
     cell_neighbors: Dict[str, Dict[str, list[str]]] = field(default_factory=dict)
     compat_warnings: list[str] = field(default_factory=list)

@@ -80,6 +80,7 @@ def _serialize_model(model: GridModel) -> dict:
         "cell_contours": dict(getattr(model, "cell_contours", {})),
         # Grafo detalhado com posições (compatível com múltiplas instâncias da mesma célula)
         "cell_neighbor_nodes": list(getattr(model, "cell_neighbor_nodes", [])),
+        "cell_neighbor_drawings": list(getattr(model, "cell_neighbor_drawings", [])),
         "cell_neighbors": dict(getattr(model, "cell_neighbors", {})),
         "laminados": laminates_data,
         "source_excel_path": getattr(model, "source_excel_path", None),
@@ -92,6 +93,7 @@ def _deserialize_model(data: dict) -> GridModel:
     model.cell_to_laminate = dict(data.get("cell_to_laminate", {}))
     model.cell_contours = dict(data.get("cell_contours", {}))
     model.cell_neighbor_nodes = list(data.get("cell_neighbor_nodes", []))
+    model.cell_neighbor_drawings = list(data.get("cell_neighbor_drawings", []))
     model.cell_neighbors = dict(data.get("cell_neighbors", {}))
     model.source_excel_path = data.get("source_excel_path")
 
