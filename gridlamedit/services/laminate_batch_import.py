@@ -61,6 +61,53 @@ def _truthy(value: object) -> bool:
     return token in {"y", "yes", "sim", "s", "true", "1"}
 
 
+def _column_has_orientation_data(series: pd.Series) -> bool:
+    for value in series:
+        if _is_blank(value) or _is_empty_token(value):
+            continue
+        return True
+    return False
+
+
+def _build_orientation_columns(
+    df: pd.DataFrame,
+    *,
+    tag_col: Optional[object],
+    symmetry_col: Optional[object],
+    center_col: Optional[object],
+) -> list[tuple[int, object]]:
+    columns = list(df.columns)
+    normalized_headers = [str(col).strip() for col in columns]
+
+    numeric_header_indices: list[int] = []
+    for idx, header in enumerate(normalized_headers):
+        if header.isdigit():
+            numeric_header_indices.append(idx)
+
+    if numeric_header_indices:
+        orientation_start_idx = min(numeric_header_indices)
+    else:
+        metadata_indices: list[int] = []
+        for key in (tag_col, symmetry_col, center_col):
+            if key is None:
+                continue
+            try:
+                metadata_indices.append(columns.index(key))
+            except ValueError:
+                continue
+        orientation_start_idx = max(metadata_indices, default=-1) + 1
+
+    orientation_candidates: list[tuple[int, object]] = []
+    for idx, col in enumerate(columns):
+        if idx < orientation_start_idx:
+            continue
+        header = normalized_headers[idx]
+        if header.isdigit() or _column_has_orientation_data(df[col]):
+            orientation_candidates.append((idx, col))
+
+    return [(seq, col) for seq, (_, col) in enumerate(orientation_candidates, start=1)]
+
+
 def create_blank_batch_template(
     source_path: Path,
     *,
@@ -138,15 +185,17 @@ def parse_batch_template(
             center_col = original
             break
 
-    orientation_cols: list[tuple[int, object]] = []
-    for col in df.columns:
-        text = str(col).strip()
-        if text.isdigit():
-            orientation_cols.append((int(text), col))
-    orientation_cols.sort(key=lambda item: item[0])
+    orientation_cols = _build_orientation_columns(
+        df,
+        tag_col=tag_col,
+        symmetry_col=symmetry_col,
+        center_col=center_col,
+    )
 
     if not orientation_cols:
-        raise ValueError("Nenhuma coluna numerica de sequencia encontrada no template.")
+        raise ValueError(
+            "Nenhuma coluna de orientacao encontrada no template (headers ou dados ausentes)."
+        )
 
     laminates: list[BatchLaminateInput] = []
     for idx, row in df.iterrows():
