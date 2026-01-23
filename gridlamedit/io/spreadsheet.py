@@ -606,22 +606,33 @@ def load_grid_spreadsheet(path: str) -> GridModel:
         raise ValueError("Formato de planilha nAo suportado (use .xls ou .xlsx).")
 
     workbook = _open_workbook(file_path, ext)
-    if "Planilha1" not in workbook.sheet_names:
-        logger.error("Aba Planilha1 ausente.")
-        raise ValueError(
-            "A planilha deve conter a aba 'Planilha1' no formato exportado pelo Grid Design."
-        )
+    last_error: Optional[Exception] = None
+    for sheet_name in _iter_grid_sheet_candidates(workbook):
+        logger.info("Tentando ler aba '%s' do grid.", sheet_name)
+        try:
+            df = _parse_sheet(workbook, sheet_name)
+            df = _ensure_cells_separator_row(df, file_path, ext, sheet_name=sheet_name)
+            df = df.dropna(how="all").reset_index(drop=True)
+            if df.empty:
+                raise ValueError(
+                    f"Aba '{sheet_name}' nao contem dados para importar."
+                )
 
-    logger.info("Aba Planilha1 localizada - iniciando leitura.")
-    df = _parse_sheet(workbook, "Planilha1")
-    df = _ensure_cells_separator_row(df, file_path, ext, sheet_name="Planilha1")
-    df = df.dropna(how="all").reset_index(drop=True)
-    if df.empty:
-        raise ValueError("Planilha1 nAo contAm dados para importar.")
+            # Extrai celulas e mapeamento utilizando a nova funcao pAoblica.
+            celulas_ordenadas = parse_cells_from_planilha1(
+                df, sheet_name=sheet_name
+            )
+            cells_info = _extract_cells_section(df, sheet_name=sheet_name)
+        except ValueError as exc:
+            last_error = exc
+            logger.debug("Falha ao processar aba '%s': %s", sheet_name, exc)
+            continue
+        break
+    else:
+        if last_error is not None:
+            raise last_error
+        raise ValueError("Nao foi possivel localizar uma aba valida para importar.")
 
-    # Extrai celulas e mapeamento utilizando a nova funcao pAoblica.
-    celulas_ordenadas = parse_cells_from_planilha1(df)
-    cells_info = _extract_cells_section(df)
     cell_to_laminate = cells_info.mapping
     cell_contours = cells_info.contours
     separator_idx = cells_info.separator_idx
@@ -1572,6 +1583,54 @@ def _parse_sheet(workbook: _WorkbookProtocol, sheet_name: str) -> pd.DataFrame:
         return parse(sheet_name)
 
 
+def _select_grid_sheet(workbook: _WorkbookProtocol) -> str:
+    sheet_names = list(getattr(workbook, "sheet_names", []) or [])
+    if not sheet_names:
+        raise ValueError("A planilha nao possui abas para importar.")
+
+    if len(sheet_names) == 1:
+        return sheet_names[0]
+
+    normalized = {name.lower(): name for name in sheet_names}
+    for preferred in ("Planilha1", "Sheet1"):
+        key = preferred.lower()
+        if key in normalized:
+            return normalized[key]
+
+    for name in sheet_names:
+        try:
+            df = _parse_sheet(workbook, name)
+        except Exception:  # pragma: no cover - defesa
+            continue
+        if _find_cells_header_row_unbounded(df) is not None:
+            return name
+
+    raise ValueError(
+        "Nao foi possivel localizar uma aba de grid com a secao 'Cells'."
+    )
+
+
+def _iter_grid_sheet_candidates(workbook: _WorkbookProtocol) -> list[str]:
+    sheet_names = list(getattr(workbook, "sheet_names", []) or [])
+    if not sheet_names:
+        return []
+
+    if len(sheet_names) == 1:
+        return [sheet_names[0]]
+
+    candidates: list[str] = []
+    normalized = {name.lower(): name for name in sheet_names}
+    for preferred in ("Planilha1", "Sheet1"):
+        key = preferred.lower()
+        if key in normalized:
+            candidates.append(normalized[key])
+
+    for name in sheet_names:
+        if name not in candidates:
+            candidates.append(name)
+    return candidates
+
+
 def _normalize_header(value: str) -> str:
     normalized = unicodedata.normalize("NFKD", value)
     ascii_only = "".join(ch for ch in normalized if not unicodedata.combining(ch))
@@ -1776,17 +1835,19 @@ def _first_non_blank_value(row: pd.Series) -> Optional[str]:
     return None
 
 
-def _extract_cells_section(df: pd.DataFrame) -> _CellsSection:
-    """Localiza a secao de celulas em Planilha1 e retorna dados estruturados."""
+def _extract_cells_section(df: pd.DataFrame, *, sheet_name: str) -> _CellsSection:
+    """Localiza a secao de celulas na aba informada e retorna dados estruturados."""
     separator_idx = _find_separator_row(df)
     if separator_idx is None:
         raise ValueError(
-            "NAo foi possAvel localizar a linha separadora '#' em Planilha1."
+            f"Nao foi possivel localizar a linha separadora '#' na aba '{sheet_name}'."
         )
 
     cells_header_idx = _find_cells_header_row(df, separator_idx)
     if cells_header_idx is None:
-        raise ValueError("NAo foi possAvel localizar a secao 'Cells' em Planilha1.")
+        raise ValueError(
+            f"Nao foi possivel localizar a secao 'Cells' na aba '{sheet_name}'."
+        )
 
     header_row = df.iloc[cells_header_idx]
     header_keys = [
@@ -1842,7 +1903,9 @@ def _extract_cells_section(df: pd.DataFrame) -> _CellsSection:
             cell_contours[cell_id] = contours
 
     if not cells_ordered:
-        raise ValueError("NAo hA celulas vAlidas entre 'Cells' e '#' em Planilha1.")
+        raise ValueError(
+            f"Nao ha celulas validas entre 'Cells' e '#' na aba '{sheet_name}'."
+        )
 
     logger.info(
         "Secao 'Cells' processada com %d celulas distintas.",
@@ -2846,12 +2909,12 @@ class _CellsSection:
     separator_idx: int
 
 
-def parse_cells_from_planilha1(df: pd.DataFrame) -> list[str]:
+def parse_cells_from_planilha1(df: pd.DataFrame, *, sheet_name: str = "Planilha1") -> list[str]:
     """
     Retorna a lista de celulas listadas entre a linha 'Cells' e a linha separadora '#'.
     """
     sanitized = df.dropna(how="all").reset_index(drop=True)
-    section = _extract_cells_section(sanitized)
+    section = _extract_cells_section(sanitized, sheet_name=sheet_name)
     return section.cells
 
 
