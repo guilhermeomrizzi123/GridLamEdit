@@ -16,6 +16,7 @@ from __future__ import annotations
 from collections import Counter
 import logging
 import re
+import unicodedata
 from dataclasses import dataclass
 from typing import Dict, Optional, Tuple
 
@@ -43,6 +44,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QComboBox,
     QInputDialog,
+    QLineEdit,
 )
 
 from gridlamedit.core.paths import package_path
@@ -573,6 +575,7 @@ class CellNodeItem(QGraphicsRectItem):
         self.on_add_neighbor = None
         self.on_delete_cell = None
         self.on_change_orientation = None
+        self.on_apply_laminate = None
         self.plus_items: dict[str, PlusButtonItem] = {}
         self.plus_lines: dict[str, QGraphicsLineItem] = {}
         self._neighbors: dict[str, Optional[str]] = {"up": None, "down": None, "left": None, "right": None}
@@ -814,6 +817,12 @@ class CellNodeItem(QGraphicsRectItem):
     def _show_context_menu(self, pos) -> None:
         """Show context menu with change orientation and delete options."""
         menu = QMenu()
+
+        apply_laminate_action = QAction("Aplicar/Alterar Laminado", menu)
+        apply_laminate_action.triggered.connect(self._handle_apply_laminate)
+        menu.addAction(apply_laminate_action)
+
+        menu.addSeparator()
         
         # Add "Trocar orientação" option
         change_orientation_action = QAction("Trocar orienta\u00e7\u00e3o", menu)
@@ -836,6 +845,11 @@ class CellNodeItem(QGraphicsRectItem):
         """Handle change orientation action from context menu."""
         if callable(self.on_change_orientation):
             self.on_change_orientation()
+
+    def _handle_apply_laminate(self) -> None:
+        """Handle apply/change laminate action from context menu."""
+        if callable(self.on_apply_laminate):
+            self.on_apply_laminate()
 
 
 @dataclass
@@ -2491,10 +2505,14 @@ class CellNeighborsWindow(QDialog):
         def on_change_orientation():
             self._change_cell_orientation(record)
 
+        def on_apply_laminate():
+            self._prompt_apply_laminate(record)
+
         item.on_select_cell = on_select_cell
         item.on_add_neighbor = on_add_neighbor
         item.on_delete_cell = on_delete_cell
         item.on_change_orientation = on_change_orientation
+        item.on_apply_laminate = on_apply_laminate
         
         # Expand scene to accommodate new node
         self._expand_scene_rect()
@@ -2674,6 +2692,93 @@ class CellNeighborsWindow(QDialog):
         self._update_all_plus_buttons_visibility()
         # Update colors for current sequence if one is selected
         if self._current_sequence_index is not None:
+            self.update_cell_colors_for_sequence(self._current_sequence_index)
+        self._mark_as_modified()
+
+    def _format_laminate_display(self, laminate_name: str) -> str:
+        if not laminate_name:
+            return ""
+        if self._model is None:
+            return laminate_name
+        try:
+            laminado = self._model.laminados.get(laminate_name)
+        except Exception:
+            laminado = None
+        if laminado is None:
+            return laminate_name
+        base_name = getattr(laminado, "nome", laminate_name) or laminate_name
+        tag = str(getattr(laminado, "tag", "") or "").strip()
+        if tag and f"({tag})" not in base_name:
+            return f"{base_name}({tag})"
+        return base_name
+
+    def _collect_laminate_choices(self) -> list[tuple[str, str]]:
+        if self._model is None:
+            return []
+        laminados = getattr(self._model, "laminados", {}) or {}
+        choices: list[tuple[str, str]] = []
+        for name in laminados.keys():
+            display = self._format_laminate_display(str(name))
+            choices.append((str(name), display))
+        return choices
+
+    def _prompt_apply_laminate(self, record: _NodeRecord) -> None:
+        if not record.cell_id:
+            QMessageBox.information(
+                self,
+                "Aplicar laminado",
+                "Selecione uma célula antes de aplicar um laminado.",
+            )
+            return
+        if self._model is None:
+            return
+        choices = self._collect_laminate_choices()
+        if not choices:
+            QMessageBox.information(
+                self,
+                "Aplicar laminado",
+                "Não há laminados cadastrados para aplicar.",
+            )
+            return
+        current = self._model.cell_to_laminate.get(record.cell_id)
+        dialog = SelectLaminateDialog(choices, current=current, parent=self)
+        if dialog.exec() != QDialog.Accepted:
+            return
+        selected_name = dialog.selected_laminate_name()
+        if not selected_name:
+            return
+        self._apply_laminate_to_cell(record, selected_name)
+
+    def _apply_laminate_to_cell(self, record: _NodeRecord, laminate_name: str) -> None:
+        if not record.cell_id or self._model is None:
+            return
+        laminates = getattr(self._model, "laminados", {}) or {}
+        if laminate_name not in laminates:
+            QMessageBox.warning(
+                self,
+                "Laminado não encontrado",
+                f"O laminado '{laminate_name}' não existe no projeto.",
+            )
+            return
+        current = self._model.cell_to_laminate.get(record.cell_id)
+        if current == laminate_name:
+            return
+        if current:
+            old_lam = laminates.get(current)
+            if old_lam is not None and record.cell_id in getattr(old_lam, "celulas", []):
+                old_lam.celulas.remove(record.cell_id)
+        new_lam = laminates.get(laminate_name)
+        if new_lam is not None and record.cell_id not in getattr(new_lam, "celulas", []):
+            new_lam.celulas.append(record.cell_id)
+        self._model.cell_to_laminate[record.cell_id] = laminate_name
+        try:
+            self._model.mark_dirty(True)
+        except Exception:
+            pass
+        self._update_node_cell_display(record)
+        if self._aml_highlight_enabled:
+            self.update_cell_colors_for_aml()
+        elif self._current_sequence_index is not None:
             self.update_cell_colors_for_sequence(self._current_sequence_index)
         self._mark_as_modified()
 
@@ -3107,6 +3212,87 @@ class CellNeighborsWindow(QDialog):
                 if contour_side:
                     suppressed.add(contour_side)
         record.item.set_contour_suppressed(suppressed)
+
+
+class SelectLaminateDialog(QDialog):
+    """Dialog listing available laminates with a filter."""
+
+    def __init__(
+        self,
+        laminates: list[tuple[str, str]],
+        *,
+        current: Optional[str] = None,
+        parent=None,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Selecionar Laminado")
+        self.resize(360, 420)
+        self._filter_text = ""
+        self._filter_norm = ""
+
+        layout = QVBoxLayout(self)
+
+        self.filter_input = QLineEdit(self)
+        self.filter_input.setPlaceholderText("Filtrar laminados...")
+        self.filter_input.textChanged.connect(self._apply_filter)
+        layout.addWidget(self.filter_input)
+
+        self.list = QListWidget(self)
+        for name, display in laminates:
+            item = QListWidgetItem(display)
+            item.setData(Qt.UserRole, name)
+            self.list.addItem(item)
+            if current and name == current:
+                self.list.setCurrentItem(item)
+        layout.addWidget(self.list)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel, parent=self)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+        self._ok_button = buttons.button(QDialogButtonBox.Ok)
+        if self._ok_button is not None:
+            self._ok_button.setEnabled(self.list.currentItem() is not None)
+
+        self.list.itemSelectionChanged.connect(self._update_ok_state)
+        self.list.itemDoubleClicked.connect(lambda _i: self.accept())
+
+    @staticmethod
+    def _normalize(text: str) -> str:
+        base = unicodedata.normalize("NFKD", text)
+        stripped = "".join(ch for ch in base if not unicodedata.combining(ch))
+        return re.sub(r"[^0-9A-Za-z]+", "", stripped).lower()
+
+    def _apply_filter(self, text: str) -> None:
+        self._filter_text = text.strip()
+        self._filter_norm = self._normalize(self._filter_text) if self._filter_text else ""
+        for idx in range(self.list.count()):
+            item = self.list.item(idx)
+            raw = item.text()
+            if not self._filter_text:
+                item.setHidden(False)
+                continue
+            if self._filter_text.lower() in raw.lower():
+                item.setHidden(False)
+                continue
+            if self._filter_norm:
+                norm_text = self._normalize(raw)
+                item.setHidden(self._filter_norm not in norm_text)
+            else:
+                item.setHidden(True)
+        self._update_ok_state()
+
+    def _update_ok_state(self) -> None:
+        if self._ok_button is not None:
+            item = self.list.currentItem()
+            self._ok_button.setEnabled(item is not None and not item.isHidden())
+
+    def selected_laminate_name(self) -> str:
+        item = self.list.currentItem()
+        if item is None:
+            return ""
+        return str(item.data(Qt.UserRole) or "").strip()
 
 
 class SelectCellDialog(QDialog):
