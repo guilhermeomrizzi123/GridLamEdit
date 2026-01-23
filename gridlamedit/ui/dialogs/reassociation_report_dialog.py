@@ -68,8 +68,11 @@ class ReassociationReportDialog(QDialog):
 
         layout.addWidget(self._tabs)
 
-        self._button_box = QDialogButtonBox(QDialogButtonBox.Ok, Qt.Horizontal, self)
+        self._button_box = QDialogButtonBox(
+            QDialogButtonBox.Ok | QDialogButtonBox.Cancel, Qt.Horizontal, self
+        )
         self._button_box.accepted.connect(self.accept)
+        self._button_box.rejected.connect(self.reject)
         layout.addWidget(self._button_box)
 
         self.resize(720, 480)

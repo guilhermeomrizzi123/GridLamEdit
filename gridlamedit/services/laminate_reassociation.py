@@ -60,10 +60,15 @@ def _build_contour_index(contours: Dict[str, Sequence[str]]) -> Dict[Tuple[str, 
 def reassociate_laminates_by_contours(
     old_model: GridModel,
     new_model: GridModel,
+    *,
+    apply: bool = True,
 ) -> ReassociationReport:
     """Reassociate laminates from old_model to new_model using contour signatures."""
     report = ReassociationReport()
     contour_index = _build_contour_index(getattr(new_model, "cell_contours", {}))
+    cell_map = (
+        new_model.cell_to_laminate if apply else dict(new_model.cell_to_laminate)
+    )
 
     for old_cell, laminate_name in old_model.cell_to_laminate.items():
         if not laminate_name:
@@ -115,7 +120,7 @@ def reassociate_laminates_by_contours(
             continue
 
         target_cell = candidates[0]
-        current = new_model.cell_to_laminate.get(target_cell)
+        current = cell_map.get(target_cell)
         if current and current != laminate_name:
             report.conflicts.append(
                 ReassociationIssue(
@@ -130,7 +135,7 @@ def reassociate_laminates_by_contours(
             continue
 
         if current != laminate_name:
-            new_model.cell_to_laminate[target_cell] = laminate_name
+            cell_map[target_cell] = laminate_name
             report.reassociated.append(
                 ReassociationEntry(
                     laminate=laminate_name,
@@ -140,11 +145,13 @@ def reassociate_laminates_by_contours(
                 )
             )
 
-    _rebuild_laminate_cells(new_model)
+    if apply:
+        new_model.cell_to_laminate = cell_map
+        _rebuild_laminate_cells(new_model)
     report.unmapped_new_cells = [
         cell_id
         for cell_id in new_model.celulas_ordenadas
-        if cell_id not in new_model.cell_to_laminate
+        if cell_id not in cell_map
     ]
     return report
 

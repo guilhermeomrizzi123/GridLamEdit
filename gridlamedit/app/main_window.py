@@ -3532,7 +3532,16 @@ class MainWindow(QMainWindow):
         model.source_excel_path = path
         model.dirty = False
 
-        report = reassociate_laminates_by_contours(previous_model, model)
+        preview_report = reassociate_laminates_by_contours(
+            previous_model, model, apply=False
+        )
+
+        dialog = ReassociationReportDialog(self)
+        dialog.set_report(preview_report)
+        if dialog.exec() != QDialog.Accepted:
+            return
+
+        report = reassociate_laminates_by_contours(previous_model, model, apply=True)
 
         def _remap_cell_id(cell_id: object, mapping: dict[str, str]) -> str:
             text = str(cell_id or "").strip()
@@ -3635,10 +3644,6 @@ class MainWindow(QMainWindow):
             self._cell_neighbors_window.populate_from_project(
                 self._grid_model, self.project_manager
             )
-
-        dialog = ReassociationReportDialog(self)
-        dialog.set_report(report)
-        dialog.exec()
 
         if self.statusBar():
             self.statusBar().showMessage(
