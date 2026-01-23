@@ -13,7 +13,7 @@ from collections import Counter, OrderedDict
 from dataclasses import dataclass
 from enum import Enum, auto
 from pathlib import Path
-from typing import Iterable, List, Optional
+from typing import Iterable, List, Optional, Sequence
 
 from PySide6.QtCore import (
     Qt,
@@ -239,6 +239,37 @@ def _normalize_orientation_for_summary(value: object) -> Optional[float]:
             return normalize_angle(str(value))
         except Exception:
             return None
+
+
+def _normalize_sequence_token(value: object) -> str:
+    text = str(value or "").strip().lower()
+    if not text:
+        return ""
+    digits = "".join(ch for ch in text if ch.isdigit())
+    if digits:
+        return digits
+    return re.sub(r"[^a-z0-9]+", "", text)
+
+
+def _layers_match_for_batch_import(
+    existing: Laminado,
+    layers: Sequence[Camada],
+    tag: str,
+) -> bool:
+    if str(existing.tag or "").strip() != str(tag or "").strip():
+        return False
+    if len(existing.camadas) != len(layers):
+        return False
+    for existing_layer, new_layer in zip(existing.camadas, layers):
+        existing_seq = _normalize_sequence_token(existing_layer.sequence)
+        new_seq = _normalize_sequence_token(new_layer.sequence)
+        if existing_seq != new_seq:
+            return False
+        existing_orientation = _normalize_orientation_for_summary(existing_layer.orientacao)
+        new_orientation = _normalize_orientation_for_summary(new_layer.orientacao)
+        if existing_orientation != new_orientation:
+            return False
+    return True
 
 
 def _build_auto_name_from_layers(
@@ -3273,13 +3304,23 @@ class MainWindow(QMainWindow):
             )
         return layers
 
-    def _apply_batch_entries(self, entries: list[BatchLaminateInput]) -> list[str]:
+    def _apply_batch_entries(self, entries: list[BatchLaminateInput]) -> tuple[list[str], list[str]]:
         if self._grid_model is None:
             self._grid_model = GridModel()
         created: list[str] = []
+        skipped: list[str] = []
         for entry in entries:
             layers = self._build_layers_from_batch_entry(entry)
             if not layers:
+                continue
+            existing_match = None
+            for existing in self._grid_model.laminados.values():
+                if _layers_match_for_batch_import(existing, layers, str(entry.tag or "")):
+                    existing_match = existing
+                    break
+            if existing_match is not None:
+                if existing_match.nome not in skipped:
+                    skipped.append(existing_match.nome)
                 continue
             laminate = Laminado(
                 nome="",
@@ -3303,7 +3344,7 @@ class MainWindow(QMainWindow):
 
         if created:
             self._refresh_after_batch_import(created)
-        return created
+        return created, skipped
 
     def _refresh_after_batch_import(self, laminate_names: list[str]) -> None:
         if self._grid_model is None:
@@ -3371,12 +3412,24 @@ class MainWindow(QMainWindow):
         if confirm != QMessageBox.Yes:
             return
 
-        created = self._apply_batch_entries(entries)
+        created, skipped = self._apply_batch_entries(entries)
+        if created:
+            info_message = f"{len(created)} laminados importados."
+        else:
+            info_message = "Nenhum novo laminado foi importado."
         QMessageBox.information(
             self,
             "Importação concluída",
-            f"{len(created)} laminados importados.",
+            info_message,
         )
+        if skipped:
+            names = ", ".join(skipped)
+            QMessageBox.warning(
+                self,
+                "Laminados já existentes",
+                "Os laminados abaixo já existiam com sequência e orientações idênticas e não foram criados:\n"
+                f"{names}",
+            )
 
     def _on_batch_import_laminates(self, checked: bool = False) -> None:  # noqa: ARG002
         try:
