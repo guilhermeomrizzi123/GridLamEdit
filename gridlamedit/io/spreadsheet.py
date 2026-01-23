@@ -2430,12 +2430,17 @@ class _GridUiBinding:
             name_combo = getattr(self.ui, "laminate_name_combo", None)
             if isinstance(name_combo, QComboBox):
                 reset_filter = getattr(self.ui, "_reset_laminate_filter", None)
+                line_edit = name_combo.lineEdit()
                 if callable(reset_filter):
                     reset_filter(clear_text=True)
+                if line_edit is not None:
+                    line_edit.blockSignals(True)
                 name_combo.blockSignals(True)
                 idx = name_combo.findText(NO_LAMINATE_COMBO_OPTION)
                 name_combo.setCurrentIndex(idx if idx >= 0 else -1)
                 name_combo.blockSignals(False)
+                if line_edit is not None:
+                    line_edit.blockSignals(False)
 
             tag_edit = getattr(self.ui, "laminate_tag_edit", None)
             if isinstance(tag_edit, QLineEdit):
