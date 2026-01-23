@@ -3051,6 +3051,11 @@ class VirtualStackingWindow(QtWidgets.QDialog):
 
         self._apply_virtual_rows_to_laminates(final_rows)
         self._notify_changes([cell.laminate.nome for cell in self._cells])
+        QtWidgets.QMessageBox.information(
+            self,
+            "Reorder By Neighborhood",
+            "Reordenação concluída.",
+        )
         return True
 
     # ---------------------------------------------------------------

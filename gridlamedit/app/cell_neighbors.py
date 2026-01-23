@@ -99,6 +99,7 @@ COLOR_PLUS_SUGGEST_HOVER = QColor(145, 205, 165)  # Slightly darker on hover
 COLOR_DASH = QColor(134, 142, 150)  # Medium steel gray lines
 COLOR_CENTER_BORDER = QColor(250, 128, 114)  # Salmon highlight for central sequences
 COLOR_CONTOUR_TEXT = QColor(55, 65, 81)  # Dark gray for contour labels
+COLOR_MISSING_LAMINATE_BORDER = QColor(220, 53, 69)  # Red warning border for missing laminate
 
 COLOR_AML_SOFT = QColor(78, 153, 223)  # Clear blue for Soft
 COLOR_AML_QUASI = QColor(147, 112, 219)  # Purple for Quasi-iso
@@ -997,6 +998,8 @@ class CellNeighborsWindow(QDialog):
         
         # Track disconnected blocks for removal warnings
         self._disconnected_highlight_rects: list[QGraphicsRectItem] = []
+        self._missing_laminate_cells: set[str] = set()
+        self._missing_laminate_highlight_enabled = False
 
         # Add initial placeholder node with better positioning (away from edges)
         anchor_x = 300.0
@@ -1591,6 +1594,31 @@ class CellNeighborsWindow(QDialog):
         if window is None:
             return
 
+        if checked:
+            missing_cells = self._collect_missing_laminate_cells()
+            if missing_cells:
+                self._set_missing_laminate_highlight(missing_cells)
+                preview = ", ".join(missing_cells[:8])
+                suffix = "" if len(missing_cells) <= 8 else f" (+{len(missing_cells) - 8})"
+                detail = f"\n\nCélulas: {preview}{suffix}" if preview else ""
+                QMessageBox.warning(
+                    self,
+                    "Laminado não aplicado",
+                    "Existem células sem laminado aplicado. Elas foram destacadas em vermelho." + detail,
+                )
+                blocker = QSignalBlocker(self.reorder_neighbors_button)
+                self.reorder_neighbors_button.setChecked(False)
+                del blocker
+                if hasattr(window, "btn_reorganize_neighbors"):
+                    w_blocker = QSignalBlocker(window.btn_reorganize_neighbors)
+                    window.btn_reorganize_neighbors.setChecked(False)
+                    del w_blocker
+                return
+            else:
+                self._clear_missing_laminate_highlight()
+        else:
+            self._clear_missing_laminate_highlight()
+
         if hasattr(window, "btn_reorganize_neighbors"):
             blocker = QSignalBlocker(window.btn_reorganize_neighbors)
             window.btn_reorganize_neighbors.setChecked(checked)
@@ -1652,6 +1680,73 @@ class CellNeighborsWindow(QDialog):
         else:
             item.set_border_highlight(None, BASE_BORDER_WIDTH)
 
+    def _apply_missing_laminate_border_if_needed(
+        self, record: _NodeRecord, item: CellNodeItem
+    ) -> None:
+        if not self._missing_laminate_highlight_enabled:
+            return
+        if record.cell_id and record.cell_id in self._missing_laminate_cells:
+            item.set_border_highlight(COLOR_MISSING_LAMINATE_BORDER, CENTER_BORDER_WIDTH)
+
+    def _collect_missing_laminate_cells(self) -> list[str]:
+        if self._model is None:
+            return []
+        try:
+            cell_to_laminate = getattr(self._model, "cell_to_laminate", {}) or {}
+        except Exception:
+            cell_to_laminate = {}
+        try:
+            laminados = getattr(self._model, "laminados", {}) or {}
+        except Exception:
+            laminados = {}
+
+        missing: set[str] = set()
+        for record in self._nodes_by_grid.values():
+            cell_id = record.cell_id
+            if not cell_id:
+                continue
+            laminate_name = cell_to_laminate.get(cell_id)
+            if not laminate_name:
+                missing.add(cell_id)
+                continue
+            if laminate_name not in laminados:
+                if hasattr(self._model, "laminados_da_celula"):
+                    try:
+                        candidates = self._model.laminados_da_celula(cell_id)
+                    except Exception:
+                        candidates = []
+                    if candidates:
+                        continue
+                missing.add(cell_id)
+        return sorted(missing)
+
+    def _set_missing_laminate_highlight(self, missing_cells: list[str]) -> None:
+        self._missing_laminate_cells = set(missing_cells)
+        self._missing_laminate_highlight_enabled = bool(missing_cells)
+        if self._aml_highlight_enabled:
+            self.update_cell_colors_for_aml()
+        else:
+            self.update_cell_colors_for_sequence(self._current_sequence_index)
+
+    def _clear_missing_laminate_highlight(self) -> None:
+        if not self._missing_laminate_cells and not self._missing_laminate_highlight_enabled:
+            return
+        self._missing_laminate_cells.clear()
+        self._missing_laminate_highlight_enabled = False
+        if self._aml_highlight_enabled:
+            self.update_cell_colors_for_aml()
+        else:
+            self.update_cell_colors_for_sequence(self._current_sequence_index)
+
+    def _refresh_missing_laminate_highlight(self) -> None:
+        if not self._missing_laminate_highlight_enabled:
+            return
+        missing_cells = self._collect_missing_laminate_cells()
+        if missing_cells:
+            self._set_missing_laminate_highlight(missing_cells)
+        else:
+            self._clear_missing_laminate_highlight()
+
     def update_cell_colors_for_sequence(self, sequence_index: Optional[int]) -> None:
         """Apply orientation-based colours to each cell for the given sequence.
 
@@ -1672,6 +1767,7 @@ class CellNeighborsWindow(QDialog):
                 item._orientation_label.setText("")
                 self._apply_border_highlight(item, False)
                 item._recenter_label()
+                self._apply_missing_laminate_border_if_needed(record, item)
                 continue
             # Resolve laminate for cell
             try:
@@ -1696,6 +1792,7 @@ class CellNeighborsWindow(QDialog):
                 item._orientation_label.setText("")
                 self._apply_border_highlight(item, False)
                 item._recenter_label()
+                self._apply_missing_laminate_border_if_needed(record, item)
                 continue
             camada = camadas[layer_idx]
             orient = getattr(camada, "orientacao", None)
@@ -1704,6 +1801,7 @@ class CellNeighborsWindow(QDialog):
                 item._orientation_label.setText("")
                 self._apply_border_highlight(item, is_center_sequence)
                 item._recenter_label()
+                self._apply_missing_laminate_border_if_needed(record, item)
                 continue
             # Use exact match first, else fallback default highlight
             color = ORIENTATION_HIGHLIGHT_COLORS.get(float(orient), DEFAULT_ORIENTATION_HIGHLIGHT)
@@ -1718,6 +1816,7 @@ class CellNeighborsWindow(QDialog):
             item._orientation_label.setText(label)
             item._recenter_label()
             self._apply_border_highlight(item, is_center_sequence)
+            self._apply_missing_laminate_border_if_needed(record, item)
 
     # ---------- AML colouring ----------
     def _aml_orientation_bucket(self, value: object) -> Optional[str]:
@@ -1775,6 +1874,7 @@ class CellNeighborsWindow(QDialog):
                 item._aml_label.setText("")
                 self._apply_border_highlight(item, False)
                 item._recenter_label()
+                self._apply_missing_laminate_border_if_needed(record, item)
                 continue
 
             laminate_name = self._model.cell_to_laminate.get(record.cell_id)
@@ -1786,6 +1886,7 @@ class CellNeighborsWindow(QDialog):
                 item._aml_label.setText("")
                 self._apply_border_highlight(item, False)
                 item._recenter_label()
+                self._apply_missing_laminate_border_if_needed(record, item)
                 continue
 
             color = AML_TYPE_COLORS.get(aml_type, COLOR_AML_UNKNOWN)
@@ -1793,6 +1894,7 @@ class CellNeighborsWindow(QDialog):
             item._aml_label.setText(aml_type)
             self._apply_border_highlight(item, False)
             item._recenter_label()
+            self._apply_missing_laminate_border_if_needed(record, item)
 
     def _save_to_project(self) -> None:
         """Save current neighbors mapping to the project."""
@@ -2780,6 +2882,7 @@ class CellNeighborsWindow(QDialog):
             self.update_cell_colors_for_aml()
         elif self._current_sequence_index is not None:
             self.update_cell_colors_for_sequence(self._current_sequence_index)
+        self._refresh_missing_laminate_highlight()
         self._mark_as_modified()
 
     def _handle_add_neighbor(self, record: _NodeRecord, direction: str) -> None:
