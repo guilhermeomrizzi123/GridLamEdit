@@ -1246,7 +1246,7 @@ class VirtualStackingWindow(QtWidgets.QDialog):
         self.btn_export_virtual = QtWidgets.QToolButton(self)
         self.btn_export_virtual.setText("Export Virtual Stacking")
         self.btn_export_virtual.setToolTip(
-            "Exporta a planilha no formato do template Grid Lam Vs Exported_RevC.xls para importacao no CATIA."
+            "Exporta a planilha nos formatos .xls e .xlsx (template Grid Lam Vs Exported_RevC) para importação no CATIA."
         )
         self.btn_export_virtual.setEnabled(False)
         self.btn_export_virtual.clicked.connect(self._export_virtual_stacking)
@@ -1302,14 +1302,14 @@ class VirtualStackingWindow(QtWidgets.QDialog):
             QtWidgets.QMessageBox.information(
                 self,
                 "Export Virtual Stacking",
-                "Selecione 'Reorder by Neighborhood' para habilitar a exportacao.",
+                "Selecione 'Reorder by Neighborhood' para habilitar a exportação.",
             )
             return
         if self._project is None or not getattr(self._project, "celulas_ordenadas", []):
             QtWidgets.QMessageBox.information(
                 self,
                 "Export Virtual Stacking",
-                "Nenhum dado de Virtual Stacking disponivel para exportar.",
+                "Nenhum dado de Virtual Stacking disponível para exportar.",
             )
             return
 
@@ -1328,7 +1328,7 @@ class VirtualStackingWindow(QtWidgets.QDialog):
             self,
             "Export Virtual Stacking",
             suggested,
-            "Excel 97-2003 (*.xls)",
+            "Planilhas Excel (*.xls *.xlsx)",
         )
         if not path:
             return
@@ -1356,14 +1356,20 @@ class VirtualStackingWindow(QtWidgets.QDialog):
             QtWidgets.QMessageBox.critical(
                 self,
                 "Export Virtual Stacking",
-                f"Falha ao exportar a planilha: {exc}",
+                f"Falha ao exportar uma das planilhas:\n{exc}",
             )
             return
+
+        base_path = output_path.with_suffix("")
+        xls_path = base_path.with_suffix(".xls")
+        xlsx_path = base_path.with_suffix(".xlsx")
 
         QtWidgets.QMessageBox.information(
             self,
             "Export Virtual Stacking",
-            f"Planilha exportada para:\n{output_path}",
+            "Planilhas exportadas para:\n"
+            f"{xls_path}\n"
+            f"{xlsx_path}",
         )
 
     # Data binding ----------------------------------------------------

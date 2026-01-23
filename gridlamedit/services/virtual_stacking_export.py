@@ -37,6 +37,73 @@ def _safe_rosette(value: object) -> str:
     return text or DEFAULT_ROSETTE_LABEL
 
 
+def _build_virtual_stacking_rows(
+    layers: Sequence[object],
+    cells: Sequence[object],
+) -> list[list[object]]:
+    total_columns = len(_HEADER_ROW_ONE) + len(cells)
+
+    header_zero = list(_HEADER_ROW_ZERO) + ["#"] * max(0, total_columns - len(_HEADER_ROW_ZERO))
+    header_one = list(_HEADER_ROW_ONE) + [
+        str(getattr(cell, "cell_id", f"C{idx + 1}")) for idx, cell in enumerate(cells)
+    ]
+
+    rows: list[list[object]] = [header_zero, header_one]
+
+    for row_idx, layer in enumerate(layers, start=1):
+        sequence_label = getattr(layer, "sequence_label", "") or f"Seq.{row_idx}"
+        material = getattr(layer, "material", "") or ""
+        rosette = _safe_rosette(getattr(layer, "rosette", ""))
+
+        row: list[object] = [sequence_label, "", material, rosette]
+
+        for cell in cells:
+            laminate = getattr(cell, "laminate", None)
+            layers_list: Iterable[object] = getattr(laminate, "camadas", []) if laminate else []
+            orientation_value: float | str | int | None = None
+            if isinstance(layers_list, Sequence):
+                if row_idx - 1 < len(layers_list):
+                    layer_obj = layers_list[row_idx - 1]
+                    orientation_value = _normalize_orientation(
+                        getattr(layer_obj, "orientacao", None)
+                    )
+            if orientation_value in (None, "", "Empty"):
+                row.append("")
+            else:
+                row.append(orientation_value)
+
+        rows.append(row)
+
+    terminator_row = [""] * total_columns
+    if terminator_row:
+        terminator_row[0] = "##"
+    else:
+        terminator_row = ["##"]
+    rows.append(terminator_row)
+    return rows
+
+
+def _write_rows_xls(rows: list[list[object]], output_path: Path, sheet_name: str) -> None:
+    book = xlwt.Workbook()
+    sheet = book.add_sheet(sheet_name)
+    for row_idx, row in enumerate(rows):
+        for col_idx, value in enumerate(row):
+            sheet.write(row_idx, col_idx, value)
+    book.save(str(output_path))
+
+
+def _write_rows_xlsx(rows: list[list[object]], output_path: Path, sheet_name: str) -> None:
+    from openpyxl import Workbook
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = sheet_name
+    for row_idx, row in enumerate(rows, start=1):
+        for col_idx, value in enumerate(row, start=1):
+            ws.cell(row=row_idx, column=col_idx, value=value)
+    wb.save(output_path)
+
+
 def export_virtual_stacking(
     layers: Sequence[object],
     cells: Sequence[object],
@@ -58,8 +125,8 @@ def export_virtual_stacking(
         and ``laminate``; the laminate must have a ``camadas`` list containing
         orientation information at the same index as ``layers``.
     path:
-        Target output path. The result will be written as ``.xls`` regardless of
-        the provided suffix to keep parity with the reference template.
+        Target output path. Both ``.xls`` and ``.xlsx`` files will be written using
+        the same base name.
     sheet_name:
         Name of the worksheet to create (defaults to ``Planilha1``).
 
@@ -72,53 +139,27 @@ def export_virtual_stacking(
         raise ValueError("Nenhuma coluna de Virtual Stacking para exportar.")
 
     output_path = Path(path)
-    if output_path.suffix.lower() != ".xls":
+    if output_path.suffix.lower() not in {".xls", ".xlsx"}:
         output_path = output_path.with_suffix(".xls")
+    base_path = output_path.with_suffix("")
+    xls_path = base_path.with_suffix(".xls")
+    xlsx_path = base_path.with_suffix(".xlsx")
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    book = xlwt.Workbook()
-    sheet = book.add_sheet(sheet_name)
+    rows = _build_virtual_stacking_rows(layers, cells)
 
-    total_columns = len(_HEADER_ROW_ONE) + len(cells)
+    exported: list[Path] = []
+    try:
+        _write_rows_xls(rows, xls_path, sheet_name)
+        exported.append(xls_path)
+    except Exception as exc:
+        raise ValueError(f"Falha ao exportar arquivo .xls: {exc}") from exc
 
-    # Row 0: leading identifiers ("Ply", "SA", then fill with "#" like the template)
-    header_zero = list(_HEADER_ROW_ZERO) + ["#"] * max(0, total_columns - len(_HEADER_ROW_ZERO))
-    for col, value in enumerate(header_zero):
-        sheet.write(0, col, value)
+    try:
+        _write_rows_xlsx(rows, xlsx_path, sheet_name)
+        exported.append(xlsx_path)
+    except Exception as exc:
+        exported_hint = "" if not exported else f" Arquivo(s) gerados: {', '.join(p.name for p in exported)}."
+        raise ValueError(f"Falha ao exportar arquivo .xlsx: {exc}.{exported_hint}") from exc
 
-    # Row 1: titles + cell identifiers.
-    header_one = list(_HEADER_ROW_ONE) + [str(getattr(cell, "cell_id", f"C{idx+1}")) for idx, cell in enumerate(cells)]
-    for col, value in enumerate(header_one):
-        sheet.write(1, col, value)
-
-    # Data rows start at row index 2.
-    for row_idx, layer in enumerate(layers, start=2):
-        sequence_label = getattr(layer, "sequence_label", "") or f"Seq.{row_idx - 1}"
-        material = getattr(layer, "material", "") or ""
-        rosette = _safe_rosette(getattr(layer, "rosette", ""))
-
-        sheet.write(row_idx, 0, sequence_label)
-        sheet.write(row_idx, 1, "")  # Keep the second column empty as in the template
-        sheet.write(row_idx, 2, material)
-        sheet.write(row_idx, 3, rosette)
-
-        for cell_offset, cell in enumerate(cells):
-            target_col = len(_HEADER_ROW_ONE) + cell_offset
-            laminate = getattr(cell, "laminate", None)
-            layers_list: Iterable[object] = getattr(laminate, "camadas", []) if laminate else []
-            orientation_value: float | str | int | None = None
-            if isinstance(layers_list, Sequence):
-                if row_idx - 2 < len(layers_list):
-                    layer_obj = layers_list[row_idx - 2]
-                    orientation_value = _normalize_orientation(getattr(layer_obj, "orientacao", None))
-            if orientation_value in (None, "", "Empty"):
-                sheet.write(row_idx, target_col, "")
-            else:
-                sheet.write(row_idx, target_col, orientation_value)
-
-    # Terminator row: mirrors the reference template end marker.
-    terminator_row = len(layers) + 2
-    sheet.write(terminator_row, 0, "##")
-
-    book.save(str(output_path))
     return output_path

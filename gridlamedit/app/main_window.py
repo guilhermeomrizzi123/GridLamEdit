@@ -545,13 +545,13 @@ class MainWindow(QMainWindow):
                     self._on_virtual_stacking_changed
                 )
             except Exception:
-                logger.debug("Nao foi possivel conectar sinal do Virtual Stacking.", exc_info=True)
+                logger.debug("Não foi possível conectar sinal do Virtual Stacking.", exc_info=True)
             try:
                 self._virtual_stacking_window.closed.connect(
                     self._on_virtual_stacking_closed
                 )
             except Exception:
-                logger.debug("Nao foi possivel conectar fechamento do Virtual Stacking.", exc_info=True)
+                logger.debug("Não foi possível conectar fechamento do Virtual Stacking.", exc_info=True)
 
         project = self._grid_model
         self._virtual_stacking_window.populate_from_project(project)
@@ -870,7 +870,7 @@ class MainWindow(QMainWindow):
                 self._set_color_combo_value(laminate)
                 return
         logger.warning(
-            "Nao foi possivel atribuir uma cor unica ao laminado '%s'.",
+            "Não foi possível atribuir uma cor única ao laminado '%s'.",
             laminate.nome,
         )
 
@@ -1169,7 +1169,7 @@ class MainWindow(QMainWindow):
                     return icon
         if not self._new_laminate_icon_warning_emitted:
             logger.warning(
-                "Icone Criar_novo_laminado_ControlV.* nao encontrado; usando icone padrao."
+                "Ícone Criar_novo_laminado_ControlV.* não encontrado; usando ícone padrão."
             )
             self._new_laminate_icon_warning_emitted = True
         fallback = self.style().standardIcon(QStyle.SP_FileDialogNewFolder)
@@ -2437,7 +2437,7 @@ class MainWindow(QMainWindow):
             try:
                 binding._apply_laminate(laminate_name)  # type: ignore[attr-defined]
             except Exception as exc:  # pragma: no cover - defensive
-                logger.warning("Nao foi possivel aplicar novo laminado: %s", exc)
+                logger.warning("Não foi possível aplicar novo laminado: %s", exc)
         self._show_model_warnings()
         self.update_stacking_summary_ui()
         self._update_save_actions_enabled()
@@ -2447,7 +2447,7 @@ class MainWindow(QMainWindow):
             QMessageBox.information(
                 self,
                 "Duplicar laminado",
-                "Nenhum laminado disponivel para duplicar.",
+                "Nenhum laminado disponível para duplicar.",
             )
             return
         dialog = DuplicateLaminateDialog(self)
@@ -2462,7 +2462,7 @@ class MainWindow(QMainWindow):
         source = self._grid_model.laminados.get(source_name)
         if source is None:
             QMessageBox.warning(
-                self, "Duplicar laminado", "Laminado nao encontrado."
+                self, "Duplicar laminado", "Laminado não encontrado."
             )
             return
         clone = self._clone_laminate(source)
@@ -2493,7 +2493,7 @@ class MainWindow(QMainWindow):
                     clear_func()
                 except Exception as exc:  # pragma: no cover - defensive
                     logger.warning(
-                        "Nao foi possivel limpar o laminado associado: %s", exc
+                        "Não foi possível limpar o laminado associado: %s", exc
                     )
             self._reset_laminate_filter(clear_text=True)
             return
@@ -3159,7 +3159,7 @@ class MainWindow(QMainWindow):
             QMessageBox.information(
                 self,
                 "Movimento invalido",
-                "Nao foi possivel mover a camada selecionada.",
+                "Não foi possível mover a camada selecionada.",
             )
 
     # Batch laminate import ----------------------------------------------------
@@ -3177,7 +3177,7 @@ class MainWindow(QMainWindow):
                 resolved = candidate
             if resolved.exists():
                 return resolved
-        raise FileNotFoundError("Template for Batch Upload.xlsx nao encontrado.")
+        raise FileNotFoundError("Template for Batch Upload.xlsx não encontrado.")
 
     def _open_with_default_app(self, path: Path) -> None:
         try:
@@ -3188,13 +3188,13 @@ class MainWindow(QMainWindow):
         try:
             QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
         except Exception:
-            logger.warning("Nao foi possivel abrir o arquivo %s automaticamente.", path)
+            logger.warning("Não foi possível abrir o arquivo %s automaticamente.", path)
 
     def _prompt_batch_import_choice(self) -> Optional[str]:
         box = QMessageBox(self)
         box.setWindowTitle("Importar laminados em lote")
         box.setText(
-            "Selecione como deseja proceder com a importacao em lote."
+            "Selecione como deseja proceder com a importação em lote."
         )
         open_template = box.addButton("Abrir template", QMessageBox.ActionRole)
         choose_file = box.addButton(
@@ -3227,7 +3227,7 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(
                 self,
                 "Erro",
-                "Nao foi possivel salvar o template em branco.",
+                "Não foi possível salvar o template em branco.",
             )
             return
         QMessageBox.information(
@@ -3331,7 +3331,7 @@ class MainWindow(QMainWindow):
                 try:
                     binding._apply_laminate(target_name)  # type: ignore[attr-defined]
                 except Exception:
-                    logger.debug("Nao foi possivel aplicar laminado importado.", exc_info=True)
+                    logger.debug("Não foi possível aplicar laminado importado.", exc_info=True)
 
         self._refresh_virtual_stacking_view()
         self.project_manager.capture_from_model(
@@ -3357,14 +3357,14 @@ class MainWindow(QMainWindow):
             QMessageBox.information(
                 self,
                 "Nenhum laminado encontrado",
-                "O arquivo informado nao contem laminados preenchidos.",
+                "O arquivo informado não contém laminados preenchidos.",
             )
             return
 
         total = len(entries)
         confirm = QMessageBox.question(
             self,
-            "Confirmar importacao",
+            "Confirmar importação",
             f"{total} laminados encontrados. Deseja importar?",
             QMessageBox.Yes | QMessageBox.No,
         )
@@ -3374,7 +3374,7 @@ class MainWindow(QMainWindow):
         created = self._apply_batch_entries(entries)
         QMessageBox.information(
             self,
-            "Importacao concluida",
+            "Importação concluída",
             f"{len(created)} laminados importados.",
         )
 
@@ -3401,7 +3401,7 @@ class MainWindow(QMainWindow):
                 QMessageBox.critical(
                     self,
                     "Erro",
-                    "Nao foi possivel preparar o template de lote.",
+                    "Não foi possível preparar o template de lote.",
                 )
                 return
             self._open_with_default_app(temp_copy)
@@ -3495,7 +3495,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(
                 self,
                 "Contornos ausentes",
-                "O projeto atual nao possui contornos importados. "
+                "O projeto atual não possui contornos importados. "
                 "Reimporte a planilha original antes de tentar a reassociacao.",
             )
 
@@ -3778,7 +3778,7 @@ class MainWindow(QMainWindow):
 
     def _on_save_triggered(self, checked: bool = False) -> bool:  # noqa: ARG002
         if self._grid_model is None:
-            QMessageBox.information(self, "Salvar", "Nao ha projeto carregado.")
+            QMessageBox.information(self, "Salvar", "Não há projeto carregado.")
             return False
         if self.project_manager.current_path is None:
             return self._on_save_as_triggered()
@@ -3791,7 +3791,7 @@ class MainWindow(QMainWindow):
 
     def _on_save_as_triggered(self, checked: bool = False) -> bool:  # noqa: ARG002
         if self._grid_model is None:
-            QMessageBox.information(self, "Salvar", "Nao ha projeto carregado.")
+            QMessageBox.information(self, "Salvar", "Não há projeto carregado.")
             return False
         initial_path = (
             str(self.project_manager.current_path)
@@ -4088,21 +4088,37 @@ class MainWindow(QMainWindow):
         try:
             final_path = export_grid_xlsx(model, target_path)
         except ValueError as exc:
-            QMessageBox.critical(self, "Falha na exporta├º├úo da planilha.", str(exc))
+            QMessageBox.critical(
+                self,
+                "Falha na exportação da planilha.",
+                f"Falha ao exportar uma das planilhas:\n{exc}",
+            )
             return False
         except Exception as exc:  # pragma: no cover - defensivo
             logger.error("Falha ao exportar planilha: %s", exc, exc_info=True)
             QMessageBox.critical(
                 self,
-                "Falha na exporta├º├úo da planilha.",
+                "Falha na exportação da planilha.",
                 f"Falha ao exportar a planilha: {exc}",
             )
             return False
 
+        base_path = final_path.with_suffix("")
+        xls_path = base_path.with_suffix(".xls")
+        xlsx_path = base_path.with_suffix(".xlsx")
+
         if self.statusBar():
             self.statusBar().showMessage(
-                f"Planilha exportada: {final_path.name}", 5000
+                f"Planilhas exportadas: {xls_path.name}, {xlsx_path.name}", 5000
             )
+
+        QMessageBox.information(
+            self,
+            "Exportação concluída",
+            "Planilhas exportadas com sucesso em:\n"
+            f"{xls_path}\n"
+            f"{xlsx_path}",
+        )
         return True
 
     def _on_project_dirty_changed(self, is_dirty: bool) -> None:
@@ -4151,7 +4167,7 @@ class MainWindow(QMainWindow):
         response = QMessageBox.question(
             self,
             "Alteracoes pendentes",
-            "Voce possui alteracoes nao salvas. Deseja salvar antes de continuar?",
+            "Você possui alterações não salvas. Deseja salvar antes de continuar?",
             QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel,
         )
         if response == QMessageBox.Yes:

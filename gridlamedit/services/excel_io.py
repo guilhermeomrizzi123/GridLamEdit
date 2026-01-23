@@ -25,6 +25,7 @@ def export_grid_xlsx(
         GridModel instance containing the state to export.
     path:
         Target file path. When no ``.xlsx``/``.xls`` suffix is provided, ``.xlsx`` is used.
+        Both ``.xlsx`` and ``.xls`` files will be written using the same base name.
     template_info:
         Placeholder for future template metadata (unused for now).
 
@@ -39,6 +40,9 @@ def export_grid_xlsx(
     output_path = Path(path)
     if output_path.suffix.lower() not in {".xlsx", ".xls"}:
         output_path = output_path.with_suffix(".xlsx")
+    base_path = output_path.with_suffix("")
+    xlsx_path = base_path.with_suffix(".xlsx")
+    xls_path = base_path.with_suffix(".xls")
 
     if template_info:
         logger.info("Ignorando template_info nao utilizado: keys=%s", list(template_info))
@@ -46,8 +50,23 @@ def export_grid_xlsx(
     ensure_layers_have_material(model)
     _ensure_original_available(model)
 
-    save_grid_spreadsheet(str(output_path), model)
-    _restore_preserved_columns(model.source_excel_path, output_path)
+    exported: list[Path] = []
+
+    try:
+        save_grid_spreadsheet(str(xlsx_path), model)
+        _restore_preserved_columns(model.source_excel_path, xlsx_path)
+        exported.append(xlsx_path)
+    except Exception as exc:
+        raise ValueError(f"Falha ao exportar arquivo .xlsx: {exc}") from exc
+
+    try:
+        save_grid_spreadsheet(str(xls_path), model)
+        _restore_preserved_columns(model.source_excel_path, xls_path)
+        exported.append(xls_path)
+    except Exception as exc:
+        exported_hint = "" if not exported else f" Arquivo(s) gerados: {', '.join(p.name for p in exported)}."
+        raise ValueError(f"Falha ao exportar arquivo .xls: {exc}.{exported_hint}") from exc
+
     return output_path
 
 
