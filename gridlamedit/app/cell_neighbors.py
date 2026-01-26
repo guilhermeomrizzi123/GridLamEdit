@@ -48,6 +48,7 @@ from PySide6.QtWidgets import (
     QInputDialog,
     QLineEdit,
     QFileDialog,
+    QTextEdit,
 )
 
 from gridlamedit.core.paths import package_path
@@ -983,6 +984,7 @@ class CellNeighborsWindow(QDialog):
         self._current_sequence_index: Optional[int] = None  # 1-based; None => no colouring
         self._aml_highlight_enabled = False
         self._previous_sequence_index_for_aml: int = 0
+        self._aml_ui_lock = False
         
         # Connect undo stack signals
         self._undo_stack.canUndoChanged.connect(self._update_command_buttons)
@@ -1404,6 +1406,32 @@ class CellNeighborsWindow(QDialog):
         # Refresh plus buttons visibility (used to add neighbors)
         self._update_all_plus_buttons_visibility()
 
+    def _set_aml_ui_lock(self, locked: bool) -> None:
+        if self._aml_ui_lock == locked:
+            return
+        self._aml_ui_lock = locked
+
+        # Drawing tools
+        if locked:
+            for action in self._drawing_actions.values():
+                if action.isChecked():
+                    blocker = QSignalBlocker(action)
+                    action.setChecked(False)
+                    del blocker
+            self._drawing_tool = None
+            self._cancel_active_line()
+            self._apply_drawing_cursor()
+        for action in self._drawing_actions.values():
+            action.setEnabled(not locked)
+
+        # Editing-related buttons (keep AML toggle enabled)
+        self.reorder_neighbors_button.setEnabled(not locked)
+        self.export_neighbors_button.setEnabled(not locked)
+        self.import_neighbors_button.setEnabled(not locked)
+
+        # Refresh plus buttons visibility (used to add neighbors)
+        self._update_all_plus_buttons_visibility()
+
     # -------- Public API ---------
     def populate_from_project(self, model: Optional[GridModel], project_manager=None) -> None:
         """Populate the window with cells from the project and load existing neighbors."""
@@ -1644,6 +1672,11 @@ class CellNeighborsWindow(QDialog):
         return window
 
     def _on_reorder_neighbors_toggle(self, checked: bool) -> None:
+        if self._aml_highlight_enabled or self._aml_ui_lock:
+            blocker = QSignalBlocker(self.reorder_neighbors_button)
+            self.reorder_neighbors_button.setChecked(False)
+            del blocker
+            return
         window = self._ensure_virtual_stacking_window()
         if window is None:
             return
@@ -1696,13 +1729,68 @@ class CellNeighborsWindow(QDialog):
 
     def _on_aml_toggle(self, enabled: bool) -> None:
         if enabled:
+            if not self._show_aml_formula_dialog():
+                blocker = QSignalBlocker(self.aml_toggle_button)
+                self.aml_toggle_button.setChecked(False)
+                del blocker
+                return
             self._activate_aml_highlight()
         else:
             self._deactivate_aml_highlight()
 
+    def _show_aml_formula_dialog(self) -> bool:
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Tipo de AML - Fórmula de cálculo")
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(12)
+
+        header = QLabel("Fórmula utilizada para classificar o Tipo de AML:", dialog)
+        header.setWordWrap(True)
+        layout.addWidget(header)
+
+        text = QTextEdit(dialog)
+        text.setReadOnly(True)
+        text.setMinimumSize(QSize(520, 360))
+        text.setText(
+            "1) Para cada camada, a orientação é normalizada e enquadrada em um dos\n"
+            "   grupos abaixo, considerando tolerância de ±10°:\n"
+            "   - 0°  (inclui 180°)\n"
+            "   - +45°\n"
+            "   - -45°\n"
+            "   - 90° (inclui -90°)\n"
+            "   - outros (qualquer orientação fora dessa faixa)\n\n"
+            "2) Calcula-se o total de camadas válidas: \n"
+            "   total = n0 + n+45 + n-45 + n90 + n_outros\n\n"
+            "3) Calculam-se os percentuais por grupo:\n"
+            "   pct0  = n0 / total\n"
+            "   pct45 = (n+45 + n-45) / total\n"
+            "   pct90 = n90 / total\n\n"
+            "4) Regra de classificação (limiar = 0,45):\n"
+            "   - Hard: pct0  ≥ 0,45 e pct0  ≥ pct45 e pct0  ≥ pct90\n"
+            "   - Soft: pct45 ≥ 0,45 e pct45 ≥ pct0  e pct45 ≥ pct90\n"
+            "   - Quasi-iso: demais casos (inclui quando 90°/outros dominam ou\n"
+            "     nenhum grupo atinge o limiar).\n\n"
+            "Observação: se não houver camadas com orientação válida, o Tipo de AML\n"
+            "não é definido para a célula."
+        )
+        layout.addWidget(text)
+
+        button_box = QDialogButtonBox(QDialogButtonBox.Ok, dialog)
+        ok_button = button_box.button(QDialogButtonBox.Ok)
+        if ok_button is not None:
+            ok_button.setText("OK")
+        button_box.accepted.connect(dialog.accept)
+        layout.addWidget(button_box)
+
+        dialog.setLayout(layout)
+        return dialog.exec() == QDialog.Accepted
+
     def _activate_aml_highlight(self) -> None:
         if self._aml_highlight_enabled:
             return
+        if self.reorder_neighbors_button.isChecked():
+            self.reorder_neighbors_button.setChecked(False)
         self._aml_highlight_enabled = True
         self._previous_sequence_index_for_aml = self.sequence_combo.currentIndex()
         self.sequence_combo.blockSignals(True)
@@ -1711,6 +1799,7 @@ class CellNeighborsWindow(QDialog):
         self._current_sequence_index = None
         self.sequence_combo.setEnabled(False)
         self.sequence_label.setEnabled(False)
+        self._set_aml_ui_lock(True)
         self._update_command_buttons()
         self.update_cell_colors_for_aml()
 
@@ -1720,6 +1809,7 @@ class CellNeighborsWindow(QDialog):
         self._aml_highlight_enabled = False
         self.sequence_combo.setEnabled(True)
         self.sequence_label.setEnabled(True)
+        self._set_aml_ui_lock(False)
         restore_index = self._previous_sequence_index_for_aml
         if restore_index < 0 or restore_index >= self.sequence_combo.count():
             restore_index = 0
@@ -2201,7 +2291,7 @@ class CellNeighborsWindow(QDialog):
 
     def _update_all_plus_buttons_visibility(self) -> None:
         """Update visibility of all '+' buttons based on cell availability."""
-        if self._reorder_edit_lock:
+        if self._reorder_edit_lock or self._aml_highlight_enabled or self._aml_ui_lock:
             for record in self._nodes_by_grid.values():
                 for direction in DIR_OFFSETS.keys():
                     btn = record.item.plus_items.get(direction)
