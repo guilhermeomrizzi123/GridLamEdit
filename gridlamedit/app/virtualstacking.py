@@ -2986,11 +2986,29 @@ class VirtualStackingWindow(QtWidgets.QDialog):
         if total_rows == 0:
             return
 
+        loop_iterations = total_rows // 2
+        progress_steps = max(loop_iterations + 3, 1)
+        progress = QtWidgets.QProgressDialog(
+            "Reordenação em andamento...",
+            None,
+            0,
+            progress_steps,
+            self,
+        )
+        progress.setWindowTitle("Reordenação")
+        progress.setWindowModality(QtCore.Qt.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.setAutoClose(True)
+        progress.setAutoReset(True)
+        progress.setValue(0)
+        QtWidgets.QApplication.processEvents()
+
         top = 0
         bottom = total_rows - 1
         front_rows: list[dict[str, Camada]] = []
         back_rows: list[list[dict[str, Camada]]] = []
 
+        current_step = 0
         while top < bottom:
             top_groups = self._build_row_groups(
                 top, adjacency, cell_layers, cell_order, order_index, passive_cells
@@ -3024,6 +3042,10 @@ class VirtualStackingWindow(QtWidgets.QDialog):
             top += 1
             bottom -= 1
 
+            current_step += 1
+            progress.setValue(current_step)
+            QtWidgets.QApplication.processEvents()
+
         center_rows: list[dict[str, Camada]] = []
         if top == bottom:
             # Sequência central permanece como está para preservar o eixo
@@ -3046,11 +3068,23 @@ class VirtualStackingWindow(QtWidgets.QDialog):
             for row in reversed(bottom_rows):
                 final_rows.append(row)
 
+        current_step += 1
+        progress.setValue(current_step)
+        QtWidgets.QApplication.processEvents()
+
         # Após aplicar as regras existentes, tratar as sequências centrais para separar orientações e blocos desconectados
         final_rows = self._process_center_sequences(final_rows, adjacency, cell_order, passive_cells)
 
+        current_step += 1
+        progress.setValue(current_step)
+        QtWidgets.QApplication.processEvents()
+
         self._apply_virtual_rows_to_laminates(final_rows)
         self._notify_changes([cell.laminate.nome for cell in self._cells])
+
+        current_step += 1
+        progress.setValue(current_step)
+        QtWidgets.QApplication.processEvents()
         QtWidgets.QMessageBox.information(
             self,
             "Reorder By Neighborhood",
