@@ -14,10 +14,12 @@ which returns the current neighbor map in memory (listas para suportar múltipla
 from __future__ import annotations
 
 from collections import Counter
+import json
 import logging
 import re
 import unicodedata
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Dict, Optional, Tuple
 
 from PySide6.QtCore import QPointF, QRectF, Qt, QSize, QLineF, QSignalBlocker
@@ -45,6 +47,7 @@ from PySide6.QtWidgets import (
     QComboBox,
     QInputDialog,
     QLineEdit,
+    QFileDialog,
 )
 
 from gridlamedit.core.paths import package_path
@@ -930,6 +933,17 @@ class CellNeighborsWindow(QDialog):
         self.aml_toggle_button.setToolTip("Colorir células pelo tipo de AML (Soft, Quasi-iso, Hard)")
         self.aml_toggle_button.toggled.connect(self._on_aml_toggle)
         toolbar.addWidget(self.aml_toggle_button)
+
+        # Export/Import neighbors
+        self.export_neighbors_button = QPushButton("Exportar vizinhanças", self)
+        self.export_neighbors_button.setToolTip("Exportar vizinhanças e desenhos para um arquivo JSON")
+        self.export_neighbors_button.clicked.connect(self._export_neighbors_to_file)
+        toolbar.addWidget(self.export_neighbors_button)
+
+        self.import_neighbors_button = QPushButton("Importar vizinhanças", self)
+        self.import_neighbors_button.setToolTip("Importar vizinhanças e desenhos de um arquivo JSON")
+        self.import_neighbors_button.clicked.connect(self._import_neighbors_from_file)
+        toolbar.addWidget(self.import_neighbors_button)
 
         # Drawing tools palette
         self._drawing_tool: Optional[str] = None
@@ -1926,6 +1940,151 @@ class CellNeighborsWindow(QDialog):
                     import logging
                     logger = logging.getLogger(__name__)
                     logger.warning(f"Failed to save cell neighbors: {e}")
+
+    def _export_neighbors_to_file(self) -> None:
+        """Export neighbors (including drawings) to a JSON file."""
+        base_dir = None
+        if self._project_manager is not None:
+            try:
+                if self._project_manager.current_path is not None:
+                    base_dir = Path(self._project_manager.current_path).parent
+            except Exception:
+                base_dir = None
+        if base_dir is None:
+            base_dir = Path.cwd()
+
+        default_path = base_dir / "cell_neighbors.json"
+        file_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Exportar vizinhanças",
+            str(default_path),
+            "JSON (*.json)",
+        )
+        if not file_path:
+            return
+
+        output_path = Path(file_path)
+        if output_path.suffix.lower() != ".json":
+            output_path = output_path.with_suffix(".json")
+
+        payload = {
+            "version": 1,
+            "neighbors": self.get_neighbors_mapping(),
+            "nodes": self._build_neighbor_nodes_payload(),
+            "drawings": self._build_drawing_payload(),
+        }
+        try:
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_text(
+                json.dumps(payload, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            QMessageBox.information(
+                self,
+                "Exportação concluída",
+                f"Vizinhanças exportadas para:\n{output_path}",
+            )
+        except Exception as exc:
+            QMessageBox.warning(
+                self,
+                "Falha ao exportar",
+                f"Não foi possível exportar o arquivo.\nErro: {exc}",
+            )
+
+    def _import_neighbors_from_file(self) -> None:
+        """Import neighbors (including drawings) from a JSON file."""
+        base_dir = None
+        if self._project_manager is not None:
+            try:
+                if self._project_manager.current_path is not None:
+                    base_dir = Path(self._project_manager.current_path).parent
+            except Exception:
+                base_dir = None
+        if base_dir is None:
+            base_dir = Path.cwd()
+
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Importar vizinhanças",
+            str(base_dir),
+            "JSON (*.json)",
+        )
+        if not file_path:
+            return
+
+        confirmation = QMessageBox.question(
+            self,
+            "Importar vizinhanças",
+            "Isso irá substituir as vizinhanças atuais. Deseja continuar?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if confirmation != QMessageBox.Yes:
+            return
+
+        try:
+            raw_text = Path(file_path).read_text(encoding="utf-8")
+            data = json.loads(raw_text)
+        except Exception as exc:
+            QMessageBox.warning(
+                self,
+                "Falha ao importar",
+                f"Não foi possível ler o arquivo.\nErro: {exc}",
+            )
+            return
+
+        if not isinstance(data, dict):
+            QMessageBox.warning(
+                self,
+                "Arquivo inválido",
+                "O arquivo selecionado não possui o formato esperado.",
+            )
+            return
+
+        nodes_payload = data.get("nodes", [])
+        neighbors_payload = data.get("neighbors", {})
+        drawings_payload = data.get("drawings", [])
+
+        # Expand known cells list with imported ones
+        imported_cells: list[str] = []
+        if isinstance(nodes_payload, list):
+            for entry in nodes_payload:
+                if isinstance(entry, dict):
+                    cell = str(entry.get("cell", "") or "").strip()
+                    if cell:
+                        imported_cells.append(cell)
+        if isinstance(neighbors_payload, dict):
+            for cell in neighbors_payload.keys():
+                cell_id = str(cell).strip()
+                if cell_id:
+                    imported_cells.append(cell_id)
+        for cell in imported_cells:
+            if cell and cell not in self._cells:
+                self._cells.append(cell)
+
+        if isinstance(nodes_payload, list) and nodes_payload:
+            self._rebuild_graph_from_nodes_payload(nodes_payload)
+        elif isinstance(neighbors_payload, dict) and neighbors_payload:
+            self._neighbors = self._convert_legacy_neighbors(neighbors_payload)
+            self._rebuild_graph_from_neighbors()
+        else:
+            QMessageBox.warning(
+                self,
+                "Arquivo inválido",
+                "Nenhuma vizinhança válida encontrada no arquivo.",
+            )
+            return
+
+        if isinstance(drawings_payload, list):
+            self._restore_drawings_from_payload(drawings_payload)
+        else:
+            self._clear_drawing_items()
+
+        self._recalculate_cell_neighbors_from_scene()
+        self._update_all_plus_buttons_visibility()
+        self._expand_scene_rect()
+        self._center_view_on_cells()
+        self._mark_as_modified()
 
     def _expand_scene_rect(self) -> None:
         """Expand the scene rect to fit all nodes with a safety margin."""
