@@ -4122,9 +4122,9 @@ class MainWindow(QMainWindow):
         source_path = model.source_excel_path
         if source_path:
             base_path = Path(source_path)
-            suggested = base_path.with_name(f"{base_path.stem}_editado.xlsx")
+            suggested = base_path.with_name("Grid.For.Catia.Import.xlsx")
         else:
-            suggested = Path.cwd() / "grid_export.xlsx"
+            suggested = Path.cwd() / "Grid.For.Catia.Import.xlsx"
 
         options = self._file_dialog_options()
         path_str, _ = QFileDialog.getSaveFileName(

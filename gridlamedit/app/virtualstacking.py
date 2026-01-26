@@ -1295,7 +1295,7 @@ class VirtualStackingWindow(QtWidgets.QDialog):
             last = ""
         if last:
             return str(last)
-        return str(Path.home() / "Grid Lam Vs Exported_RevC.xls")
+        return str(Path.home() / "Virtual.Stacking.For.Catia.Import.xls")
 
     def _export_virtual_stacking(self) -> None:
         if hasattr(self, "btn_reorganize_neighbors") and not self.btn_reorganize_neighbors.isChecked():

@@ -1953,7 +1953,7 @@ class CellNeighborsWindow(QDialog):
         if base_dir is None:
             base_dir = Path.cwd()
 
-        default_path = base_dir / "cell_neighbors.json"
+        default_path = base_dir / "Cell.Neighbors.Definition.json"
         file_path, _ = QFileDialog.getSaveFileName(
             self,
             "Exportar vizinhanças",
