@@ -884,6 +884,7 @@ class CellNeighborsWindow(QDialog):
         self._undo_stack.setUndoLimit(3)
         self._has_unsaved_changes = False
         self._virtual_stacking_proxy = None
+        self._reorder_edit_lock = False
 
         # Main layout
         main_layout = QVBoxLayout(self)
@@ -1029,6 +1030,8 @@ class CellNeighborsWindow(QDialog):
         view.viewport().installEventFilter(self)
 
     def _on_drawing_tool_toggled(self, tool: str, checked: bool) -> None:
+        if self._reorder_edit_lock:
+            return
         if checked:
             for name, action in self._drawing_actions.items():
                 if name != tool and action.isChecked():
@@ -1368,6 +1371,39 @@ class CellNeighborsWindow(QDialog):
         if self.reorder_neighbors_button.isChecked():
             self.reorder_neighbors_button.setChecked(False)
 
+    def _set_reorder_edit_lock(self, locked: bool) -> None:
+        if self._reorder_edit_lock == locked:
+            return
+        self._reorder_edit_lock = locked
+
+        # Drawing tools
+        if locked:
+            for action in self._drawing_actions.values():
+                if action.isChecked():
+                    blocker = QSignalBlocker(action)
+                    action.setChecked(False)
+                    del blocker
+            self._drawing_tool = None
+            self._cancel_active_line()
+            self._apply_drawing_cursor()
+        for action in self._drawing_actions.values():
+            action.setEnabled(not locked)
+
+        # Editing-related buttons
+        self.aml_toggle_button.setEnabled(not locked)
+        self.export_neighbors_button.setEnabled(not locked)
+        self.import_neighbors_button.setEnabled(not locked)
+
+        # Undo/Redo actions
+        if locked:
+            self.undo_action.setEnabled(False)
+            self.redo_action.setEnabled(False)
+        else:
+            self._update_command_buttons()
+
+        # Refresh plus buttons visibility (used to add neighbors)
+        self._update_all_plus_buttons_visibility()
+
     # -------- Public API ---------
     def populate_from_project(self, model: Optional[GridModel], project_manager=None) -> None:
         """Populate the window with cells from the project and load existing neighbors."""
@@ -1455,6 +1491,10 @@ class CellNeighborsWindow(QDialog):
 
     def _update_command_buttons(self, *args) -> None:
         """Enable/disable Undo/Redo respecting AML lock state."""
+        if self._reorder_edit_lock:
+            self.undo_action.setEnabled(False)
+            self.redo_action.setEnabled(False)
+            return
         if self._aml_highlight_enabled:
             self.undo_action.setEnabled(False)
             self.redo_action.setEnabled(False)
@@ -1651,6 +1691,7 @@ class CellNeighborsWindow(QDialog):
             self.reorder_neighbors_button.setChecked(actual_checked)
             del blocker
 
+        self._set_reorder_edit_lock(actual_checked)
         self._refresh_sequence_combo_preserve_selection()
 
     def _on_aml_toggle(self, enabled: bool) -> None:
@@ -1943,6 +1984,8 @@ class CellNeighborsWindow(QDialog):
 
     def _export_neighbors_to_file(self) -> None:
         """Export neighbors (including drawings) to a JSON file."""
+        if self._reorder_edit_lock:
+            return
         base_dir = None
         if self._project_manager is not None:
             try:
@@ -1993,6 +2036,8 @@ class CellNeighborsWindow(QDialog):
 
     def _import_neighbors_from_file(self) -> None:
         """Import neighbors (including drawings) from a JSON file."""
+        if self._reorder_edit_lock:
+            return
         base_dir = None
         if self._project_manager is not None:
             try:
@@ -2156,6 +2201,17 @@ class CellNeighborsWindow(QDialog):
 
     def _update_all_plus_buttons_visibility(self) -> None:
         """Update visibility of all '+' buttons based on cell availability."""
+        if self._reorder_edit_lock:
+            for record in self._nodes_by_grid.values():
+                for direction in DIR_OFFSETS.keys():
+                    btn = record.item.plus_items.get(direction)
+                    line = record.item.plus_lines.get(direction)
+                    if btn:
+                        btn.setVisible(False)
+                    if line:
+                        line.setVisible(False)
+            self._update_command_buttons()
+            return
         has_available = self._has_available_cells()
         
         for record in self._nodes_by_grid.values():
@@ -2260,6 +2316,8 @@ class CellNeighborsWindow(QDialog):
 
     def _delete_cell(self, record: _NodeRecord) -> None:
         """Delete a cell from the scene and update all neighbors."""
+        if self._reorder_edit_lock:
+            return
         if len(self._nodes_by_grid) <= 1:
             QMessageBox.information(
                 self,
@@ -2290,6 +2348,8 @@ class CellNeighborsWindow(QDialog):
 
     def _change_cell_orientation(self, record: _NodeRecord) -> None:
         """Change the orientation of a cell's layer for the current sequence."""
+        if self._reorder_edit_lock:
+            return
         # Check if there is a cell assigned
         if not record.cell_id:
             QMessageBox.information(
@@ -2984,6 +3044,8 @@ class CellNeighborsWindow(QDialog):
         return choices
 
     def _prompt_apply_laminate(self, record: _NodeRecord) -> None:
+        if self._reorder_edit_lock:
+            return
         if not record.cell_id:
             QMessageBox.information(
                 self,
@@ -3045,6 +3107,8 @@ class CellNeighborsWindow(QDialog):
         self._mark_as_modified()
 
     def _handle_add_neighbor(self, record: _NodeRecord, direction: str) -> None:
+        if self._reorder_edit_lock:
+            return
         # Check if there are available cells before proceeding
         if not self._has_available_cells():
             return
@@ -3066,6 +3130,8 @@ class CellNeighborsWindow(QDialog):
                 )
                 if not neighbor.cell_id:
                     return
+                    if self._reorder_edit_lock:
+                        return
             self._link_cells(
                 record.cell_id,
                 direction,
