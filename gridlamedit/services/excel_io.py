@@ -11,6 +11,28 @@ from gridlamedit.io.spreadsheet import GridModel, save_grid_spreadsheet
 logger = logging.getLogger(__name__)
 
 
+def _select_sheet_name(
+    available: list[str],
+    preferred: str,
+    *,
+    context: str,
+    file_name: str,
+) -> str:
+    if preferred in available:
+        return preferred
+    if not available:
+        raise ValueError(f"O {context} '{file_name}' nao possui abas para leitura.")
+    fallback = available[0]
+    logger.warning(
+        "Aba '%s' nao encontrada no %s '%s'. Usando '%s'.",
+        preferred,
+        context,
+        file_name,
+        fallback,
+    )
+    return fallback
+
+
 def export_grid_xlsx(
     model: GridModel,
     path: Path,
@@ -137,13 +159,13 @@ def _restore_preserved_columns(
     original_path = Path(source_excel)
 
     wb_out = load_workbook(output_path)
-    if sheet_name not in wb_out.sheetnames:
-        logger.warning(
-            "Sheet '%s' nao encontrada no arquivo exportado. Pulando preservacao.", sheet_name
-        )
-        wb_out.save(output_path)
-        return
-    ws_out = wb_out[sheet_name]
+    out_sheet_name = _select_sheet_name(
+        list(wb_out.sheetnames),
+        sheet_name,
+        context="arquivo exportado",
+        file_name=output_path.name,
+    )
+    ws_out = wb_out[out_sheet_name]
     max_row_out = ws_out.max_row
 
     original_suffix = original_path.suffix.lower()
@@ -181,12 +203,13 @@ def _restore_preserved_columns_xls(
     original_path = Path(source_excel)
 
     output_book = xlrd.open_workbook(output_path)  # type: ignore[arg-type]
-    try:
-        sheet_out = output_book.sheet_by_name(sheet_name)
-    except xlrd.biffh.XLRDError as exc:  # type: ignore[attr-defined]
-        raise ValueError(
-            f"Aba '{sheet_name}' nao encontrada no arquivo exportado '{output_path.name}'."
-        ) from exc
+    output_sheet_name = _select_sheet_name(
+        list(output_book.sheet_names()),
+        sheet_name,
+        context="arquivo exportado",
+        file_name=output_path.name,
+    )
+    sheet_out = output_book.sheet_by_name(output_sheet_name)
 
     max_row_out = sheet_out.nrows
 
@@ -222,7 +245,7 @@ def _restore_preserved_columns_xls(
             row[dest_idx] = value
 
     wb_new = xlwt.Workbook()
-    ws_new = wb_new.add_sheet(sheet_name)
+    ws_new = wb_new.add_sheet(output_sheet_name)
     for r_idx, row in enumerate(data_out):
         for c_idx, value in enumerate(row):
             ws_new.write(r_idx, c_idx, value)
@@ -238,11 +261,13 @@ def _read_preserved_columns_from_xlsx(
     from openpyxl import load_workbook
 
     wb_in = load_workbook(original_path, data_only=False, read_only=False)
-    if sheet_name not in wb_in.sheetnames:
-        raise ValueError(
-            f"Aba '{sheet_name}' nao encontrada no arquivo original '{original_path.name}'."
-        )
-    ws_in = wb_in[sheet_name]
+    input_sheet_name = _select_sheet_name(
+        list(wb_in.sheetnames),
+        sheet_name,
+        context="arquivo original",
+        file_name=original_path.name,
+    )
+    ws_in = wb_in[input_sheet_name]
     max_row = min(max_rows, ws_in.max_row)
     data: list[list[Optional[object]]] = []
     for row_idx in range(1, max_row + 1):
@@ -267,12 +292,13 @@ def _read_preserved_columns_from_xls(
         ) from exc
 
     workbook = xlrd.open_workbook(original_path)  # type: ignore[arg-type]
-    try:
-        sheet = workbook.sheet_by_name(sheet_name)
-    except xlrd.biffh.XLRDError as exc:  # type: ignore[attr-defined]
-        raise ValueError(
-            f"Aba '{sheet_name}' nao encontrada no arquivo original '{original_path.name}'."
-        ) from exc
+    input_sheet_name = _select_sheet_name(
+        list(workbook.sheet_names()),
+        sheet_name,
+        context="arquivo original",
+        file_name=original_path.name,
+    )
+    sheet = workbook.sheet_by_name(input_sheet_name)
 
     max_row = min(max_rows, sheet.nrows)
     data: list[list[Optional[object]]] = []
