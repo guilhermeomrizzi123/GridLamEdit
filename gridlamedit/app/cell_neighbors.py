@@ -1411,6 +1411,8 @@ class CellNeighborsWindow(QDialog):
         self.aml_toggle_button.setEnabled(not locked and not self._missing_laminate_ui_lock)
         self.export_neighbors_button.setEnabled(not locked and not self._missing_laminate_ui_lock)
         self.import_neighbors_button.setEnabled(not locked and not self._missing_laminate_ui_lock)
+        if hasattr(self, "missing_laminate_button"):
+            self.missing_laminate_button.setEnabled(not locked and not self._aml_ui_lock)
 
         # Undo/Redo actions
         if locked or self._missing_laminate_ui_lock:
@@ -1444,6 +1446,8 @@ class CellNeighborsWindow(QDialog):
         self.reorder_neighbors_button.setEnabled(not locked and not self._missing_laminate_ui_lock)
         self.export_neighbors_button.setEnabled(not locked and not self._missing_laminate_ui_lock)
         self.import_neighbors_button.setEnabled(not locked and not self._missing_laminate_ui_lock)
+        if hasattr(self, "missing_laminate_button"):
+            self.missing_laminate_button.setEnabled(not locked and not self._reorder_edit_lock)
 
         # Refresh plus buttons visibility (used to add neighbors)
         self._update_all_plus_buttons_visibility()
