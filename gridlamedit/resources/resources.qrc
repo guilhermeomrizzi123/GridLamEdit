@@ -1,5 +1,5 @@
 <RCC>
-  <qresource prefix="/icons">
+  <qresource prefix="/">
     <file>icons/Trocar_Materiais.jpg</file>
     <file>icons/Trocar_Orientacao.jpg</file>
     <file>icons/Criar_novo_laminado_ControlV.jpg</file>
