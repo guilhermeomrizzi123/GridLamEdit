@@ -27,5 +27,5 @@ if errorlevel 1 (
 )
 
 echo.
-echo Build concluido. O executavel unico esta em dist\GridLamEdit.exe
+echo Build concluido. O executavel unico esta em dist\GridLamEdit_V13.exe
 exit /b 0
