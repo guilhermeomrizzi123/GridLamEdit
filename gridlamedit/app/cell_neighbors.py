@@ -886,6 +886,8 @@ class CellNeighborsWindow(QDialog):
         self._has_unsaved_changes = False
         self._virtual_stacking_proxy = None
         self._reorder_edit_lock = False
+        self._missing_laminate_ui_lock = False
+        self._missing_laminate_toggle_active = False
 
         # Main layout
         main_layout = QVBoxLayout(self)
@@ -935,6 +937,13 @@ class CellNeighborsWindow(QDialog):
         self.aml_toggle_button.setToolTip("Colorir células pelo tipo de AML (Soft, Quasi-iso, Hard)")
         self.aml_toggle_button.toggled.connect(self._on_aml_toggle)
         toolbar.addWidget(self.aml_toggle_button)
+
+        # Missing laminate highlight toggle
+        self.missing_laminate_button = QPushButton("Sem laminado (0)", self)
+        self.missing_laminate_button.setCheckable(True)
+        self.missing_laminate_button.setToolTip("Destacar células sem laminado aplicado")
+        self.missing_laminate_button.toggled.connect(self._on_missing_laminate_toggle)
+        toolbar.addWidget(self.missing_laminate_button)
 
         # Export/Import neighbors
         self.export_neighbors_button = QPushButton("Exportar vizinhanças", self)
@@ -1032,7 +1041,7 @@ class CellNeighborsWindow(QDialog):
         view.viewport().installEventFilter(self)
 
     def _on_drawing_tool_toggled(self, tool: str, checked: bool) -> None:
-        if self._reorder_edit_lock:
+        if self._reorder_edit_lock or self._missing_laminate_ui_lock:
             return
         if checked:
             for name, action in self._drawing_actions.items():
@@ -1351,6 +1360,7 @@ class CellNeighborsWindow(QDialog):
         
         # Ensure reorder toggle is off before closing
         self._ensure_reorder_neighbors_off()
+        self._ensure_missing_laminate_off()
 
         # Clear highlights and proceed with close
         self._clear_disconnected_highlights()
@@ -1359,6 +1369,7 @@ class CellNeighborsWindow(QDialog):
     def hideEvent(self, event) -> None:
         """Ensure transient toggles are disabled when the window is hidden."""
         self._ensure_reorder_neighbors_off()
+        self._ensure_missing_laminate_off()
         super().hideEvent(event)
 
     def reject(self) -> None:
@@ -1366,12 +1377,17 @@ class CellNeighborsWindow(QDialog):
         if not self._check_and_handle_disconnected_blocks():
             return
         self._ensure_reorder_neighbors_off()
+        self._ensure_missing_laminate_off()
         self._clear_disconnected_highlights()
         super().reject()
 
     def _ensure_reorder_neighbors_off(self) -> None:
         if self.reorder_neighbors_button.isChecked():
             self.reorder_neighbors_button.setChecked(False)
+
+    def _ensure_missing_laminate_off(self) -> None:
+        if hasattr(self, "missing_laminate_button") and self.missing_laminate_button.isChecked():
+            self.missing_laminate_button.setChecked(False)
 
     def _set_reorder_edit_lock(self, locked: bool) -> None:
         if self._reorder_edit_lock == locked:
@@ -1389,15 +1405,15 @@ class CellNeighborsWindow(QDialog):
             self._cancel_active_line()
             self._apply_drawing_cursor()
         for action in self._drawing_actions.values():
-            action.setEnabled(not locked)
+            action.setEnabled(not locked and not self._missing_laminate_ui_lock)
 
         # Editing-related buttons
-        self.aml_toggle_button.setEnabled(not locked)
-        self.export_neighbors_button.setEnabled(not locked)
-        self.import_neighbors_button.setEnabled(not locked)
+        self.aml_toggle_button.setEnabled(not locked and not self._missing_laminate_ui_lock)
+        self.export_neighbors_button.setEnabled(not locked and not self._missing_laminate_ui_lock)
+        self.import_neighbors_button.setEnabled(not locked and not self._missing_laminate_ui_lock)
 
         # Undo/Redo actions
-        if locked:
+        if locked or self._missing_laminate_ui_lock:
             self.undo_action.setEnabled(False)
             self.redo_action.setEnabled(False)
         else:
@@ -1422,12 +1438,48 @@ class CellNeighborsWindow(QDialog):
             self._cancel_active_line()
             self._apply_drawing_cursor()
         for action in self._drawing_actions.values():
-            action.setEnabled(not locked)
+            action.setEnabled(not locked and not self._missing_laminate_ui_lock)
 
         # Editing-related buttons (keep AML toggle enabled)
-        self.reorder_neighbors_button.setEnabled(not locked)
-        self.export_neighbors_button.setEnabled(not locked)
-        self.import_neighbors_button.setEnabled(not locked)
+        self.reorder_neighbors_button.setEnabled(not locked and not self._missing_laminate_ui_lock)
+        self.export_neighbors_button.setEnabled(not locked and not self._missing_laminate_ui_lock)
+        self.import_neighbors_button.setEnabled(not locked and not self._missing_laminate_ui_lock)
+
+        # Refresh plus buttons visibility (used to add neighbors)
+        self._update_all_plus_buttons_visibility()
+
+    def _set_missing_laminate_ui_lock(self, locked: bool) -> None:
+        if self._missing_laminate_ui_lock == locked:
+            return
+        self._missing_laminate_ui_lock = locked
+
+        # Drawing tools
+        if locked:
+            for action in self._drawing_actions.values():
+                if action.isChecked():
+                    blocker = QSignalBlocker(action)
+                    action.setChecked(False)
+                    del blocker
+            self._drawing_tool = None
+            self._cancel_active_line()
+            self._apply_drawing_cursor()
+        for action in self._drawing_actions.values():
+            action.setEnabled(not locked and not self._reorder_edit_lock and not self._aml_ui_lock)
+
+        # Editing-related buttons
+        self.sequence_combo.setEnabled(not locked and not self._aml_highlight_enabled)
+        self.sequence_label.setEnabled(not locked and not self._aml_highlight_enabled)
+        self.reorder_neighbors_button.setEnabled(not locked and not self._aml_ui_lock)
+        self.aml_toggle_button.setEnabled(not locked and not self._reorder_edit_lock)
+        self.export_neighbors_button.setEnabled(not locked and not self._reorder_edit_lock and not self._aml_ui_lock)
+        self.import_neighbors_button.setEnabled(not locked and not self._reorder_edit_lock and not self._aml_ui_lock)
+
+        # Undo/Redo actions
+        if locked:
+            self.undo_action.setEnabled(False)
+            self.redo_action.setEnabled(False)
+        else:
+            self._update_command_buttons()
 
         # Refresh plus buttons visibility (used to add neighbors)
         self._update_all_plus_buttons_visibility()
@@ -1439,6 +1491,8 @@ class CellNeighborsWindow(QDialog):
         self._project_manager = project_manager
         # Always start with AML highlight disabled for a fresh load
         self.aml_toggle_button.setChecked(False)
+        if hasattr(self, "missing_laminate_button"):
+            self.missing_laminate_button.setChecked(False)
         cells = []
         self._neighbors = {}
         if model is not None:
@@ -1472,6 +1526,7 @@ class CellNeighborsWindow(QDialog):
             self._update_node_cell_display(rec)
         # Update all plus buttons visibility after loading project
         self._update_all_plus_buttons_visibility()
+        self._refresh_missing_laminate_button_state()
         # Populate sequence combo (max layers among laminados)
         self._populate_sequence_combo()
         self._update_command_buttons()
@@ -1519,7 +1574,7 @@ class CellNeighborsWindow(QDialog):
 
     def _update_command_buttons(self, *args) -> None:
         """Enable/disable Undo/Redo respecting AML lock state."""
-        if self._reorder_edit_lock:
+        if self._reorder_edit_lock or self._missing_laminate_ui_lock:
             self.undo_action.setEnabled(False)
             self.redo_action.setEnabled(False)
             return
@@ -1672,6 +1727,11 @@ class CellNeighborsWindow(QDialog):
         return window
 
     def _on_reorder_neighbors_toggle(self, checked: bool) -> None:
+        if self._missing_laminate_ui_lock:
+            blocker = QSignalBlocker(self.reorder_neighbors_button)
+            self.reorder_neighbors_button.setChecked(False)
+            del blocker
+            return
         if self._aml_highlight_enabled or self._aml_ui_lock:
             blocker = QSignalBlocker(self.reorder_neighbors_button)
             self.reorder_neighbors_button.setChecked(False)
@@ -1728,6 +1788,11 @@ class CellNeighborsWindow(QDialog):
         self._refresh_sequence_combo_preserve_selection()
 
     def _on_aml_toggle(self, enabled: bool) -> None:
+        if self._missing_laminate_ui_lock:
+            blocker = QSignalBlocker(self.aml_toggle_button)
+            self.aml_toggle_button.setChecked(False)
+            del blocker
+            return
         if enabled:
             if not self._show_aml_formula_dialog():
                 blocker = QSignalBlocker(self.aml_toggle_button)
@@ -1737,6 +1802,25 @@ class CellNeighborsWindow(QDialog):
             self._activate_aml_highlight()
         else:
             self._deactivate_aml_highlight()
+
+    def _on_missing_laminate_toggle(self, enabled: bool) -> None:
+        if enabled:
+            if self.reorder_neighbors_button.isChecked():
+                self.reorder_neighbors_button.setChecked(False)
+            if self.aml_toggle_button.isChecked():
+                self.aml_toggle_button.setChecked(False)
+            self._missing_laminate_toggle_active = True
+            missing_cells = self._collect_missing_laminate_cells()
+            if missing_cells:
+                self._set_missing_laminate_highlight(missing_cells)
+            else:
+                self._clear_missing_laminate_highlight()
+            self._set_missing_laminate_ui_lock(True)
+        else:
+            self._missing_laminate_toggle_active = False
+            self._clear_missing_laminate_highlight()
+            self._set_missing_laminate_ui_lock(False)
+        self._refresh_missing_laminate_button_state()
 
     def _show_aml_formula_dialog(self) -> bool:
         dialog = QDialog(self)
@@ -1867,30 +1951,49 @@ class CellNeighborsWindow(QDialog):
 
     def _set_missing_laminate_highlight(self, missing_cells: list[str]) -> None:
         self._missing_laminate_cells = set(missing_cells)
-        self._missing_laminate_highlight_enabled = bool(missing_cells)
+        self._missing_laminate_highlight_enabled = self._missing_laminate_toggle_active or bool(missing_cells)
         if self._aml_highlight_enabled:
             self.update_cell_colors_for_aml()
         else:
             self.update_cell_colors_for_sequence(self._current_sequence_index)
+        self._refresh_missing_laminate_button_state()
 
     def _clear_missing_laminate_highlight(self) -> None:
         if not self._missing_laminate_cells and not self._missing_laminate_highlight_enabled:
             return
         self._missing_laminate_cells.clear()
-        self._missing_laminate_highlight_enabled = False
+        self._missing_laminate_highlight_enabled = self._missing_laminate_toggle_active
         if self._aml_highlight_enabled:
             self.update_cell_colors_for_aml()
         else:
             self.update_cell_colors_for_sequence(self._current_sequence_index)
+        self._refresh_missing_laminate_button_state()
 
     def _refresh_missing_laminate_highlight(self) -> None:
-        if not self._missing_laminate_highlight_enabled:
+        self._refresh_missing_laminate_button_state()
+        if not self._missing_laminate_highlight_enabled and not self._missing_laminate_toggle_active:
             return
         missing_cells = self._collect_missing_laminate_cells()
         if missing_cells:
             self._set_missing_laminate_highlight(missing_cells)
         else:
             self._clear_missing_laminate_highlight()
+
+    def _refresh_missing_laminate_button_state(self) -> None:
+        if not hasattr(self, "missing_laminate_button"):
+            return
+        missing_cells = self._collect_missing_laminate_cells()
+        count = len(missing_cells)
+        self.missing_laminate_button.setText(f"Sem laminado ({count})")
+        if count:
+            preview = ", ".join(missing_cells[:6])
+            suffix = "" if count <= 6 else f" (+{count - 6})"
+            detail = f"\nCélulas: {preview}{suffix}" if preview else ""
+            self.missing_laminate_button.setToolTip(
+                "Destacar células sem laminado aplicado" + detail
+            )
+        else:
+            self.missing_laminate_button.setToolTip("Destacar células sem laminado aplicado")
 
     def update_cell_colors_for_sequence(self, sequence_index: Optional[int]) -> None:
         """Apply orientation-based colours to each cell for the given sequence.
@@ -2074,7 +2177,7 @@ class CellNeighborsWindow(QDialog):
 
     def _export_neighbors_to_file(self) -> None:
         """Export neighbors (including drawings) to a JSON file."""
-        if self._reorder_edit_lock:
+        if self._reorder_edit_lock or self._missing_laminate_ui_lock:
             return
         base_dir = None
         if self._project_manager is not None:
@@ -2126,7 +2229,7 @@ class CellNeighborsWindow(QDialog):
 
     def _import_neighbors_from_file(self) -> None:
         """Import neighbors (including drawings) from a JSON file."""
-        if self._reorder_edit_lock:
+        if self._reorder_edit_lock or self._missing_laminate_ui_lock:
             return
         base_dir = None
         if self._project_manager is not None:
@@ -2291,7 +2394,7 @@ class CellNeighborsWindow(QDialog):
 
     def _update_all_plus_buttons_visibility(self) -> None:
         """Update visibility of all '+' buttons based on cell availability."""
-        if self._reorder_edit_lock or self._aml_highlight_enabled or self._aml_ui_lock:
+        if self._reorder_edit_lock or self._aml_highlight_enabled or self._aml_ui_lock or self._missing_laminate_ui_lock:
             for record in self._nodes_by_grid.values():
                 for direction in DIR_OFFSETS.keys():
                     btn = record.item.plus_items.get(direction)
@@ -3197,7 +3300,7 @@ class CellNeighborsWindow(QDialog):
         self._mark_as_modified()
 
     def _handle_add_neighbor(self, record: _NodeRecord, direction: str) -> None:
-        if self._reorder_edit_lock:
+        if self._reorder_edit_lock or self._missing_laminate_ui_lock:
             return
         # Check if there are available cells before proceeding
         if not self._has_available_cells():
