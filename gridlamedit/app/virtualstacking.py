@@ -1304,12 +1304,10 @@ class VirtualStackingWindow(QtWidgets.QDialog):
         if last:
             try:
                 last_path = Path(str(last))
-                if last_path.suffix.lower() == ".xls":
-                    return str(last_path.with_suffix(".xlsx"))
+                return str(last_path.parent)
             except Exception:
                 return str(last)
-            return str(last)
-        return str(Path.home() / "Virtual.Stacking.For.Catia.Import.xlsx")
+        return str(Path.home())
 
     def _export_virtual_stacking(self) -> None:
         if hasattr(self, "btn_reorganize_neighbors") and not self.btn_reorganize_neighbors.isChecked():

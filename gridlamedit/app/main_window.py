@@ -4442,23 +4442,41 @@ class MainWindow(QMainWindow):
         if model is None:
             return None
 
+        suggested_dir = Path.cwd()
         source_path = model.source_excel_path
         if source_path:
-            base_path = Path(source_path)
-            suggested = base_path.with_name("Grid.For.Catia.Import.xlsx")
-        else:
-            suggested = Path.cwd() / "Grid.For.Catia.Import.xlsx"
+            try:
+                suggested_dir = Path(source_path).resolve().parent
+            except Exception:
+                suggested_dir = Path(source_path).parent
+
+        last_export = ""
+        if hasattr(self, "_settings"):
+            try:
+                last_export = str(self._settings.value("export/last_grid_export_path", ""))
+            except Exception:
+                last_export = ""
+        if last_export:
+            try:
+                suggested_dir = Path(last_export).resolve().parent
+            except Exception:
+                suggested_dir = Path(last_export).parent
 
         options = self._file_dialog_options()
         path_str, _ = QFileDialog.getSaveFileName(
             self,
             "Exportar planilha do Grid Design",
-            str(suggested),
+            str(suggested_dir),
             "Planilhas Excel (*.xlsx);;Todos os arquivos (*)",
             options=options,
         )
         if not path_str:
             return None
+        if hasattr(self, "_settings"):
+            try:
+                self._settings.setValue("export/last_grid_export_path", path_str)
+            except Exception:
+                pass
         return Path(path_str)
 
     def _export_model_to_path(self, target_path: Path) -> bool:
