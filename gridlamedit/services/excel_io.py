@@ -46,8 +46,8 @@ def export_grid_xlsx(
     model:
         GridModel instance containing the state to export.
     path:
-        Target file path. When no ``.xlsx``/``.xls`` suffix is provided, ``.xlsx`` is used.
-        Both ``.xlsx`` and ``.xls`` files will be written using the same base name.
+        Target file path. When no ``.xlsx`` suffix is provided, ``.xlsx`` is used.
+        Apenas ``.xlsx`` sera escrito.
     template_info:
         Placeholder for future template metadata (unused for now).
 
@@ -60,11 +60,9 @@ def export_grid_xlsx(
         raise ValueError("Model ausente para exportacao da planilha.")
 
     output_path = Path(path)
-    if output_path.suffix.lower() not in {".xlsx", ".xls"}:
+    if output_path.suffix.lower() != ".xlsx":
         output_path = output_path.with_suffix(".xlsx")
-    base_path = output_path.with_suffix("")
-    xlsx_path = base_path.with_suffix(".xlsx")
-    xls_path = base_path.with_suffix(".xls")
+    xlsx_path = output_path
 
     if template_info:
         logger.info("Ignorando template_info nao utilizado: keys=%s", list(template_info))
@@ -81,8 +79,6 @@ def export_grid_xlsx(
         )
         preserved_sheet = preserved_payload.get("sheet_name", preserved_sheet)
 
-    exported: list[Path] = []
-
     try:
         save_grid_spreadsheet(str(xlsx_path), model)
         _apply_preserved_columns(
@@ -92,23 +88,8 @@ def export_grid_xlsx(
             sheet_name=preserved_sheet,
             preserved_columns=preserved_columns,
         )
-        exported.append(xlsx_path)
     except Exception as exc:
         raise ValueError(f"Falha ao exportar arquivo .xlsx: {exc}") from exc
-
-    try:
-        save_grid_spreadsheet(str(xls_path), model)
-        _apply_preserved_columns(
-            model,
-            xls_path,
-            preserved_data=preserved_data,
-            sheet_name=preserved_sheet,
-            preserved_columns=preserved_columns,
-        )
-        exported.append(xls_path)
-    except Exception as exc:
-        exported_hint = "" if not exported else f" Arquivo(s) gerados: {', '.join(p.name for p in exported)}."
-        raise ValueError(f"Falha ao exportar arquivo .xls: {exc}.{exported_hint}") from exc
 
     return output_path
 

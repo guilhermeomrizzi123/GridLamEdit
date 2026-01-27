@@ -1254,7 +1254,7 @@ class VirtualStackingWindow(QtWidgets.QDialog):
         self.btn_export_virtual = QtWidgets.QToolButton(self)
         self.btn_export_virtual.setText("Export Virtual Stacking")
         self.btn_export_virtual.setToolTip(
-            "Exporta a planilha nos formatos .xls e .xlsx (template Grid Lam Vs Exported_RevC) para importação no CATIA."
+            "Exporta a planilha em .xlsx (template Grid Lam Vs Exported_RevC) para importação no CATIA."
         )
         self.btn_export_virtual.setEnabled(False)
         self.btn_export_virtual.clicked.connect(self._export_virtual_stacking)
@@ -1302,8 +1302,14 @@ class VirtualStackingWindow(QtWidgets.QDialog):
         except Exception:
             last = ""
         if last:
+            try:
+                last_path = Path(str(last))
+                if last_path.suffix.lower() == ".xls":
+                    return str(last_path.with_suffix(".xlsx"))
+            except Exception:
+                return str(last)
             return str(last)
-        return str(Path.home() / "Virtual.Stacking.For.Catia.Import.xls")
+        return str(Path.home() / "Virtual.Stacking.For.Catia.Import.xlsx")
 
     def _export_virtual_stacking(self) -> None:
         if hasattr(self, "btn_reorganize_neighbors") and not self.btn_reorganize_neighbors.isChecked():
@@ -1336,7 +1342,7 @@ class VirtualStackingWindow(QtWidgets.QDialog):
             self,
             "Export Virtual Stacking",
             suggested,
-            "Planilhas Excel (*.xls *.xlsx)",
+            "Planilhas Excel (*.xlsx)",
         )
         if not path:
             return
@@ -1364,20 +1370,20 @@ class VirtualStackingWindow(QtWidgets.QDialog):
             QtWidgets.QMessageBox.critical(
                 self,
                 "Export Virtual Stacking",
-                f"Falha ao exportar uma das planilhas:\n{exc}",
+                f"Falha ao exportar a planilha:\n{exc}",
             )
             return
 
-        base_path = output_path.with_suffix("")
-        xls_path = base_path.with_suffix(".xls")
-        xlsx_path = base_path.with_suffix(".xlsx")
+        try:
+            self._settings.setValue("virtual_stacking/last_export_path", str(output_path))
+        except Exception:
+            pass
 
         QtWidgets.QMessageBox.information(
             self,
             "Export Virtual Stacking",
-            "Planilhas exportadas para:\n"
-            f"{xls_path}\n"
-            f"{xlsx_path}",
+            "Planilha exportada para:\n"
+            f"{output_path}",
         )
 
     # Data binding ----------------------------------------------------

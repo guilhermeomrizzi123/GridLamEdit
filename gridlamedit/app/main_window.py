@@ -4454,7 +4454,7 @@ class MainWindow(QMainWindow):
             self,
             "Exportar planilha do Grid Design",
             str(suggested),
-            "Planilhas Excel (*.xlsx *.xls);;Todos os arquivos (*)",
+            "Planilhas Excel (*.xlsx);;Todos os arquivos (*)",
             options=options,
         )
         if not path_str:
@@ -4472,7 +4472,7 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(
                 self,
                 "Falha na exportação da planilha.",
-                f"Falha ao exportar uma das planilhas:\n{exc}",
+                f"Falha ao exportar a planilha:\n{exc}",
             )
             return False
         except Exception as exc:  # pragma: no cover - defensivo
@@ -4484,21 +4484,16 @@ class MainWindow(QMainWindow):
             )
             return False
 
-        base_path = final_path.with_suffix("")
-        xls_path = base_path.with_suffix(".xls")
-        xlsx_path = base_path.with_suffix(".xlsx")
-
         if self.statusBar():
             self.statusBar().showMessage(
-                f"Planilhas exportadas: {xls_path.name}, {xlsx_path.name}", 5000
+                f"Planilha exportada: {final_path.name}", 5000
             )
 
         QMessageBox.information(
             self,
             "Exportação concluída",
-            "Planilhas exportadas com sucesso em:\n"
-            f"{xls_path}\n"
-            f"{xlsx_path}",
+            "Planilha exportada com sucesso em:\n"
+            f"{final_path}",
         )
         return True
 

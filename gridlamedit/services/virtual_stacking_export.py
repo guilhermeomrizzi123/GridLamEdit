@@ -5,8 +5,6 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Iterable, Sequence
 
-import xlwt
-
 from gridlamedit.io.spreadsheet import DEFAULT_ROSETTE_LABEL, normalize_angle
 
 __all__ = ["export_virtual_stacking"]
@@ -83,15 +81,6 @@ def _build_virtual_stacking_rows(
     return rows
 
 
-def _write_rows_xls(rows: list[list[object]], output_path: Path, sheet_name: str) -> None:
-    book = xlwt.Workbook()
-    sheet = book.add_sheet(sheet_name)
-    for row_idx, row in enumerate(rows):
-        for col_idx, value in enumerate(row):
-            sheet.write(row_idx, col_idx, value)
-    book.save(str(output_path))
-
-
 def _write_rows_xlsx(rows: list[list[object]], output_path: Path, sheet_name: str) -> None:
     from openpyxl import Workbook
 
@@ -125,8 +114,8 @@ def export_virtual_stacking(
         and ``laminate``; the laminate must have a ``camadas`` list containing
         orientation information at the same index as ``layers``.
     path:
-        Target output path. Both ``.xls`` and ``.xlsx`` files will be written using
-        the same base name.
+        Target output path. When no ``.xlsx`` suffix is provided, ``.xlsx`` is used.
+        Apenas ``.xlsx`` sera escrito.
     sheet_name:
         Name of the worksheet to create (defaults to ``Planilha1``).
 
@@ -139,27 +128,16 @@ def export_virtual_stacking(
         raise ValueError("Nenhuma coluna de Virtual Stacking para exportar.")
 
     output_path = Path(path)
-    if output_path.suffix.lower() not in {".xls", ".xlsx"}:
-        output_path = output_path.with_suffix(".xls")
-    base_path = output_path.with_suffix("")
-    xls_path = base_path.with_suffix(".xls")
-    xlsx_path = base_path.with_suffix(".xlsx")
+    if output_path.suffix.lower() != ".xlsx":
+        output_path = output_path.with_suffix(".xlsx")
+    xlsx_path = output_path
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     rows = _build_virtual_stacking_rows(layers, cells)
 
-    exported: list[Path] = []
-    try:
-        _write_rows_xls(rows, xls_path, sheet_name)
-        exported.append(xls_path)
-    except Exception as exc:
-        raise ValueError(f"Falha ao exportar arquivo .xls: {exc}") from exc
-
     try:
         _write_rows_xlsx(rows, xlsx_path, sheet_name)
-        exported.append(xlsx_path)
     except Exception as exc:
-        exported_hint = "" if not exported else f" Arquivo(s) gerados: {', '.join(p.name for p in exported)}."
-        raise ValueError(f"Falha ao exportar arquivo .xlsx: {exc}.{exported_hint}") from exc
+        raise ValueError(f"Falha ao exportar arquivo .xlsx: {exc}") from exc
 
     return output_path
