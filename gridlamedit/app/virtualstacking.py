@@ -2977,114 +2977,168 @@ class VirtualStackingWindow(QtWidgets.QDialog):
 
         cell_order = [cell.cell_id for cell in self._cells]
         order_index = {cid: idx for idx, cid in enumerate(cell_order)}
-        cell_layers: dict[str, list[Camada]] = {
-            cell.cell_id: copy.deepcopy(getattr(cell.laminate, "camadas", []))
-            for cell in self._cells
-        }
+        def _run_reorder_pass(*, disable_center_symmetry: bool, progress_label: str) -> bool:
+            cell_layers: dict[str, list[Camada]] = {
+                cell.cell_id: copy.deepcopy(getattr(cell.laminate, "camadas", []))
+                for cell in self._cells
+            }
 
-        total_rows = max((len(layers) for layers in cell_layers.values()), default=0)
-        if total_rows == 0:
-            return
+            total_rows = max((len(layers) for layers in cell_layers.values()), default=0)
+            if total_rows == 0:
+                return False
 
-        loop_iterations = total_rows // 2
-        progress_steps = max(loop_iterations + 3, 1)
-        progress = QtWidgets.QProgressDialog(
-            "Reordenação em andamento...",
-            None,
-            0,
-            progress_steps,
-            self,
-        )
-        progress.setWindowTitle("Reordenação")
-        progress.setWindowModality(QtCore.Qt.WindowModal)
-        progress.setMinimumDuration(0)
-        progress.setAutoClose(True)
-        progress.setAutoReset(True)
-        progress.setValue(0)
-        QtWidgets.QApplication.processEvents()
-
-        top = 0
-        bottom = total_rows - 1
-        front_rows: list[dict[str, Camada]] = []
-        back_rows: list[list[dict[str, Camada]]] = []
-
-        current_step = 0
-        while top < bottom:
-            top_groups = self._build_row_groups(
-                top, adjacency, cell_layers, cell_order, order_index, passive_cells
+            loop_iterations = total_rows // 2
+            progress_steps = max(loop_iterations + 3, 1)
+            progress = QtWidgets.QProgressDialog(
+                progress_label,
+                None,
+                0,
+                progress_steps,
+                self,
             )
-            bottom_groups = self._build_row_groups(
-                bottom, adjacency, cell_layers, cell_order, order_index, passive_cells
-            )
-            slot_count = max(len(top_groups), len(bottom_groups), 1)
+            progress.setWindowTitle("Reordenação")
+            progress.setWindowModality(QtCore.Qt.WindowModal)
+            progress.setMinimumDuration(0)
+            progress.setAutoClose(True)
+            progress.setAutoReset(True)
+            progress.setValue(0)
+            QtWidgets.QApplication.processEvents()
 
-            top_rows = self._rows_for_side(
-                top,
-                top_groups,
-                slot_count,
-                cell_layers,
-                cell_order,
-                passive_cells,
-                preserve_when_empty=not bool(top_groups),
-            )
-            bottom_rows = self._rows_for_side(
-                bottom,
-                bottom_groups,
-                slot_count,
-                cell_layers,
-                cell_order,
-                passive_cells,
-                preserve_when_empty=not bool(bottom_groups),
-            )
+            if disable_center_symmetry:
+                if total_rows % 2 == 0:
+                    center_indices = [total_rows // 2 - 1, total_rows // 2]
+                else:
+                    center_indices = [total_rows // 2]
+                center_start = center_indices[0]
+                center_end = center_indices[-1]
+                top_limit = center_start - 1
+                bottom_limit = center_end + 1
+            else:
+                center_indices = []
+                top_limit = None
+                bottom_limit = None
 
-            front_rows.extend(top_rows)
-            back_rows.append(bottom_rows)
-            top += 1
-            bottom -= 1
+            top = 0
+            bottom = total_rows - 1
+            front_rows: list[dict[str, Camada]] = []
+            back_rows: list[list[dict[str, Camada]]] = []
+
+            current_step = 0
+            while top < bottom:
+                if disable_center_symmetry and (top > top_limit or bottom < bottom_limit):
+                    break
+                top_groups = self._build_row_groups(
+                    top, adjacency, cell_layers, cell_order, order_index, passive_cells
+                )
+                bottom_groups = self._build_row_groups(
+                    bottom, adjacency, cell_layers, cell_order, order_index, passive_cells
+                )
+                slot_count = max(len(top_groups), len(bottom_groups), 1)
+
+                top_rows = self._rows_for_side(
+                    top,
+                    top_groups,
+                    slot_count,
+                    cell_layers,
+                    cell_order,
+                    passive_cells,
+                    preserve_when_empty=not bool(top_groups),
+                )
+                bottom_rows = self._rows_for_side(
+                    bottom,
+                    bottom_groups,
+                    slot_count,
+                    cell_layers,
+                    cell_order,
+                    passive_cells,
+                    preserve_when_empty=not bool(bottom_groups),
+                )
+
+                front_rows.extend(top_rows)
+                back_rows.append(bottom_rows)
+                top += 1
+                bottom -= 1
+
+                current_step += 1
+                progress.setValue(current_step)
+                QtWidgets.QApplication.processEvents()
+
+            center_rows: list[dict[str, Camada]] = []
+            if disable_center_symmetry:
+                for center_idx in center_indices:
+                    center_groups = self._build_row_groups(
+                        center_idx,
+                        adjacency,
+                        cell_layers,
+                        cell_order,
+                        order_index,
+                        passive_cells,
+                    )
+                    slot_count = max(len(center_groups), 1)
+                    center_rows.extend(
+                        self._rows_for_side(
+                            center_idx,
+                            center_groups,
+                            slot_count,
+                            cell_layers,
+                            cell_order,
+                            passive_cells,
+                            preserve_when_empty=not bool(center_groups),
+                        )
+                    )
+            else:
+                if top == bottom:
+                    # Sequência central permanece como está para preservar o eixo
+                    center_rows.append(
+                        self._build_row_snapshot(
+                            top,
+                            None,
+                            cell_layers,
+                            cell_order,
+                            passive_cells,
+                            use_original_when_empty=True,
+                            include_passive=True,
+                        )
+                    )
+
+            final_rows: list[dict[str, Camada]] = []
+            final_rows.extend(front_rows)
+            final_rows.extend(center_rows)
+            for bottom_rows in reversed(back_rows):
+                for row in reversed(bottom_rows):
+                    final_rows.append(row)
 
             current_step += 1
             progress.setValue(current_step)
             QtWidgets.QApplication.processEvents()
 
-        center_rows: list[dict[str, Camada]] = []
-        if top == bottom:
-            # Sequência central permanece como está para preservar o eixo
-            center_rows.append(
-                self._build_row_snapshot(
-                    top,
-                    None,
-                    cell_layers,
-                    cell_order,
-                    passive_cells,
-                    use_original_when_empty=True,
-                    include_passive=True,
-                )
-            )
+            # Após aplicar as regras existentes, tratar as sequências centrais para separar orientações e blocos desconectados
+            final_rows = self._process_center_sequences(final_rows, adjacency, cell_order, passive_cells)
 
-        final_rows: list[dict[str, Camada]] = []
-        final_rows.extend(front_rows)
-        final_rows.extend(center_rows)
-        for bottom_rows in reversed(back_rows):
-            for row in reversed(bottom_rows):
-                final_rows.append(row)
+            current_step += 1
+            progress.setValue(current_step)
+            QtWidgets.QApplication.processEvents()
 
-        current_step += 1
-        progress.setValue(current_step)
-        QtWidgets.QApplication.processEvents()
+            self._apply_virtual_rows_to_laminates(final_rows)
+            self._notify_changes([cell.laminate.nome for cell in self._cells])
 
-        # Após aplicar as regras existentes, tratar as sequências centrais para separar orientações e blocos desconectados
-        final_rows = self._process_center_sequences(final_rows, adjacency, cell_order, passive_cells)
+            current_step += 1
+            progress.setValue(current_step)
+            QtWidgets.QApplication.processEvents()
+            return True
 
-        current_step += 1
-        progress.setValue(current_step)
-        QtWidgets.QApplication.processEvents()
+        applied = _run_reorder_pass(
+            disable_center_symmetry=False,
+            progress_label="Reordenação em andamento...",
+        )
+        if not applied:
+            return False
 
-        self._apply_virtual_rows_to_laminates(final_rows)
-        self._notify_changes([cell.laminate.nome for cell in self._cells])
+        _run_reorder_pass(
+            disable_center_symmetry=True,
+            progress_label="Reordenação em andamento (2/2)...",
+        )
 
-        current_step += 1
-        progress.setValue(current_step)
-        QtWidgets.QApplication.processEvents()
         QtWidgets.QMessageBox.information(
             self,
             "Reorder By Neighborhood",
