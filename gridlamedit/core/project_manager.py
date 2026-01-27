@@ -84,6 +84,7 @@ def _serialize_model(model: GridModel) -> dict:
         "cell_neighbors": dict(getattr(model, "cell_neighbors", {})),
         "laminados": laminates_data,
         "source_excel_path": getattr(model, "source_excel_path", None),
+        "preserved_columns": getattr(model, "preserved_columns", None),
     }
 
 
@@ -96,6 +97,7 @@ def _deserialize_model(data: dict) -> GridModel:
     model.cell_neighbor_drawings = list(data.get("cell_neighbor_drawings", []))
     model.cell_neighbors = dict(data.get("cell_neighbors", {}))
     model.source_excel_path = data.get("source_excel_path")
+    model.preserved_columns = data.get("preserved_columns")
 
     laminates = {}
     compat_warnings: list[str] = []

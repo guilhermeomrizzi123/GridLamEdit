@@ -120,7 +120,11 @@ from gridlamedit.io.spreadsheet import (
     count_oriented_layers,
     NO_LAMINATE_COMBO_OPTION,
 )
-from gridlamedit.services.excel_io import export_grid_xlsx, ensure_layers_have_material
+from gridlamedit.services.excel_io import (
+    capture_preserved_columns,
+    export_grid_xlsx,
+    ensure_layers_have_material,
+)
 from gridlamedit.services.laminate_batch_import import (
     BatchLaminateInput,
     create_blank_batch_template,
@@ -3497,6 +3501,10 @@ class MainWindow(QMainWindow):
             return
 
         model.source_excel_path = path
+        try:
+            model.preserved_columns = capture_preserved_columns(path)
+        except Exception as exc:
+            logger.warning("Falha ao capturar colunas preservadas: %s", exc)
         model.dirty = False
 
         if previous_laminates:
@@ -3583,6 +3591,10 @@ class MainWindow(QMainWindow):
                     model.laminados[name] = laminate
 
         model.source_excel_path = path
+        try:
+            model.preserved_columns = capture_preserved_columns(path)
+        except Exception as exc:
+            logger.warning("Falha ao capturar colunas preservadas: %s", exc)
         model.dirty = False
 
         preview_report = reassociate_laminates_by_contours(

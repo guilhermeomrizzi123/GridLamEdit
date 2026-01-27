@@ -385,6 +385,8 @@ class GridModel:
     cell_neighbors: Dict[str, Dict[str, list[str]]] = field(default_factory=dict)
     compat_warnings: list[str] = field(default_factory=list)
     source_excel_path: Optional[str] = None
+    # Dados preservados das colunas C-F (por exemplo, catia metadata) para exportacao.
+    preserved_columns: Optional[dict[str, object]] = None
     dirty: bool = False
 
     def mark_dirty(self, value: bool = True) -> None:
