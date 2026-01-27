@@ -969,6 +969,11 @@ class MainWindow(QMainWindow):
             if cell_id:
                 item.setText(_format_cell_label(self._grid_model, cell_id))
         list_widget.blockSignals(False)
+        if self._cell_neighbors_window is not None:
+            try:
+                self._cell_neighbors_window.refresh_from_model()
+            except Exception:
+                pass
 
     def _apply_auto_rename_if_needed(
         self, laminate: Optional[Laminado], *, force: bool = False
@@ -1091,6 +1096,11 @@ class MainWindow(QMainWindow):
                 self._apply_auto_rename_if_needed(laminate, force=True)
         self._refresh_cells_list_labels()
         self.update_stacking_summary_ui()
+        if self._cell_neighbors_window is not None:
+            try:
+                self._cell_neighbors_window.refresh_from_model()
+            except Exception:
+                pass
         self._mark_dirty()
 
     def _on_virtual_stacking_closed(self) -> None:

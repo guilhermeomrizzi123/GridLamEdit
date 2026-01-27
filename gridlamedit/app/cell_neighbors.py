@@ -1537,6 +1537,19 @@ class CellNeighborsWindow(QDialog):
         # Center view on cells after loading
         self._center_view_on_cells()
 
+    def refresh_from_model(self) -> None:
+        """Refresh laminate labels/colors based on the current model state."""
+        if self._model is None:
+            return
+        for rec in self._nodes_by_grid.values():
+            self._update_node_cell_display(rec)
+        if self._aml_highlight_enabled:
+            self.update_cell_colors_for_aml()
+        elif self._current_sequence_index is not None:
+            self.update_cell_colors_for_sequence(self._current_sequence_index)
+        self._refresh_missing_laminate_highlight()
+        self._refresh_sequence_combo_preserve_selection()
+
     def get_neighbors_mapping(self) -> Dict[str, dict[str, list[str]]]:
         """Return neighbors mapping including cells without any neighbors (disconnected cells).
 
@@ -3302,6 +3315,23 @@ class CellNeighborsWindow(QDialog):
             self.update_cell_colors_for_sequence(self._current_sequence_index)
         self._refresh_missing_laminate_highlight()
         self._mark_as_modified()
+        parent_window = self.parent()
+        if parent_window is not None:
+            try:
+                if hasattr(parent_window, "_refresh_cells_list_labels"):
+                    parent_window._refresh_cells_list_labels()
+            except Exception:
+                pass
+            try:
+                if hasattr(parent_window, "update_stacking_summary_ui"):
+                    parent_window.update_stacking_summary_ui()
+            except Exception:
+                pass
+            try:
+                if hasattr(parent_window, "_mark_dirty"):
+                    parent_window._mark_dirty()
+            except Exception:
+                pass
 
     def _handle_add_neighbor(self, record: _NodeRecord, direction: str) -> None:
         if self._reorder_edit_lock or self._missing_laminate_ui_lock:
