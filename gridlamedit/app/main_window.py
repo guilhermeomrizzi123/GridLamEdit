@@ -643,15 +643,7 @@ class MainWindow(QMainWindow):
 
         dialog = self._ensure_compare_laminates_dialog()
         names = list(self._grid_model.laminados.keys())
-        current = self._current_laminate_instance()
-        select_a = current.nome if current is not None else (names[0] if names else None)
-        select_b = None
-        if select_a:
-            for name in names:
-                if name != select_a:
-                    select_b = name
-                    break
-        dialog.set_laminate_names(names, select_a=select_a, select_b=select_b)
+        dialog.set_laminate_names(names)
         dialog.set_report("")
         dialog.show()
         dialog.raise_()
