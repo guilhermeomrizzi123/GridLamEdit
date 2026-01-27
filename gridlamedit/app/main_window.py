@@ -89,6 +89,7 @@ from gridlamedit.app.delegates import (
 from gridlamedit.app.dialogs.associated_cells_dialog import AssociatedCellsDialog
 from gridlamedit.app.dialogs.bulk_material_dialog import BulkMaterialDialog
 from gridlamedit.app.dialogs.bulk_orientation_dialog import BulkOrientationDialog
+from gridlamedit.app.dialogs.compare_laminates_dialog import CompareLaminatesDialog
 from gridlamedit.app.dialogs.duplicate_laminate_dialog import DuplicateLaminateDialog
 from gridlamedit.app.dialogs.name_laminate_dialog import NameLaminateDialog
 from gridlamedit.app.dialogs.new_laminate_paste_dialog import NewLaminatePasteDialog
@@ -327,6 +328,7 @@ class MainWindow(QMainWindow):
         self._associated_cells_dialog: Optional[
             AssociatedCellsDialog
         ] = None
+        self._compare_laminates_dialog: Optional[CompareLaminatesDialog] = None
         self._new_laminate_dialog: Optional[NewLaminateDialog] = None
         self._virtual_stacking_window: Optional[VirtualStackingWindow] = None
         self._cell_neighbors_window: Optional[CellNeighborsWindow] = None
@@ -513,6 +515,13 @@ class MainWindow(QMainWindow):
                 QKeySequence("Ctrl+Shift+R"),
             ),
             (
+                "compare_laminates_action",
+                "Comparar Laminados",
+                self._on_compare_laminates,
+                "Compara dois laminados e gera um resumo das diferenças.",
+                None,
+            ),
+            (
                 "exit_action",
                 "Close",
                 self.close,
@@ -553,6 +562,7 @@ class MainWindow(QMainWindow):
         tools_menu.addAction(self.virtual_stacking_action)
         tools_menu.addAction(self.cell_neighbors_action)
         tools_menu.addAction(self.reassociate_contours_action)
+        tools_menu.addAction(self.compare_laminates_action)
         tools_menu.addSeparator()
         tools_menu.addAction(self.register_material_action)
         tools_menu.addAction(self.batch_import_action)
@@ -603,6 +613,164 @@ class MainWindow(QMainWindow):
         self._cell_neighbors_window.show()
         self._cell_neighbors_window.raise_()
         self._cell_neighbors_window.activateWindow()
+
+    def _on_compare_laminates(self) -> None:
+        if self._grid_model is None or not self._grid_model.laminados:
+            QMessageBox.information(
+                self,
+                "Comparar Laminados",
+                "Carregue um projeto com laminados para comparar.",
+            )
+            return
+        if len(self._grid_model.laminados) < 2:
+            QMessageBox.information(
+                self,
+                "Comparar Laminados",
+                "É necessário ter pelo menos dois laminados cadastrados.",
+            )
+            return
+
+        dialog = self._ensure_compare_laminates_dialog()
+        names = list(self._grid_model.laminados.keys())
+        current = self._current_laminate_instance()
+        select_a = current.nome if current is not None else (names[0] if names else None)
+        select_b = None
+        if select_a:
+            for name in names:
+                if name != select_a:
+                    select_b = name
+                    break
+        dialog.set_laminate_names(names, select_a=select_a, select_b=select_b)
+        dialog.set_report("")
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+
+    def _ensure_compare_laminates_dialog(self) -> CompareLaminatesDialog:
+        if self._compare_laminates_dialog is None:
+            self._compare_laminates_dialog = CompareLaminatesDialog(self)
+            self._compare_laminates_dialog.compare_requested.connect(
+                self._on_compare_laminates_requested
+            )
+        return self._compare_laminates_dialog
+
+    def _on_compare_laminates_requested(self, name_a: str, name_b: str) -> None:
+        if self._grid_model is None:
+            return
+        if name_a == name_b:
+            QMessageBox.warning(
+                self,
+                "Comparar Laminados",
+                "Selecione dois laminados diferentes para comparar.",
+            )
+            return
+        lam_a = self._grid_model.laminados.get(name_a)
+        lam_b = self._grid_model.laminados.get(name_b)
+        if lam_a is None or lam_b is None:
+            QMessageBox.warning(
+                self,
+                "Comparar Laminados",
+                "Não foi possível localizar os laminados selecionados.",
+            )
+            return
+        report = self._build_laminate_comparison_report(lam_a, lam_b)
+        if self._compare_laminates_dialog is not None:
+            self._compare_laminates_dialog.set_report(report)
+
+    def _build_laminate_comparison_report(
+        self, laminate_a: Laminado, laminate_b: Laminado
+    ) -> str:
+        layers_a = list(laminate_a.camadas)
+        layers_b = list(laminate_b.camadas)
+        max_len = max(len(layers_a), len(layers_b))
+
+        def _format_sequence(layer: Camada) -> str:
+            text = str(getattr(layer, "sequence", "") or "").strip()
+            return text if text else "(sem sequência)"
+
+        def _format_orientation(value: Optional[float]) -> str:
+            if value is None:
+                return "Sem orientação"
+            return format_orientation_value(value)
+
+        def _layer_signature(layer: Camada) -> str:
+            sequence_text = _format_sequence(layer)
+            normalized_orientation = _normalize_orientation_for_summary(layer.orientacao)
+            orientation_text = _format_orientation(normalized_orientation)
+            return f"seq={sequence_text}, ori={orientation_text}"
+
+        differences: list[str] = []
+        for idx in range(max_len):
+            if idx >= len(layers_a):
+                layer_b = layers_b[idx]
+                differences.append(
+                    f"Camada {idx + 1}: ausente em {laminate_a.nome}; {laminate_b.nome} -> {_layer_signature(layer_b)}"
+                )
+                continue
+            if idx >= len(layers_b):
+                layer_a = layers_a[idx]
+                differences.append(
+                    f"Camada {idx + 1}: {laminate_a.nome} -> {_layer_signature(layer_a)}; ausente em {laminate_b.nome}"
+                )
+                continue
+
+            layer_a = layers_a[idx]
+            layer_b = layers_b[idx]
+            seq_a = _normalize_sequence_token(layer_a.sequence)
+            seq_b = _normalize_sequence_token(layer_b.sequence)
+            ori_a = _normalize_orientation_for_summary(layer_a.orientacao)
+            ori_b = _normalize_orientation_for_summary(layer_b.orientacao)
+
+            if seq_a != seq_b or ori_a != ori_b:
+                differences.append(
+                    f"Camada {idx + 1}: {laminate_a.nome} -> {_layer_signature(layer_a)} | {laminate_b.nome} -> {_layer_signature(layer_b)}"
+                )
+
+        counts_a: Counter[Optional[float]] = Counter()
+        counts_b: Counter[Optional[float]] = Counter()
+        for layer in layers_a:
+            counts_a[_normalize_orientation_for_summary(layer.orientacao)] += 1
+        for layer in layers_b:
+            counts_b[_normalize_orientation_for_summary(layer.orientacao)] += 1
+
+        orientations = set(counts_a.keys()) | set(counts_b.keys())
+        sorted_orientations = sorted(
+            orientations,
+            key=lambda value: (value is None, value if value is not None else 0.0),
+        )
+
+        lines: list[str] = []
+        lines.append(
+            f"Comparação automática: {laminate_a.nome} vs {laminate_b.nome}"
+        )
+        if not differences:
+            lines.append("LAMINADOS IDÊNTICOS")
+        lines.append("")
+        lines.append("Diferenças por sequência:")
+        if differences:
+            lines.extend(f"- {item}" for item in differences)
+        else:
+            lines.append("- Nenhuma diferença encontrada nas sequências.")
+
+        lines.append("")
+        lines.append("Resumo comparativo de camadas e orientações:")
+        lines.append(
+            f"- Total de camadas: {len(layers_a)} vs {len(layers_b)}"
+        )
+        lines.append(
+            f"- Camadas com orientação: {count_oriented_layers(layers_a)} vs {count_oriented_layers(layers_b)}"
+        )
+        lines.append("Orientações:")
+        if sorted_orientations:
+            for orientation in sorted_orientations:
+                label = _format_orientation(orientation)
+                lines.append(
+                    f"- {label}: {counts_a.get(orientation, 0)} vs {counts_b.get(orientation, 0)}"
+                )
+        else:
+            lines.append("- Nenhuma orientação informada.")
+
+        return "\n".join(lines)
 
     def _setup_central_widget(self) -> None:
         self.view_editor = self._build_editor_view()
