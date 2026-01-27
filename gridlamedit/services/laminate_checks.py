@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Sequence, Tuple
 
+import re
+
 import math
 
 from gridlamedit.io.spreadsheet import (
@@ -125,6 +127,36 @@ def check_duplicates(laminates: Sequence[Laminado]) -> List[DuplicateGroup]:
     return duplicate_groups
 
 
+def check_duplicates_by_sequence(laminates: Sequence[Laminado]) -> List[DuplicateGroup]:
+    """
+    Group laminates that share the same sequence/material/orientation signature.
+    """
+
+    groups: dict[str, list[str]] = {}
+    for laminado in laminates:
+        signature = _build_sequence_duplicate_signature(laminado)
+        name = str(laminado.nome or "").strip()
+        if not signature or not name:
+            continue
+        groups.setdefault(signature, []).append(name)
+
+    duplicate_groups: list[DuplicateGroup] = []
+    for signature, names in groups.items():
+        unique_names = sorted({n for n in names if n})
+        if len(unique_names) < 2:
+            continue
+        duplicate_groups.append(
+            DuplicateGroup(
+                signature=signature,
+                summary="Sequência, material e orientação idênticos",
+                laminates=unique_names,
+            )
+        )
+
+    duplicate_groups.sort(key=lambda group: (len(group.laminates) * -1, group.signature))
+    return duplicate_groups
+
+
 def _is_laminate_symmetric(laminado: Laminado) -> bool:
     return evaluate_symmetry_for_layers(laminado.camadas).is_symmetric
 
@@ -165,6 +197,16 @@ def _normalized_orientation_token(value: object) -> float | None:
 def _normalized_material_token(value: object) -> str:
     text = str(value or "").strip()
     return " ".join(text.split()).lower()
+
+
+def _normalize_sequence_token(value: object) -> str:
+    text = str(value or "").strip().lower()
+    if not text:
+        return ""
+    digits = "".join(ch for ch in text if ch.isdigit())
+    if digits:
+        return digits
+    return re.sub(r"[^a-z0-9]+", "", text)
 
 
 def _rows_match(
@@ -384,6 +426,20 @@ def _build_duplicate_signature(laminado: Laminado) -> str:
     return f"{stacking_part}|{lam_type}|{color}"
 
 
+def _build_sequence_duplicate_signature(laminado: Laminado) -> str:
+    layers = laminado.camadas or []
+    if not layers:
+        return "stacking:empty"
+
+    tokens: list[str] = []
+    for layer in layers:
+        seq = _normalize_sequence_token(getattr(layer, "sequence", "")) or "none"
+        material = _normalize_material(getattr(layer, "material", "")) or "none"
+        orientation = _normalize_orientation(getattr(layer, "orientacao", None))
+        tokens.append(f"{seq}@{material}@{_orientation_token(orientation)}")
+    return ";".join(tokens)
+
+
 def _summarize_duplicate_signature(signature: str) -> str:
     try:
         _, lam_type, color = signature.rsplit("|", 2)
@@ -427,6 +483,7 @@ __all__ = [
     "run_all_checks",
     "check_symmetry",
     "check_duplicates",
+    "check_duplicates_by_sequence",
     "evaluate_symmetry_for_layers",
     "evaluate_laminate_balance_clt",
 ]

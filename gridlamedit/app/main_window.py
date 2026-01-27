@@ -142,6 +142,7 @@ from gridlamedit.services.project_query import (
 from gridlamedit.services.laminate_checks import (
     ChecksReport,
     evaluate_symmetry_for_layers,
+    check_duplicates_by_sequence,
     run_all_checks,
 )
 from gridlamedit.services.laminate_reassociation import reassociate_laminates_by_contours
@@ -152,6 +153,7 @@ from gridlamedit.services.laminate_service import (
     sync_material_by_sequence,
 )
 from gridlamedit.ui.dialogs.duplicate_removal_dialog import DuplicateRemovalDialog
+from gridlamedit.ui.dialogs.duplicate_laminates_dialog import DuplicateLaminatesDialog
 from gridlamedit.ui.dialogs.new_laminate_dialog import NewLaminateDialog
 from gridlamedit.ui.dialogs.verification_report_dialog import VerificationReportDialog
 
@@ -329,6 +331,7 @@ class MainWindow(QMainWindow):
             AssociatedCellsDialog
         ] = None
         self._compare_laminates_dialog: Optional[CompareLaminatesDialog] = None
+        self._duplicate_laminates_dialog: Optional[DuplicateLaminatesDialog] = None
         self._new_laminate_dialog: Optional[NewLaminateDialog] = None
         self._virtual_stacking_window: Optional[VirtualStackingWindow] = None
         self._cell_neighbors_window: Optional[CellNeighborsWindow] = None
@@ -522,6 +525,13 @@ class MainWindow(QMainWindow):
                 None,
             ),
             (
+                "compare_all_laminates_action",
+                "Comparar Todos (Duplicados)",
+                self._on_compare_all_laminates,
+                "Compara automaticamente todos os laminados e lista duplicados.",
+                None,
+            ),
+            (
                 "exit_action",
                 "Close",
                 self.close,
@@ -563,6 +573,7 @@ class MainWindow(QMainWindow):
         tools_menu.addAction(self.cell_neighbors_action)
         tools_menu.addAction(self.reassociate_contours_action)
         tools_menu.addAction(self.compare_laminates_action)
+        tools_menu.addAction(self.compare_all_laminates_action)
         tools_menu.addSeparator()
         tools_menu.addAction(self.register_material_action)
         tools_menu.addAction(self.batch_import_action)
@@ -676,6 +687,129 @@ class MainWindow(QMainWindow):
         report = self._build_laminate_comparison_report(lam_a, lam_b)
         if self._compare_laminates_dialog is not None:
             self._compare_laminates_dialog.set_report(report)
+
+    def _on_compare_all_laminates(self) -> None:
+        if self._grid_model is None or not self._grid_model.laminados:
+            QMessageBox.information(
+                self,
+                "Comparar Todos os Laminados",
+                "Carregue um projeto com laminados para comparar.",
+            )
+            return
+        if len(self._grid_model.laminados) < 2:
+            QMessageBox.information(
+                self,
+                "Comparar Todos os Laminados",
+                "É necessário ter pelo menos dois laminados cadastrados.",
+            )
+            return
+
+        groups = check_duplicates_by_sequence(list(self._grid_model.laminados.values()))
+        if not groups:
+            QMessageBox.information(
+                self,
+                "Comparar Todos os Laminados",
+                "Nenhum laminado duplicado foi encontrado.",
+            )
+            return
+
+        dialog = self._ensure_duplicate_laminates_dialog()
+        dialog.set_duplicate_groups(groups)
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+
+    def _ensure_duplicate_laminates_dialog(self) -> DuplicateLaminatesDialog:
+        if self._duplicate_laminates_dialog is None:
+            self._duplicate_laminates_dialog = DuplicateLaminatesDialog(self)
+            self._duplicate_laminates_dialog.deleteRequested.connect(
+                self._on_duplicate_laminate_delete_requested
+            )
+        return self._duplicate_laminates_dialog
+
+    def _on_duplicate_laminate_delete_requested(self, laminate_name: str) -> None:
+        if self._grid_model is None:
+            QMessageBox.information(
+                self,
+                "Remover laminado",
+                "Nenhum projeto carregado para remover laminados.",
+            )
+            return
+        clean_name = (laminate_name or "").strip()
+        if not clean_name:
+            return
+        laminado = self._grid_model.laminados.get(clean_name)
+        if laminado is None:
+            QMessageBox.warning(
+                self,
+                "Remover laminado",
+                "Laminado não encontrado.",
+            )
+            return
+
+        associated_cells = self._collect_laminate_associations(laminado)
+        if associated_cells:
+            cells_text = ", ".join(associated_cells)
+            response = QMessageBox.question(
+                self,
+                "Confirmar remoção",
+                "O laminado selecionado está associado às células:\n"
+                f"{cells_text}\n\nDeseja remover mesmo assim?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if response != QMessageBox.Yes:
+                return
+        else:
+            response = QMessageBox.question(
+                self,
+                "Confirmar remoção",
+                "Deseja remover o laminado selecionado?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if response != QMessageBox.Yes:
+                return
+
+        removed = self._remove_laminates_by_name([clean_name])
+        if not removed:
+            QMessageBox.information(
+                self,
+                "Remover laminado",
+                "Nenhum laminado foi removido.",
+            )
+            return
+
+        preferred_name = ""
+        if self._grid_model.laminados:
+            current_combo = ""
+            if hasattr(self, "laminate_name_combo"):
+                current_combo = self.laminate_name_combo.currentText().strip()
+            if current_combo and current_combo in self._grid_model.laminados:
+                preferred_name = current_combo
+            else:
+                preferred_name = next(iter(self._grid_model.laminados.keys()), "")
+
+        self._refresh_after_new_laminate(preferred_name)
+
+        if self._duplicate_laminates_dialog is not None:
+            new_groups = check_duplicates_by_sequence(
+                list(self._grid_model.laminados.values())
+            )
+            self._duplicate_laminates_dialog.set_duplicate_groups(new_groups)
+
+    def _collect_laminate_associations(self, laminado: Laminado) -> list[str]:
+        if self._grid_model is None:
+            return []
+        cells: set[str] = set()
+        target_name = str(laminado.nome or "").strip()
+        for cell_id, name in self._grid_model.cell_to_laminate.items():
+            if str(name or "").strip() == target_name and cell_id:
+                cells.add(cell_id)
+        for cell in getattr(laminado, "celulas", []) or []:
+            if cell:
+                cells.add(str(cell))
+        return sorted(cells)
 
     def _build_laminate_comparison_report(
         self, laminate_a: Laminado, laminate_b: Laminado
