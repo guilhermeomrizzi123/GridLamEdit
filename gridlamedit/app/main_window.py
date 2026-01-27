@@ -448,6 +448,13 @@ class MainWindow(QMainWindow):
             tuple[str, str, callable, str, Optional[QKeySequence]]
         ] = [
             (
+                "new_project_action",
+                "Novo Projeto",
+                self._on_new_project,
+                "Fechar o projeto atual e iniciar um novo.",
+                QKeySequence.New,
+            ),
+            (
                 "open_project_action",
                 "Open Project",
                 self._on_open_project,
@@ -532,10 +539,17 @@ class MainWindow(QMainWindow):
                 None,
             ),
             (
+                "close_project_action",
+                "Fechar Projeto",
+                self._on_close_project,
+                "Fechar o projeto atual e manter o programa aberto.",
+                None,
+            ),
+            (
                 "exit_action",
-                "Close",
+                "Sair",
                 self.close,
-                "Close the application.",
+                "Sair do programa.",
                 QKeySequence.Quit,
             ),
             (
@@ -559,6 +573,7 @@ class MainWindow(QMainWindow):
     def _setup_menu_bar(self) -> None:
         menu_bar = self.menuBar()
         file_menu = menu_bar.addMenu("Arquivo")
+        file_menu.addAction(self.new_project_action)
         file_menu.addAction(self.open_project_action)
         file_menu.addAction(self.load_spreadsheet_action)
         file_menu.addSeparator()
@@ -566,6 +581,7 @@ class MainWindow(QMainWindow):
         file_menu.addAction(self.save_as_action)
         file_menu.addAction(self.export_excel_action)
         file_menu.addSeparator()
+        file_menu.addAction(self.close_project_action)
         file_menu.addAction(self.exit_action)
 
         tools_menu = menu_bar.addMenu("Tools")
@@ -3853,6 +3869,77 @@ class MainWindow(QMainWindow):
                 f"Planilha carregada: {Path(path).name}", 5000
             )
 
+    def _on_new_project(self, checked: bool = False) -> None:  # noqa: ARG002
+        if not self._confirm_discard_changes():
+            return
+        self._clear_project_state()
+        self._load_spreadsheet()
+
+    def _on_close_project(self, checked: bool = False) -> None:  # noqa: ARG002
+        if self._grid_model is None and not self.project_manager.is_dirty:
+            QMessageBox.information(
+                self,
+                "Fechar projeto",
+                "Nao ha projeto carregado.",
+            )
+            return
+        if not self._confirm_discard_changes():
+            return
+        self._clear_project_state()
+        if self.statusBar():
+            self.statusBar().showMessage("Projeto fechado.", 4000)
+
+    def _clear_project_state(self) -> None:
+        if self.ui_state == UiState.CREATING:
+            self._exit_creating_mode()
+
+        if self._virtual_stacking_window is not None:
+            try:
+                self._virtual_stacking_window.close()
+            except Exception:
+                pass
+            self._virtual_stacking_window = None
+
+        if self._cell_neighbors_window is not None:
+            try:
+                self._cell_neighbors_window.close()
+            except Exception:
+                pass
+            self._cell_neighbors_window = None
+
+        binding = getattr(self, "_grid_binding", None)
+        if binding is not None:
+            try:
+                binding.teardown()
+            except Exception:
+                pass
+        self._grid_binding = None
+
+        self._grid_model = None
+        self.project_manager.current_path = None
+        self.project_manager.snapshot = {}
+        self.project_manager.mark_dirty(False)
+
+        self._clear_undo_history()
+        self._refresh_main_laminate_dropdown()
+        self._clear_laminate_combo_display()
+        self._on_binding_laminate_changed(None)
+
+        list_widget = getattr(self, "lstCelulas", None)
+        if not isinstance(list_widget, QListWidget):
+            list_widget = getattr(self, "cells_list", None)
+        if isinstance(list_widget, QListWidget):
+            list_widget.blockSignals(True)
+            list_widget.clear()
+            list_widget.blockSignals(False)
+
+        view = getattr(self, "layers_table", None)
+        if isinstance(view, QTableView):
+            view.setModel(None)
+
+        self._update_save_actions_enabled()
+        self._update_window_title()
+
     def _reassociate_by_contours(self, checked: bool = False) -> None:  # noqa: ARG002
         """Importa um novo grid e reassocia laminados pelos contornos."""
         if self._grid_model is None:
@@ -4546,6 +4633,8 @@ class MainWindow(QMainWindow):
             self.save_as_action.setEnabled(has_model)
         if getattr(self, "export_excel_action", None) is not None:
             self.export_excel_action.setEnabled(data_ready)
+        if getattr(self, "close_project_action", None) is not None:
+            self.close_project_action.setEnabled(has_model)
 
     def _update_window_title(self) -> None:
         title = self.base_title
