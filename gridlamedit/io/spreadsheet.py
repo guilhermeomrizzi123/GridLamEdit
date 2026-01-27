@@ -67,12 +67,12 @@ ORIENTATION_MAX = 100.0
 _DEGREE_TOKENS = ("\N{DEGREE SIGN}", "\u00ba")
 _ORIENTATION_TEXT_PATTERN = re.compile(r"^[+-]?\d+(?:[.,]\d+)?$")
 ORIENTATION_HIGHLIGHT_COLORS: dict[float, QColor] = {
-    45.0: QColor(193, 174, 255),  # Lil├ís
-    90.0: QColor(160, 196, 255),  # Azul
-    -45.0: QColor(176, 230, 176),  # Verde claro
-    0.0: QColor(230, 230, 230),  # Cinza claro
+    45.0: QColor(209, 179, 255),  # Lilás
+    90.0: QColor(0, 0, 255),  # Azul forte
+    -45.0: QColor(153, 255, 102),  # Verde claro forte (marca-texto)
+    0.0: QColor(217, 217, 217),  # Cinza
 }
-DEFAULT_ORIENTATION_HIGHLIGHT = QColor(255, 236, 200)
+DEFAULT_ORIENTATION_HIGHLIGHT = QColor(255, 216, 168)  # Laranja claro
 
 LAMINATE_ALIASES = ("Laminate", "Laminate Name", "Laminado", "Nome")
 COLOR_ALIASES = ("Color", "Colour", "Cor", "ColorIdx", "Color Index")
@@ -1159,8 +1159,15 @@ class StackingTableModel(QAbstractTableModel):
                 return int(Qt.AlignVCenter | Qt.AlignCenter)
             return int(Qt.AlignVCenter | Qt.AlignLeft)
         elif role == Qt.ForegroundRole:
-            if column == self.COL_ORIENTATION and camada.orientacao is None:
-                return QColor(160, 160, 160)
+            if column == self.COL_ORIENTATION:
+                if camada.orientacao is None:
+                    return QColor(160, 160, 160)
+                try:
+                    angle = normalize_angle(camada.orientacao)
+                except Exception:
+                    angle = None
+                if angle is not None and abs(float(angle) - 90.0) <= 1e-9:
+                    return QColor(255, 255, 255)
         elif role == Qt.BackgroundRole:
             row = index.row()
             if row in self._rows_red:

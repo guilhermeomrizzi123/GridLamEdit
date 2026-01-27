@@ -2597,7 +2597,14 @@ class MainWindow(QMainWindow):
                 item.setText("Empty")
             item.setForeground(QColor(160, 160, 160))
         else:
-            item.setForeground(QColor())
+            try:
+                angle = normalize_angle(item.text())
+            except Exception:
+                angle = None
+            if angle is not None and abs(float(angle) - 90.0) <= 1e-9:
+                item.setForeground(QColor(255, 255, 255))
+            else:
+                item.setForeground(QColor())
 
     def _apply_layer_row(
         self,

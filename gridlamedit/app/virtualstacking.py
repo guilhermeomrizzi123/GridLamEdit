@@ -430,8 +430,16 @@ class VirtualStackingModel(QtCore.QAbstractTableModel):
             cell_index = column - self.LAMINATE_COLUMN_OFFSET
             if 0 <= cell_index < len(self.cells):
                 layers = getattr(self.cells[cell_index].laminate, "camadas", [])
-                if 0 <= row < len(layers) and getattr(layers[row], "orientacao", None) is None:
-                    return QtGui.QBrush(QtGui.QColor(160, 160, 160))
+                if 0 <= row < len(layers):
+                    orient = getattr(layers[row], "orientacao", None)
+                    if orient is None:
+                        return QtGui.QBrush(QtGui.QColor(160, 160, 160))
+                    try:
+                        angle = normalize_angle(orient)
+                    except Exception:
+                        angle = None
+                    if angle is not None and abs(float(angle) - 90.0) <= 1e-9:
+                        return QtGui.QBrush(QtGui.QColor(255, 255, 255))
 
         if role == QtCore.Qt.TextAlignmentRole and column >= self.LAMINATE_COLUMN_OFFSET:
             return QtCore.Qt.AlignCenter

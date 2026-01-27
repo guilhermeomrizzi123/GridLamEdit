@@ -65,8 +65,13 @@ try:
     from gridlamedit.services.laminate_checks import evaluate_symmetry_for_layers
 except Exception:  # pragma: no cover - optional import for loose coupling
     GridModel = object  # type: ignore
-    ORIENTATION_HIGHLIGHT_COLORS = {45.0: QColor(193, 174, 255), 90.0: QColor(160, 196, 255), -45.0: QColor(176, 230, 176), 0.0: QColor(230, 230, 230)}
-    DEFAULT_ORIENTATION_HIGHLIGHT = QColor(255, 236, 200)
+    ORIENTATION_HIGHLIGHT_COLORS = {
+        45.0: QColor(209, 179, 255),
+        90.0: QColor(0, 0, 255),
+        -45.0: QColor(153, 255, 102),
+        0.0: QColor(217, 217, 217),
+    }
+    DEFAULT_ORIENTATION_HIGHLIGHT = QColor(255, 216, 168)
 
     CELL_ID_PATTERN = re.compile(r"^C\d+$", re.IGNORECASE)
 
@@ -2079,6 +2084,10 @@ class CellNeighborsWindow(QDialog):
             except Exception:
                 label = str(orient)
             item._orientation_label.setText(label)
+            if abs(val - 90.0) <= 1e-9:
+                item._orientation_label.setBrush(QColor(255, 255, 255))
+            else:
+                item._orientation_label.setBrush(COLOR_TEXT)
             item._recenter_label()
             self._apply_border_highlight(item, is_center_sequence)
             self._apply_missing_laminate_border_if_needed(record, item)
