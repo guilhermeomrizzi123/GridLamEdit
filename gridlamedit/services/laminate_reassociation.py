@@ -9,6 +9,7 @@ from typing import Dict, Iterable, List, Sequence, Tuple
 from gridlamedit.io.spreadsheet import GridModel
 
 logger = logging.getLogger(__name__)
+MAX_CONTOUR_SIDES = 30
 
 
 def _normalize_contour_token(value: object) -> str:
@@ -19,7 +20,12 @@ def _normalize_contour_token(value: object) -> str:
 
 
 def _contour_signature(values: Sequence[str]) -> Tuple[str, ...]:
-    return tuple(_normalize_contour_token(value) for value in values)
+    normalized = [_normalize_contour_token(value) for value in values]
+    if len(normalized) > MAX_CONTOUR_SIDES:
+        normalized = normalized[:MAX_CONTOUR_SIDES]
+    while normalized and not normalized[-1]:
+        normalized.pop()
+    return tuple(normalized)
 
 
 @dataclass

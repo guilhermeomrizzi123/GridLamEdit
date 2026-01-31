@@ -94,6 +94,7 @@ DEFAULT_ROSETTE_LABEL = "Rosette.1"
 DEFAULT_COLOR_INDEX = 1
 MIN_COLOR_INDEX = 1
 MAX_COLOR_INDEX = 150
+MAX_CONTOUR_SIDES = 30
 _HEX_COLOR_PATTERN = re.compile(r"#?[0-9a-fA-F]{6}")
 ORIENTATION_SYMMETRY_ROLE = Qt.UserRole + 50  # Custom role to signal symmetric pairing.
 
@@ -375,7 +376,7 @@ class GridModel:
     laminados: Dict[str, Laminado] = field(default_factory=OrderedDict)
     celulas_ordenadas: list[str] = field(default_factory=list)
     cell_to_laminate: Dict[str, str] = field(default_factory=dict)
-    # Colunas de contorno (ex.: 1-4) por célula para re-associação futura.
+    # Colunas de contorno (ex.: 1-30) por célula para re-associação futura.
     cell_contours: Dict[str, list[str]] = field(default_factory=dict)
     # Lista detalhada de instâncias (posicionadas) usadas na tela de vizinhanças.
     cell_neighbor_nodes: list[dict[str, object]] = field(default_factory=list)
@@ -637,6 +638,7 @@ def load_grid_spreadsheet(path: str) -> GridModel:
 
     cell_to_laminate = cells_info.mapping
     cell_contours = cells_info.contours
+    cells_tags = cells_info.laminate_tags
     separator_idx = cells_info.separator_idx
     config_section = df.iloc[separator_idx + 1 :]
 
@@ -656,6 +658,23 @@ def load_grid_spreadsheet(path: str) -> GridModel:
             continue
         if cell_id not in laminado.celulas:
             laminado.celulas.append(cell_id)
+
+    if cells_tags:
+        for laminate_name, tag_value in cells_tags.items():
+            laminado = laminados.get(laminate_name)
+            if laminado is None:
+                continue
+            current_tag = str(getattr(laminado, "tag", "") or "").strip()
+            if current_tag and current_tag != tag_value:
+                logger.warning(
+                    "Tag divergente para o laminado '%s' (configuracao '%s', cells '%s'); mantendo configuracao.",
+                    laminate_name,
+                    current_tag,
+                    tag_value,
+                )
+                continue
+            if not current_tag and tag_value:
+                laminado.tag = tag_value
 
     total_camadas = sum(
         count_oriented_layers(laminado.camadas) for laminado in laminados.values()
@@ -685,9 +704,28 @@ def save_grid_spreadsheet(path: str, model: GridModel) -> None:
     rows: list[list[object]] = []
 
     # Secao de celulas.
-    rows.append(["Cells", "Laminate"])
+    contours_map = getattr(model, "cell_contours", {}) or {}
+    max_contours = 0
+    for contours in contours_map.values():
+        if isinstance(contours, (list, tuple)):
+            max_contours = max(max_contours, len(contours))
+    max_contours = min(MAX_CONTOUR_SIDES, max_contours)
+
+    header = ["Cells", "Laminate"]
+    if max_contours:
+        header.extend(range(1, max_contours + 1))
+    rows.append(header)
+
     for cell_id in model.celulas_ordenadas:
-        rows.append([cell_id, model.cell_to_laminate.get(cell_id, "")])
+        row = [cell_id, model.cell_to_laminate.get(cell_id, "")]
+        if max_contours:
+            contours = list(contours_map.get(cell_id, []) or [])
+            if len(contours) > max_contours:
+                contours = contours[:max_contours]
+            row.extend(contours)
+            if len(contours) < max_contours:
+                row.extend([""] * (max_contours - len(contours)))
+        rows.append(row)
     rows.append(["#"])
 
     # Secao de configuracao por laminado.
@@ -1871,16 +1909,43 @@ def _extract_cells_section(df: pd.DataFrame, *, sheet_name: str) -> _CellsSectio
     if cell_col is None:
         cell_col = 0
 
-    contour_cols = [
-        idx
-        for idx, key in enumerate(header_keys)
-        if key and idx not in {cell_col, laminate_col}
-    ]
+    contour_candidates: list[tuple[int, int]] = []
+    for idx, key in enumerate(header_keys):
+        if idx in {cell_col, laminate_col}:
+            continue
+        if not key:
+            continue
+        raw_value = header_row.iloc[idx] if idx < len(header_row) else None
+        number = _resolve_int(raw_value)
+        if number is None:
+            number = _resolve_int(key)
+        if number is None:
+            continue
+        if 1 <= number <= MAX_CONTOUR_SIDES:
+            contour_candidates.append((number, idx))
+
+    if contour_candidates:
+        contour_candidates.sort(key=lambda item: (item[0], item[1]))
+        contour_cols = [idx for _, idx in contour_candidates[:MAX_CONTOUR_SIDES]]
+        if len(contour_candidates) > MAX_CONTOUR_SIDES:
+            logger.warning(
+                "Mais de %d colunas de contorno detectadas na aba '%s'; apenas as primeiras %d serao usadas.",
+                MAX_CONTOUR_SIDES,
+                sheet_name,
+                MAX_CONTOUR_SIDES,
+            )
+    else:
+        contour_cols = [
+            idx
+            for idx, key in enumerate(header_keys)
+            if key and idx not in {cell_col, laminate_col}
+        ]
 
     cells_ordered: list[str] = []
     seen_cells: set[str] = set()
     cell_to_laminate: Dict[str, str] = {}
     cell_contours: Dict[str, list[str]] = {}
+    laminate_tags: Dict[str, str] = {}
 
     for row_idx in range(data_start, separator_idx):
         row = df.iloc[row_idx]
@@ -1902,13 +1967,29 @@ def _extract_cells_section(df: pd.DataFrame, *, sheet_name: str) -> _CellsSectio
         if laminate_col is not None and laminate_col < len(row):
             laminate_value = row.iloc[laminate_col]
             if not _is_blank(laminate_value) and cell_id not in cell_to_laminate:
-                cell_to_laminate[cell_id] = str(laminate_value).strip()
+                laminate_name, laminate_tag = _split_laminate_name_tag(laminate_value)
+                if not laminate_name:
+                    laminate_name = str(laminate_value).strip()
+                cell_to_laminate[cell_id] = laminate_name
+                if laminate_tag:
+                    existing_tag = laminate_tags.get(laminate_name)
+                    if existing_tag and existing_tag != laminate_tag:
+                        logger.warning(
+                            "Tag divergente para o laminado '%s' na secao 'Cells' (usando '%s', ignorando '%s').",
+                            laminate_name,
+                            existing_tag,
+                            laminate_tag,
+                        )
+                    else:
+                        laminate_tags[laminate_name] = laminate_tag
 
         if contour_cols:
             contours: list[str] = []
             for col_idx in contour_cols:
                 value = row.iloc[col_idx] if col_idx < len(row) else None
                 contours.append(_string_or_empty(value))
+            while contours and not contours[-1]:
+                contours.pop()
             cell_contours[cell_id] = contours
 
     if not cells_ordered:
@@ -1924,6 +2005,7 @@ def _extract_cells_section(df: pd.DataFrame, *, sheet_name: str) -> _CellsSectio
         cells=cells_ordered,
         mapping=cell_to_laminate,
         contours=cell_contours,
+        laminate_tags=laminate_tags,
         separator_idx=separator_idx,
     )
 
@@ -1961,12 +2043,14 @@ def _parse_configuration_section(
         name_value = row.iloc[1] if len(row) > 1 else None
         if _is_blank(name_value):
             raise ValueError(f"Linha {idx + 1}: laminado sem nome definido.")
-        laminate_name = str(name_value).strip()
+        laminate_name, name_tag = _split_laminate_name_tag(name_value)
+        if not laminate_name:
+            laminate_name = str(name_value).strip()
         idx += 1
 
         color_index = DEFAULT_COLOR_INDEX
         laminate_type = ""
-        laminate_tag = ""
+        laminate_tag = name_tag
 
         while idx < len(df):
             row = df.iloc[idx]
@@ -1999,7 +2083,9 @@ def _parse_configuration_section(
                 continue
 
             if normalized in normalized_tag_aliases:
-                laminate_tag = _string_or_empty(row.iloc[1] if len(row) > 1 else "")
+                tag_value = _string_or_empty(row.iloc[1] if len(row) > 1 else "")
+                if tag_value:
+                    laminate_tag = tag_value
                 idx += 1
                 continue
 
@@ -2910,11 +2996,26 @@ def _string_or_empty(value: object) -> str:
     return str(value).strip()
 
 
+def _split_laminate_name_tag(value: object) -> tuple[str, str]:
+    text = _string_or_empty(value)
+    if not text:
+        return "", ""
+    match = re.match(r"^(?P<name>.+?)\((?P<tag>[^()]*)\)\s*$", text)
+    if not match:
+        return text, ""
+    name = match.group("name").strip()
+    tag = match.group("tag").strip()
+    if not name or not tag:
+        return text, ""
+    return name, tag
+
+
 @dataclass
 class _CellsSection:
     cells: list[str]
     mapping: Dict[str, str]
     contours: Dict[str, list[str]]
+    laminate_tags: Dict[str, str]
     separator_idx: int
 
 
