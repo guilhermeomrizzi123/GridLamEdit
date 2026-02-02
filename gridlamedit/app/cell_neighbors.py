@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Dict, Optional, Tuple
 
 from PySide6.QtCore import QPointF, QRectF, Qt, QSize, QLineF, QSignalBlocker
-from PySide6.QtGui import QColor, QFont, QPainterPath, QPen, QAction, QUndoStack, QUndoCommand, QLinearGradient, QRadialGradient, QBrush, QIcon, QPainter, QTextOption
+from PySide6.QtGui import QColor, QFont, QPainterPath, QPen, QAction, QUndoStack, QUndoCommand, QLinearGradient, QRadialGradient, QBrush, QIcon, QPainter, QTextOption, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
@@ -999,6 +999,11 @@ class CellNeighborsWindow(QDialog):
         self._drawing_line_item: Optional[QGraphicsLineItem] = None
         self._drawing_line_start: Optional[QPointF] = None
         self._drawing_actions: dict[str, QAction] = {}
+        self._drawing_line_width = float(DRAW_LINE_PEN.widthF())
+        self._drawing_line_color = QColor(DRAW_LINE_PEN.color())
+        default_font_size = max(9, QFont().pointSize())
+        self._drawing_text_size = float(default_font_size)
+        self._drawing_text_color = QColor(33, 37, 41)
 
         drawing_toolbar = QToolBar(self)
         drawing_toolbar.setMovable(False)
@@ -1028,6 +1033,38 @@ class CellNeighborsWindow(QDialog):
         drawing_toolbar.addAction(erase_action)
         self._drawing_actions["erase"] = erase_action
 
+        drawing_toolbar.addSeparator()
+        drawing_toolbar.addWidget(QLabel("Linha:", self))
+
+        self.line_width_combo = QComboBox(self)
+        for width_value in (1, 2, 3, 4, 5, 6, 8):
+            self.line_width_combo.addItem(f"{width_value}px", float(width_value))
+        self._set_combo_numeric_value(self.line_width_combo, self._drawing_line_width)
+        self.line_width_combo.setToolTip("Espessura da linha selecionada")
+        self.line_width_combo.currentIndexChanged.connect(self._on_line_width_changed)
+        drawing_toolbar.addWidget(self.line_width_combo)
+
+        self.line_color_combo = self._create_color_combo(self._drawing_line_color)
+        self.line_color_combo.setToolTip("Cor da linha selecionada")
+        self.line_color_combo.currentIndexChanged.connect(self._on_line_color_changed)
+        drawing_toolbar.addWidget(self.line_color_combo)
+
+        drawing_toolbar.addSeparator()
+        drawing_toolbar.addWidget(QLabel("Texto:", self))
+
+        self.text_size_combo = QComboBox(self)
+        for size_value in (8, 9, 10, 11, 12, 14, 16, 18, 20, 24):
+            self.text_size_combo.addItem(str(size_value), float(size_value))
+        self._set_combo_numeric_value(self.text_size_combo, self._drawing_text_size)
+        self.text_size_combo.setToolTip("Tamanho do texto selecionado")
+        self.text_size_combo.currentIndexChanged.connect(self._on_text_size_changed)
+        drawing_toolbar.addWidget(self.text_size_combo)
+
+        self.text_color_combo = self._create_color_combo(self._drawing_text_color)
+        self.text_color_combo.setToolTip("Cor do texto selecionado")
+        self.text_color_combo.currentIndexChanged.connect(self._on_text_color_changed)
+        drawing_toolbar.addWidget(self.text_color_combo)
+
         self._current_sequence_index: Optional[int] = None  # 1-based; None => no colouring
         self._aml_highlight_enabled = False
         self._previous_sequence_index_for_aml: int = 0
@@ -1054,6 +1091,7 @@ class CellNeighborsWindow(QDialog):
         self.scene.setSceneRect(0, 0, 2000, 1200)
         self.view.setScene(self.scene)
         self._setup_view_interaction()
+        self.scene.selectionChanged.connect(self._on_drawing_selection_changed)
 
         # Maintain nodes by grid position and by cell id
         self._nodes_by_grid: Dict[tuple[int, int], _NodeRecord] = {}
@@ -1128,7 +1166,9 @@ class CellNeighborsWindow(QDialog):
         line_item = DrawingLineItem(
             QLineF(scene_pos, scene_pos)
         )
-        line_item.setPen(DRAW_LINE_PEN)
+        pen = QPen(self._drawing_line_color)
+        pen.setWidthF(self._drawing_line_width)
+        line_item.setPen(pen)
         line_item.setZValue(0.5)
         self.scene.addItem(line_item)
         self._drawing_line_item = line_item
@@ -1161,10 +1201,10 @@ class CellNeighborsWindow(QDialog):
         if not text:
             return
         text_item = QGraphicsTextItem(text)
-        text_item.setDefaultTextColor(QColor(33, 37, 41))
+        text_item.setDefaultTextColor(QColor(self._drawing_text_color))
         text_item.setTextInteractionFlags(Qt.NoTextInteraction)
         font = text_item.font()
-        font.setPointSize(max(9, font.pointSize()))
+        font.setPointSizeF(self._drawing_text_size)
         text_item.setFont(font)
 
         padding = 6
@@ -1199,6 +1239,182 @@ class CellNeighborsWindow(QDialog):
         if parent and parent.data(DRAWING_ITEM_ROLE) == DRAWING_ITEM_TAG:
             return parent
         return None
+
+    def _set_drawing_option_widgets_enabled(self, enabled: bool) -> None:
+        if hasattr(self, "line_width_combo"):
+            self.line_width_combo.setEnabled(enabled)
+        if hasattr(self, "line_color_combo"):
+            self.line_color_combo.setEnabled(enabled)
+        if hasattr(self, "text_size_combo"):
+            self.text_size_combo.setEnabled(enabled)
+        if hasattr(self, "text_color_combo"):
+            self.text_color_combo.setEnabled(enabled)
+
+    def _create_color_combo(self, default_color: QColor) -> QComboBox:
+        combo = QComboBox(self)
+        options = [
+            ("Preto", QColor(33, 37, 41)),
+            ("Cinza", QColor(108, 117, 125)),
+            ("Vermelho", QColor(220, 53, 69)),
+            ("Azul", QColor(13, 110, 253)),
+            ("Verde", QColor(25, 135, 84)),
+            ("Laranja", QColor(255, 153, 0)),
+            ("Roxo", QColor(111, 66, 193)),
+        ]
+        for label, color in options:
+            combo.addItem(self._make_color_icon(color), "", color)
+            combo.setItemData(combo.count() - 1, label, Qt.ToolTipRole)
+        combo.setIconSize(QSize(18, 18))
+        self._set_combo_color_value(combo, default_color)
+        return combo
+
+    def _make_color_icon(self, color: QColor) -> QIcon:
+        pixmap = QPixmap(18, 18)
+        pixmap.fill(QColor(color))
+        painter = QPainter(pixmap)
+        painter.setPen(QColor(80, 80, 80))
+        painter.drawRect(0, 0, 17, 17)
+        painter.end()
+        return QIcon(pixmap)
+
+    def _set_combo_color_value(self, combo: QComboBox, color: QColor) -> None:
+        target = QColor(color).name().lower()
+        for index in range(combo.count()):
+            value = combo.itemData(index, Qt.UserRole)
+            if isinstance(value, QColor) and value.name().lower() == target:
+                combo.setCurrentIndex(index)
+                return
+
+    def _set_combo_numeric_value(self, combo: QComboBox, value: float) -> None:
+        for index in range(combo.count()):
+            stored = combo.itemData(index, Qt.UserRole)
+            try:
+                if stored is not None and abs(float(stored) - float(value)) < 0.01:
+                    combo.setCurrentIndex(index)
+                    return
+            except Exception:
+                continue
+
+    def _get_selected_drawing_items(self) -> list[QGraphicsItem]:
+        selected_items = self.scene.selectedItems()
+        targets: list[QGraphicsItem] = []
+        seen: set[int] = set()
+        for item in selected_items:
+            target = self._find_drawing_item(item)
+            if target is None:
+                continue
+            if id(target) in seen:
+                continue
+            seen.add(id(target))
+            targets.append(target)
+        return targets
+
+    def _on_line_width_changed(self) -> None:
+        width_value = self.line_width_combo.currentData(Qt.UserRole)
+        if width_value is None:
+            try:
+                width_value = float(self.line_width_combo.currentText().replace("px", ""))
+            except Exception:
+                return
+        width_value = float(width_value)
+        self._drawing_line_width = width_value
+        changed = False
+        for item in self._get_selected_drawing_items():
+            if isinstance(item, QGraphicsLineItem):
+                pen = item.pen()
+                if abs(pen.widthF() - width_value) > 0.01:
+                    pen.setWidthF(width_value)
+                    item.setPen(pen)
+                    changed = True
+        if changed:
+            self._mark_as_modified()
+
+    def _on_line_color_changed(self) -> None:
+        color_value = self.line_color_combo.currentData(Qt.UserRole)
+        if not isinstance(color_value, QColor):
+            return
+        self._drawing_line_color = QColor(color_value)
+        changed = False
+        for item in self._get_selected_drawing_items():
+            if isinstance(item, QGraphicsLineItem):
+                pen = item.pen()
+                if pen.color() != color_value:
+                    pen.setColor(color_value)
+                    item.setPen(pen)
+                    changed = True
+        if changed:
+            self._mark_as_modified()
+
+    def _on_text_size_changed(self) -> None:
+        size_value = self.text_size_combo.currentData(Qt.UserRole)
+        if size_value is None:
+            try:
+                size_value = float(self.text_size_combo.currentText())
+            except Exception:
+                return
+        size_value = float(size_value)
+        self._drawing_text_size = size_value
+        changed = False
+        for item in self._get_selected_drawing_items():
+            if isinstance(item, QGraphicsRectItem):
+                for child in item.childItems():
+                    if isinstance(child, QGraphicsTextItem):
+                        font = child.font()
+                        if abs(font.pointSizeF() - size_value) > 0.01:
+                            font.setPointSizeF(size_value)
+                            child.setFont(font)
+                            changed = True
+                        break
+        if changed:
+            self._mark_as_modified()
+
+    def _on_text_color_changed(self) -> None:
+        color_value = self.text_color_combo.currentData(Qt.UserRole)
+        if not isinstance(color_value, QColor):
+            return
+        self._drawing_text_color = QColor(color_value)
+        changed = False
+        for item in self._get_selected_drawing_items():
+            if isinstance(item, QGraphicsRectItem):
+                for child in item.childItems():
+                    if isinstance(child, QGraphicsTextItem):
+                        if child.defaultTextColor() != color_value:
+                            child.setDefaultTextColor(color_value)
+                            changed = True
+                        break
+        if changed:
+            self._mark_as_modified()
+
+    def _on_drawing_selection_changed(self) -> None:
+        selected = self._get_selected_drawing_items()
+        line_item = next((item for item in selected if isinstance(item, QGraphicsLineItem)), None)
+        text_item = None
+        for item in selected:
+            if isinstance(item, QGraphicsRectItem):
+                for child in item.childItems():
+                    if isinstance(child, QGraphicsTextItem):
+                        text_item = child
+                        break
+                if text_item is not None:
+                    break
+
+        if line_item is not None:
+            pen = line_item.pen()
+            blocker = QSignalBlocker(self.line_width_combo)
+            self._set_combo_numeric_value(self.line_width_combo, pen.widthF())
+            del blocker
+            blocker = QSignalBlocker(self.line_color_combo)
+            self._set_combo_color_value(self.line_color_combo, pen.color())
+            del blocker
+
+        if text_item is not None:
+            font = text_item.font()
+            blocker = QSignalBlocker(self.text_size_combo)
+            self._set_combo_numeric_value(self.text_size_combo, font.pointSizeF())
+            del blocker
+            blocker = QSignalBlocker(self.text_color_combo)
+            self._set_combo_color_value(self.text_color_combo, text_item.defaultTextColor())
+            del blocker
 
     def _erase_at(self, scene_pos: QPointF) -> None:
         item = self.scene.itemAt(scene_pos, self.view.transform())
@@ -1467,6 +1683,9 @@ class CellNeighborsWindow(QDialog):
             self._apply_drawing_cursor()
         for action in self._drawing_actions.values():
             action.setEnabled(not locked and not self._missing_laminate_ui_lock and not self._review_ui_lock)
+        self._set_drawing_option_widgets_enabled(
+            not locked and not self._missing_laminate_ui_lock and not self._review_ui_lock
+        )
 
         # Editing-related buttons
         self.aml_toggle_button.setEnabled(not locked and not self._missing_laminate_ui_lock and not self._review_ui_lock)
@@ -1503,6 +1722,9 @@ class CellNeighborsWindow(QDialog):
             self._apply_drawing_cursor()
         for action in self._drawing_actions.values():
             action.setEnabled(not locked and not self._missing_laminate_ui_lock and not self._review_ui_lock)
+        self._set_drawing_option_widgets_enabled(
+            not locked and not self._missing_laminate_ui_lock and not self._review_ui_lock
+        )
 
         # Editing-related buttons (keep AML toggle enabled)
         self.reorder_neighbors_button.setEnabled(not locked and not self._missing_laminate_ui_lock and not self._review_ui_lock)
@@ -1532,6 +1754,9 @@ class CellNeighborsWindow(QDialog):
             self._apply_drawing_cursor()
         for action in self._drawing_actions.values():
             action.setEnabled(not locked and not self._reorder_edit_lock and not self._aml_ui_lock and not self._review_ui_lock)
+        self._set_drawing_option_widgets_enabled(
+            not locked and not self._reorder_edit_lock and not self._aml_ui_lock and not self._review_ui_lock
+        )
 
         # Editing-related buttons
         self.sequence_combo.setEnabled(
@@ -2125,6 +2350,12 @@ class CellNeighborsWindow(QDialog):
                 and not self._aml_ui_lock
                 and not self._missing_laminate_ui_lock
             )
+        self._set_drawing_option_widgets_enabled(
+            not locked
+            and not self._reorder_edit_lock
+            and not self._aml_ui_lock
+            and not self._missing_laminate_ui_lock
+        )
 
         self.sequence_combo.setEnabled(
             not locked and not self._aml_highlight_enabled and not self._layer_count_highlight_enabled
