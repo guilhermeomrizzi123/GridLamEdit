@@ -533,7 +533,7 @@ class MainWindow(QMainWindow):
             ),
             (
                 "compare_all_laminates_action",
-                "Comparar Todos (Duplicados)",
+                "Remover Laminados Duplicados",
                 self._on_compare_all_laminates,
                 "Compara automaticamente todos os laminados e lista duplicados.",
                 None,
@@ -774,9 +774,13 @@ class MainWindow(QMainWindow):
                 for name in group.laminates
                 if name and name not in associated_names
             ]
-            if len(eligible_names) < 2:
+            if not eligible_names:
                 continue
-            for lam_name in eligible_names:
+            # Se nenhum laminado do grupo está associado, preserve pelo menos um.
+            names_to_remove = eligible_names
+            if len(eligible_names) == len(group.laminates):
+                names_to_remove = eligible_names[1:]
+            for lam_name in names_to_remove:
                 laminado = self._grid_model.laminados.get(lam_name)
                 if laminado is None:
                     continue
@@ -4551,9 +4555,18 @@ class MainWindow(QMainWindow):
                 associated_names.add(name)
         ordered: OrderedDict[str, Laminado] = OrderedDict()
         for group in self._last_checks_report.duplicates:
-            for lam_name in group.laminates:
-                if not lam_name or lam_name in associated_names:
-                    continue
+            eligible_names = [
+                name
+                for name in group.laminates
+                if name and name not in associated_names
+            ]
+            if not eligible_names:
+                continue
+            # Se nenhum laminado do grupo está associado, preserve pelo menos um.
+            names_to_remove = eligible_names
+            if len(eligible_names) == len(group.laminates):
+                names_to_remove = eligible_names[1:]
+            for lam_name in names_to_remove:
                 laminado = self._grid_model.laminados.get(lam_name)
                 if laminado is None:
                     continue
