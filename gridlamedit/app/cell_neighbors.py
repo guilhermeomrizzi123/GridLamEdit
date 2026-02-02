@@ -14,8 +14,10 @@ which returns the current neighbor map in memory (listas para suportar múltipla
 from __future__ import annotations
 
 from collections import Counter
+import csv
 import json
 import logging
+import math
 import re
 import unicodedata
 from dataclasses import dataclass
@@ -25,6 +27,7 @@ from typing import Dict, Optional, Tuple
 from PySide6.QtCore import QPointF, QRectF, Qt, QSize, QLineF, QSignalBlocker
 from PySide6.QtGui import QColor, QFont, QPainterPath, QPen, QAction, QUndoStack, QUndoCommand, QLinearGradient, QRadialGradient, QBrush, QIcon, QPainter, QTextOption
 from PySide6.QtWidgets import (
+    QApplication,
     QDialog,
     QDialogButtonBox,
     QGraphicsItem,
@@ -49,6 +52,7 @@ from PySide6.QtWidgets import (
     QInputDialog,
     QLineEdit,
     QFileDialog,
+    QProgressDialog,
     QTextEdit,
 )
 
@@ -110,6 +114,7 @@ COLOR_DASH = QColor(134, 142, 150)  # Medium steel gray lines
 COLOR_CENTER_BORDER = QColor(250, 128, 114)  # Salmon highlight for central sequences
 COLOR_CONTOUR_TEXT = QColor(55, 65, 81)  # Dark gray for contour labels
 COLOR_MISSING_LAMINATE_BORDER = QColor(220, 53, 69)  # Red warning border for missing laminate
+COLOR_REVIEW_MISMATCH_BORDER = QColor(220, 53, 69)  # Red border for review mismatches
 
 COLOR_AML_SOFT = QColor(78, 153, 223)  # Clear blue for Soft
 COLOR_AML_QUASI = QColor(147, 112, 219)  # Purple for Quasi-iso
@@ -148,6 +153,8 @@ DIR_OFFSETS: dict[str, tuple[int, int]] = {
     "left": (-1, 0),
     "right": (1, 0),
 }
+
+REVIEW_SEQUENCE_PATTERN = re.compile(r"^S\.(\d+)$", re.IGNORECASE)
 
 
 def opposite(dir_name: str) -> str:
@@ -897,6 +904,12 @@ class CellNeighborsWindow(QDialog):
         self._reorder_edit_lock = False
         self._missing_laminate_ui_lock = False
         self._missing_laminate_toggle_active = False
+        self._review_ui_lock = False
+        self._review_active = False
+        self._review_payload: Optional[dict[str, dict[int, Optional[float]]]] = None
+        self._review_mismatch_cells: set[str] = set()
+        self._review_diff_details: dict[str, list[str]] = {}
+        self._review_prev_state: Optional[dict[str, object]] = None
 
         # Main layout
         main_layout = QVBoxLayout(self)
@@ -962,6 +975,13 @@ class CellNeighborsWindow(QDialog):
         self.missing_laminate_button.setToolTip("Destacar células sem laminado aplicado")
         self.missing_laminate_button.toggled.connect(self._on_missing_laminate_toggle)
         toolbar.addWidget(self.missing_laminate_button)
+
+        # Review toggle
+        self.review_toggle_button = QPushButton("Review", self)
+        self.review_toggle_button.setCheckable(True)
+        self.review_toggle_button.setToolTip("Comparar orientações com um arquivo de revisão")
+        self.review_toggle_button.toggled.connect(self._on_review_toggle)
+        toolbar.addWidget(self.review_toggle_button)
 
         # Export/Import neighbors
         self.export_neighbors_button = QPushButton("Exportar vizinhanças", self)
@@ -1062,6 +1082,13 @@ class CellNeighborsWindow(QDialog):
         view.viewport().installEventFilter(self)
 
     def _on_drawing_tool_toggled(self, tool: str, checked: bool) -> None:
+        if self._review_ui_lock:
+            action = self._drawing_actions.get(tool)
+            if action is not None and action.isChecked():
+                blocker = QSignalBlocker(action)
+                action.setChecked(False)
+                del blocker
+            return
         if self._reorder_edit_lock or self._missing_laminate_ui_lock:
             return
         if checked:
@@ -1388,6 +1415,7 @@ class CellNeighborsWindow(QDialog):
         # Ensure reorder toggle is off before closing
         self._ensure_reorder_neighbors_off()
         self._ensure_missing_laminate_off()
+        self._ensure_review_off()
 
         # Clear highlights and proceed with close
         self._clear_disconnected_highlights()
@@ -1397,6 +1425,7 @@ class CellNeighborsWindow(QDialog):
         """Ensure transient toggles are disabled when the window is hidden."""
         self._ensure_reorder_neighbors_off()
         self._ensure_missing_laminate_off()
+        self._ensure_review_off()
         super().hideEvent(event)
 
     def reject(self) -> None:
@@ -1405,6 +1434,7 @@ class CellNeighborsWindow(QDialog):
             return
         self._ensure_reorder_neighbors_off()
         self._ensure_missing_laminate_off()
+        self._ensure_review_off()
         self._clear_disconnected_highlights()
         super().reject()
 
@@ -1415,6 +1445,10 @@ class CellNeighborsWindow(QDialog):
     def _ensure_missing_laminate_off(self) -> None:
         if hasattr(self, "missing_laminate_button") and self.missing_laminate_button.isChecked():
             self.missing_laminate_button.setChecked(False)
+
+    def _ensure_review_off(self) -> None:
+        if hasattr(self, "review_toggle_button") and self.review_toggle_button.isChecked():
+            self.review_toggle_button.setChecked(False)
 
     def _set_reorder_edit_lock(self, locked: bool) -> None:
         if self._reorder_edit_lock == locked:
@@ -1432,18 +1466,18 @@ class CellNeighborsWindow(QDialog):
             self._cancel_active_line()
             self._apply_drawing_cursor()
         for action in self._drawing_actions.values():
-            action.setEnabled(not locked and not self._missing_laminate_ui_lock)
+            action.setEnabled(not locked and not self._missing_laminate_ui_lock and not self._review_ui_lock)
 
         # Editing-related buttons
-        self.aml_toggle_button.setEnabled(not locked and not self._missing_laminate_ui_lock)
-        self.layer_count_toggle_button.setEnabled(not locked and not self._missing_laminate_ui_lock)
-        self.export_neighbors_button.setEnabled(not locked and not self._missing_laminate_ui_lock)
-        self.import_neighbors_button.setEnabled(not locked and not self._missing_laminate_ui_lock)
+        self.aml_toggle_button.setEnabled(not locked and not self._missing_laminate_ui_lock and not self._review_ui_lock)
+        self.layer_count_toggle_button.setEnabled(not locked and not self._missing_laminate_ui_lock and not self._review_ui_lock)
+        self.export_neighbors_button.setEnabled(not locked and not self._missing_laminate_ui_lock and not self._review_ui_lock)
+        self.import_neighbors_button.setEnabled(not locked and not self._missing_laminate_ui_lock and not self._review_ui_lock)
         if hasattr(self, "missing_laminate_button"):
-            self.missing_laminate_button.setEnabled(not locked and not self._aml_ui_lock)
+            self.missing_laminate_button.setEnabled(not locked and not self._aml_ui_lock and not self._review_ui_lock)
 
         # Undo/Redo actions
-        if locked or self._missing_laminate_ui_lock:
+        if locked or self._missing_laminate_ui_lock or self._review_ui_lock:
             self.undo_action.setEnabled(False)
             self.redo_action.setEnabled(False)
         else:
@@ -1468,15 +1502,15 @@ class CellNeighborsWindow(QDialog):
             self._cancel_active_line()
             self._apply_drawing_cursor()
         for action in self._drawing_actions.values():
-            action.setEnabled(not locked and not self._missing_laminate_ui_lock)
+            action.setEnabled(not locked and not self._missing_laminate_ui_lock and not self._review_ui_lock)
 
         # Editing-related buttons (keep AML toggle enabled)
-        self.reorder_neighbors_button.setEnabled(not locked and not self._missing_laminate_ui_lock)
-        self.export_neighbors_button.setEnabled(not locked and not self._missing_laminate_ui_lock)
-        self.import_neighbors_button.setEnabled(not locked and not self._missing_laminate_ui_lock)
-        self.layer_count_toggle_button.setEnabled(not locked and not self._missing_laminate_ui_lock)
+        self.reorder_neighbors_button.setEnabled(not locked and not self._missing_laminate_ui_lock and not self._review_ui_lock)
+        self.export_neighbors_button.setEnabled(not locked and not self._missing_laminate_ui_lock and not self._review_ui_lock)
+        self.import_neighbors_button.setEnabled(not locked and not self._missing_laminate_ui_lock and not self._review_ui_lock)
+        self.layer_count_toggle_button.setEnabled(not locked and not self._missing_laminate_ui_lock and not self._review_ui_lock)
         if hasattr(self, "missing_laminate_button"):
-            self.missing_laminate_button.setEnabled(not locked and not self._reorder_edit_lock)
+            self.missing_laminate_button.setEnabled(not locked and not self._reorder_edit_lock and not self._review_ui_lock)
 
         # Refresh plus buttons visibility (used to add neighbors)
         self._update_all_plus_buttons_visibility()
@@ -1497,23 +1531,23 @@ class CellNeighborsWindow(QDialog):
             self._cancel_active_line()
             self._apply_drawing_cursor()
         for action in self._drawing_actions.values():
-            action.setEnabled(not locked and not self._reorder_edit_lock and not self._aml_ui_lock)
+            action.setEnabled(not locked and not self._reorder_edit_lock and not self._aml_ui_lock and not self._review_ui_lock)
 
         # Editing-related buttons
         self.sequence_combo.setEnabled(
-            not locked and not self._aml_highlight_enabled and not self._layer_count_highlight_enabled
+            not locked and not self._aml_highlight_enabled and not self._layer_count_highlight_enabled and not self._review_ui_lock
         )
         self.sequence_label.setEnabled(
-            not locked and not self._aml_highlight_enabled and not self._layer_count_highlight_enabled
+            not locked and not self._aml_highlight_enabled and not self._layer_count_highlight_enabled and not self._review_ui_lock
         )
-        self.reorder_neighbors_button.setEnabled(not locked and not self._aml_ui_lock)
-        self.aml_toggle_button.setEnabled(not locked and not self._reorder_edit_lock)
-        self.layer_count_toggle_button.setEnabled(not locked and not self._reorder_edit_lock)
-        self.export_neighbors_button.setEnabled(not locked and not self._reorder_edit_lock and not self._aml_ui_lock)
-        self.import_neighbors_button.setEnabled(not locked and not self._reorder_edit_lock and not self._aml_ui_lock)
+        self.reorder_neighbors_button.setEnabled(not locked and not self._aml_ui_lock and not self._review_ui_lock)
+        self.aml_toggle_button.setEnabled(not locked and not self._reorder_edit_lock and not self._review_ui_lock)
+        self.layer_count_toggle_button.setEnabled(not locked and not self._reorder_edit_lock and not self._review_ui_lock)
+        self.export_neighbors_button.setEnabled(not locked and not self._reorder_edit_lock and not self._aml_ui_lock and not self._review_ui_lock)
+        self.import_neighbors_button.setEnabled(not locked and not self._reorder_edit_lock and not self._aml_ui_lock and not self._review_ui_lock)
 
         # Undo/Redo actions
-        if locked:
+        if locked or self._review_ui_lock:
             self.undo_action.setEnabled(False)
             self.redo_action.setEnabled(False)
         else:
@@ -1527,6 +1561,7 @@ class CellNeighborsWindow(QDialog):
         """Populate the window with cells from the project and load existing neighbors."""
         self._model = model
         self._project_manager = project_manager
+        self._ensure_review_off()
         # Always start with AML highlight disabled for a fresh load
         self.aml_toggle_button.setChecked(False)
         if hasattr(self, "layer_count_toggle_button"):
@@ -1629,7 +1664,7 @@ class CellNeighborsWindow(QDialog):
 
     def _update_command_buttons(self, *args) -> None:
         """Enable/disable Undo/Redo respecting AML lock state."""
-        if self._reorder_edit_lock or self._missing_laminate_ui_lock:
+        if self._reorder_edit_lock or self._missing_laminate_ui_lock or self._review_ui_lock:
             self.undo_action.setEnabled(False)
             self.redo_action.setEnabled(False)
             return
@@ -1794,6 +1829,11 @@ class CellNeighborsWindow(QDialog):
         return window
 
     def _on_reorder_neighbors_toggle(self, checked: bool) -> None:
+        if self._review_ui_lock:
+            blocker = QSignalBlocker(self.reorder_neighbors_button)
+            self.reorder_neighbors_button.setChecked(False)
+            del blocker
+            return
         if self._missing_laminate_ui_lock:
             blocker = QSignalBlocker(self.reorder_neighbors_button)
             self.reorder_neighbors_button.setChecked(False)
@@ -1855,6 +1895,11 @@ class CellNeighborsWindow(QDialog):
         self._refresh_sequence_combo_preserve_selection()
 
     def _on_aml_toggle(self, enabled: bool) -> None:
+        if self._review_ui_lock:
+            blocker = QSignalBlocker(self.aml_toggle_button)
+            self.aml_toggle_button.setChecked(False)
+            del blocker
+            return
         if self._missing_laminate_ui_lock:
             blocker = QSignalBlocker(self.aml_toggle_button)
             self.aml_toggle_button.setChecked(False)
@@ -1873,6 +1918,11 @@ class CellNeighborsWindow(QDialog):
             self._deactivate_aml_highlight()
 
     def _on_layer_count_toggle(self, enabled: bool) -> None:
+        if self._review_ui_lock:
+            blocker = QSignalBlocker(self.layer_count_toggle_button)
+            self.layer_count_toggle_button.setChecked(False)
+            del blocker
+            return
         if self._missing_laminate_ui_lock:
             blocker = QSignalBlocker(self.layer_count_toggle_button)
             self.layer_count_toggle_button.setChecked(False)
@@ -1886,6 +1936,11 @@ class CellNeighborsWindow(QDialog):
             self._deactivate_layer_count_highlight()
 
     def _on_missing_laminate_toggle(self, enabled: bool) -> None:
+        if self._review_ui_lock:
+            blocker = QSignalBlocker(self.missing_laminate_button)
+            self.missing_laminate_button.setChecked(False)
+            del blocker
+            return
         if enabled:
             if self.reorder_neighbors_button.isChecked():
                 self.reorder_neighbors_button.setChecked(False)
@@ -1905,6 +1960,393 @@ class CellNeighborsWindow(QDialog):
             self._clear_missing_laminate_highlight()
             self._set_missing_laminate_ui_lock(False)
         self._refresh_missing_laminate_button_state()
+
+    def _on_review_toggle(self, enabled: bool) -> None:
+        if enabled:
+            if self._model is None:
+                QMessageBox.warning(
+                    self,
+                    "Review",
+                    "Nenhum projeto carregado para comparar.",
+                )
+                blocker = QSignalBlocker(self.review_toggle_button)
+                self.review_toggle_button.setChecked(False)
+                del blocker
+                return
+
+            self._store_review_previous_state()
+
+            # Turn off other toggles while review is active
+            if self.reorder_neighbors_button.isChecked():
+                self.reorder_neighbors_button.setChecked(False)
+            if self.aml_toggle_button.isChecked():
+                self.aml_toggle_button.setChecked(False)
+            if self.layer_count_toggle_button.isChecked():
+                self.layer_count_toggle_button.setChecked(False)
+            if self.missing_laminate_button.isChecked():
+                self.missing_laminate_button.setChecked(False)
+
+            if not self._run_review_reorder():
+                QMessageBox.warning(
+                    self,
+                    "Review",
+                    "Não foi possível reordenar por vizinhança. Corrija os avisos e tente novamente.",
+                )
+                blocker = QSignalBlocker(self.review_toggle_button)
+                self.review_toggle_button.setChecked(False)
+                del blocker
+                self._restore_review_previous_state()
+                return
+
+            file_path, _ = QFileDialog.getOpenFileName(
+                self,
+                "Selecionar arquivo de review",
+                str(Path.cwd()),
+                "Text files (*.txt);;All files (*.*)",
+            )
+            if not file_path:
+                blocker = QSignalBlocker(self.review_toggle_button)
+                self.review_toggle_button.setChecked(False)
+                del blocker
+                self._restore_review_previous_state()
+                return
+
+            try:
+                payload, max_seq_idx, invalid_cells = self._parse_review_file(Path(file_path))
+            except Exception as exc:
+                QMessageBox.warning(
+                    self,
+                    "Review",
+                    f"Falha ao ler arquivo de review.\nErro: {exc}",
+                )
+                blocker = QSignalBlocker(self.review_toggle_button)
+                self.review_toggle_button.setChecked(False)
+                del blocker
+                self._restore_review_previous_state()
+                return
+
+            self._review_active = True
+            mismatches, details = self._collect_review_mismatches(payload, max_seq_idx, invalid_cells)
+            self._review_payload = payload
+            self._review_diff_details = details
+            self._set_review_mismatch_highlight(mismatches)
+            self._set_review_ui_lock(True)
+
+            self._show_review_report_dialog(len(mismatches))
+        else:
+            self._review_active = False
+            self._clear_review_mismatch_highlight()
+            self._review_payload = None
+            self._review_diff_details = {}
+            self._set_review_ui_lock(False)
+            self._restore_review_previous_state()
+
+    def _run_review_reorder(self) -> bool:
+        window = self._ensure_virtual_stacking_window()
+        if window is None:
+            return False
+
+        already_active = False
+        if hasattr(window, "btn_reorganize_neighbors"):
+            already_active = window.btn_reorganize_neighbors.isChecked()
+        else:
+            already_active = bool(getattr(window, "_neighbors_reorder_snapshot", None))
+
+        if already_active:
+            return True
+
+        progress = QProgressDialog(
+            "Reordenando por vizinhança...",
+            None,
+            0,
+            0,
+            self,
+        )
+        progress.setWindowModality(Qt.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.setAutoClose(True)
+        progress.setAutoReset(True)
+        progress.show()
+        QApplication.processEvents()
+
+        try:
+            if hasattr(window, "btn_reorganize_neighbors"):
+                window.btn_reorganize_neighbors.setChecked(True)
+                QApplication.processEvents()
+                return window.btn_reorganize_neighbors.isChecked()
+            applied = window.reorganizar_por_vizinhanca()
+            return bool(applied)
+        finally:
+            progress.close()
+
+    def _store_review_previous_state(self) -> None:
+        self._review_prev_state = {
+            "sequence_index": self.sequence_combo.currentIndex() if hasattr(self, "sequence_combo") else 0,
+            "reorder": self.reorder_neighbors_button.isChecked(),
+            "aml": self.aml_toggle_button.isChecked(),
+            "layer_count": self.layer_count_toggle_button.isChecked(),
+            "missing": self.missing_laminate_button.isChecked() if hasattr(self, "missing_laminate_button") else False,
+        }
+
+    def _restore_review_previous_state(self) -> None:
+        if not self._review_prev_state:
+            return
+
+        previous = dict(self._review_prev_state)
+        self._review_prev_state = None
+
+        # Restore toggle states (signals handle internal UI changes)
+        if previous.get("missing") and hasattr(self, "missing_laminate_button"):
+            self.missing_laminate_button.setChecked(True)
+        if previous.get("layer_count"):
+            self.layer_count_toggle_button.setChecked(True)
+        if previous.get("aml"):
+            self.aml_toggle_button.setChecked(True)
+        if previous.get("reorder"):
+            self.reorder_neighbors_button.setChecked(True)
+
+        # Restore sequence selection
+        if hasattr(self, "sequence_combo"):
+            seq_index = int(previous.get("sequence_index", 0) or 0)
+            if 0 <= seq_index < self.sequence_combo.count():
+                self.sequence_combo.setCurrentIndex(seq_index)
+
+    def _set_review_ui_lock(self, locked: bool) -> None:
+        if self._review_ui_lock == locked:
+            return
+        self._review_ui_lock = locked
+
+        if locked:
+            for action in self._drawing_actions.values():
+                if action.isChecked():
+                    blocker = QSignalBlocker(action)
+                    action.setChecked(False)
+                    del blocker
+            self._drawing_tool = None
+            self._cancel_active_line()
+            self._apply_drawing_cursor()
+
+        for action in self._drawing_actions.values():
+            action.setEnabled(
+                not locked
+                and not self._reorder_edit_lock
+                and not self._aml_ui_lock
+                and not self._missing_laminate_ui_lock
+            )
+
+        self.sequence_combo.setEnabled(
+            not locked and not self._aml_highlight_enabled and not self._layer_count_highlight_enabled
+        )
+        self.sequence_label.setEnabled(
+            not locked and not self._aml_highlight_enabled and not self._layer_count_highlight_enabled
+        )
+        self.reorder_neighbors_button.setEnabled(not locked and not self._missing_laminate_ui_lock)
+        self.aml_toggle_button.setEnabled(not locked and not self._missing_laminate_ui_lock)
+        self.layer_count_toggle_button.setEnabled(not locked and not self._missing_laminate_ui_lock)
+        self.export_neighbors_button.setEnabled(not locked and not self._missing_laminate_ui_lock)
+        self.import_neighbors_button.setEnabled(not locked and not self._missing_laminate_ui_lock)
+        if hasattr(self, "missing_laminate_button"):
+            self.missing_laminate_button.setEnabled(not locked and not self._aml_ui_lock)
+
+        # Keep Review toggle enabled so it can be turned off
+        if hasattr(self, "review_toggle_button"):
+            self.review_toggle_button.setEnabled(True)
+
+        if locked:
+            self.undo_action.setEnabled(False)
+            self.redo_action.setEnabled(False)
+        else:
+            self._update_command_buttons()
+
+        self._update_all_plus_buttons_visibility()
+
+    def _show_review_report_dialog(self, mismatch_count: int) -> None:
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Review - Diferenças por célula")
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(12)
+
+        header = QLabel(
+            f"Review concluído. Células divergentes: {mismatch_count}.",
+            dialog,
+        )
+        header.setWordWrap(True)
+        layout.addWidget(header)
+
+        text = QTextEdit(dialog)
+        text.setReadOnly(True)
+        text.setMinimumSize(QSize(640, 360))
+        text.setText(self._build_review_report_text())
+        layout.addWidget(text)
+
+        button_box = QDialogButtonBox(QDialogButtonBox.Ok, dialog)
+        ok_button = button_box.button(QDialogButtonBox.Ok)
+        if ok_button is not None:
+            ok_button.setText("OK")
+        button_box.accepted.connect(dialog.accept)
+        layout.addWidget(button_box)
+
+        dialog.setLayout(layout)
+        dialog.exec()
+
+    def _build_review_report_text(self) -> str:
+        if not self._review_diff_details:
+            return "Nenhuma diferença encontrada."
+        lines: list[str] = []
+        for cell_id in sorted(self._review_diff_details.keys()):
+            lines.append(f"{cell_id}:")
+            for detail in self._review_diff_details[cell_id]:
+                lines.append(f"  - {detail}")
+            lines.append("")
+        return "\n".join(lines).strip()
+
+    def _parse_review_file(
+        self, file_path: Path
+    ) -> tuple[dict[str, dict[int, Optional[float]]], int, set[str]]:
+        text = file_path.read_text(encoding="utf-8", errors="replace")
+        rows = list(csv.reader(text.splitlines(), delimiter="\t"))
+        if not rows:
+            raise ValueError("Arquivo vazio.")
+
+        header = [col.strip() for col in rows[0]]
+        sequence_idx = None
+        for idx, label in enumerate(header):
+            if label.lower() == "sequence":
+                sequence_idx = idx
+                break
+        if sequence_idx is None:
+            raise ValueError("Coluna 'Sequence' não encontrada.")
+
+        cell_columns: dict[int, str] = {}
+        for idx, label in enumerate(header):
+            if CELL_ID_PATTERN.fullmatch(label or ""):
+                cell_columns[idx] = label
+        if not cell_columns:
+            raise ValueError("Nenhuma coluna de célula encontrada.")
+
+        cell_map: dict[str, dict[int, Optional[float]]] = {
+            cell_id: {} for cell_id in cell_columns.values()
+        }
+        invalid_cells: set[str] = set()
+        max_seq_idx = 0
+
+        for row in rows[1:]:
+            if sequence_idx >= len(row):
+                continue
+            seq_text = str(row[sequence_idx]).strip()
+            match = REVIEW_SEQUENCE_PATTERN.match(seq_text)
+            if not match:
+                continue
+            seq_idx = int(match.group(1))
+            max_seq_idx = max(max_seq_idx, seq_idx)
+
+            for col_idx, cell_id in cell_columns.items():
+                if col_idx >= len(row):
+                    continue
+                raw_value = str(row[col_idx]).strip()
+                if not raw_value:
+                    continue
+                if raw_value.lower() == "empty":
+                    continue
+                try:
+                    normalized = float(normalize_angle(raw_value))
+                except Exception:
+                    try:
+                        normalized = float(raw_value.replace(",", "."))
+                    except Exception:
+                        invalid_cells.add(cell_id)
+                        continue
+                cell_map.setdefault(cell_id, {})[seq_idx] = normalized
+
+        if max_seq_idx <= 0:
+            raise ValueError("Nenhuma sequência válida encontrada.")
+
+        return cell_map, max_seq_idx, invalid_cells
+
+    def _collect_review_mismatches(
+        self,
+        payload: dict[str, dict[int, Optional[float]]],
+        max_seq_idx: int,
+        invalid_cells: set[str],
+    ) -> tuple[set[str], dict[str, list[str]]]:
+        mismatches: set[str] = set(invalid_cells)
+        details: dict[str, list[str]] = {cell: ["Valor inválido no arquivo de review."] for cell in invalid_cells}
+        if self._model is None:
+            return mismatches, details
+
+        try:
+            cell_to_laminate = getattr(self._model, "cell_to_laminate", {}) or {}
+        except Exception:
+            cell_to_laminate = {}
+        try:
+            laminados = getattr(self._model, "laminados", {}) or {}
+        except Exception:
+            laminados = {}
+
+        for record in self._nodes_by_grid.values():
+            cell_id = record.cell_id
+            if not cell_id:
+                continue
+            if cell_id not in payload:
+                continue
+            laminate_name = cell_to_laminate.get(cell_id)
+            laminado = laminados.get(laminate_name) if laminate_name else None
+            camadas = getattr(laminado, "camadas", []) if laminado else []
+
+            model_seq_map: dict[int, Optional[float]] = {}
+            for idx, camada in enumerate(camadas):
+                seq_label = str(getattr(camada, "sequence", "") or "").strip()
+                seq_match = REVIEW_SEQUENCE_PATTERN.match(seq_label)
+                seq_idx = int(seq_match.group(1)) if seq_match else idx + 1
+                model_raw = getattr(camada, "orientacao", None)
+                if model_raw is None:
+                    model_seq_map[seq_idx] = None
+                    continue
+                try:
+                    model_seq_map[seq_idx] = float(normalize_angle(model_raw))
+                except Exception:
+                    try:
+                        model_seq_map[seq_idx] = float(model_raw)
+                    except Exception:
+                        model_seq_map[seq_idx] = None
+
+            for seq_idx, model_value in model_seq_map.items():
+                if seq_idx > max_seq_idx:
+                    continue
+                file_value = payload.get(cell_id, {}).get(seq_idx)
+
+                if file_value is None and model_value is None:
+                    continue
+                if file_value is None or model_value is None:
+                    mismatches.add(cell_id)
+                    details.setdefault(cell_id, []).append(
+                        f"S.{seq_idx}: arquivo={file_value if file_value is not None else 'vazio'}; projeto={model_value if model_value is not None else 'vazio'}"
+                    )
+                    continue
+                if not math.isclose(float(file_value), float(model_value), rel_tol=0.0, abs_tol=1e-6):
+                    mismatches.add(cell_id)
+                    details.setdefault(cell_id, []).append(
+                        f"S.{seq_idx}: arquivo={file_value}; projeto={model_value}"
+                    )
+
+        return mismatches, details
+
+    def _set_review_mismatch_highlight(self, mismatch_cells: set[str]) -> None:
+        self._review_mismatch_cells = set(mismatch_cells)
+        self.refresh_from_model()
+
+    def _clear_review_mismatch_highlight(self) -> None:
+        if not self._review_mismatch_cells:
+            return
+        self._review_mismatch_cells.clear()
+        self.refresh_from_model()
+
+    def _apply_review_border_if_needed(self, record: _NodeRecord, item: CellNodeItem) -> None:
+        if not self._review_active:
+            return
+        if record.cell_id and record.cell_id in self._review_mismatch_cells:
+            item.set_border_highlight(COLOR_REVIEW_MISMATCH_BORDER, CENTER_BORDER_WIDTH)
 
     def _show_aml_formula_dialog(self) -> bool:
         dialog = QDialog(self)
@@ -2137,6 +2579,7 @@ class CellNeighborsWindow(QDialog):
                 self._apply_border_highlight(item, False)
                 item._recenter_label()
                 self._apply_missing_laminate_border_if_needed(record, item)
+                self._apply_review_border_if_needed(record, item)
                 continue
             # Resolve laminate for cell
             try:
@@ -2162,6 +2605,7 @@ class CellNeighborsWindow(QDialog):
                 self._apply_border_highlight(item, False)
                 item._recenter_label()
                 self._apply_missing_laminate_border_if_needed(record, item)
+                self._apply_review_border_if_needed(record, item)
                 continue
             camada = camadas[layer_idx]
             orient = getattr(camada, "orientacao", None)
@@ -2171,6 +2615,8 @@ class CellNeighborsWindow(QDialog):
                 self._apply_border_highlight(item, is_center_sequence)
                 item._recenter_label()
                 self._apply_missing_laminate_border_if_needed(record, item)
+                self._apply_review_border_if_needed(record, item)
+                self._apply_review_border_if_needed(record, item)
                 continue
             # Use exact match first, else fallback default highlight
             color = ORIENTATION_HIGHLIGHT_COLORS.get(float(orient), DEFAULT_ORIENTATION_HIGHLIGHT)
@@ -2190,6 +2636,7 @@ class CellNeighborsWindow(QDialog):
             item._recenter_label()
             self._apply_border_highlight(item, is_center_sequence)
             self._apply_missing_laminate_border_if_needed(record, item)
+            self._apply_review_border_if_needed(record, item)
 
     @staticmethod
     def _interpolate_color(start: QColor, end: QColor, t: float) -> QColor:
@@ -2250,6 +2697,7 @@ class CellNeighborsWindow(QDialog):
                 self._apply_border_highlight(item, False)
                 item._recenter_label()
                 self._apply_missing_laminate_border_if_needed(record, item)
+                self._apply_review_border_if_needed(record, item)
                 continue
             count = counts.get(record.cell_id)
             if not count or min_count <= 0 or max_count <= 0:
@@ -2257,6 +2705,7 @@ class CellNeighborsWindow(QDialog):
                 self._apply_border_highlight(item, False)
                 item._recenter_label()
                 self._apply_missing_laminate_border_if_needed(record, item)
+                self._apply_review_border_if_needed(record, item)
                 continue
             if count == max_count:
                 color = COLOR_LAYER_COUNT_MAX
@@ -2270,6 +2719,7 @@ class CellNeighborsWindow(QDialog):
             self._apply_border_highlight(item, False)
             item._recenter_label()
             self._apply_missing_laminate_border_if_needed(record, item)
+            self._apply_review_border_if_needed(record, item)
 
     def _clear_layer_count_legend(self) -> None:
         if self._layer_count_legend_group is None:
@@ -2385,6 +2835,7 @@ class CellNeighborsWindow(QDialog):
                 self._apply_border_highlight(item, False)
                 item._recenter_label()
                 self._apply_missing_laminate_border_if_needed(record, item)
+                self._apply_review_border_if_needed(record, item)
                 continue
 
             laminate_name = self._model.cell_to_laminate.get(record.cell_id)
@@ -2397,6 +2848,7 @@ class CellNeighborsWindow(QDialog):
                 self._apply_border_highlight(item, False)
                 item._recenter_label()
                 self._apply_missing_laminate_border_if_needed(record, item)
+                self._apply_review_border_if_needed(record, item)
                 continue
 
             color = AML_TYPE_COLORS.get(aml_type, COLOR_AML_UNKNOWN)
@@ -2405,6 +2857,7 @@ class CellNeighborsWindow(QDialog):
             self._apply_border_highlight(item, False)
             item._recenter_label()
             self._apply_missing_laminate_border_if_needed(record, item)
+            self._apply_review_border_if_needed(record, item)
 
     def _save_to_project(self) -> None:
         """Save current neighbors mapping to the project."""
@@ -2439,7 +2892,7 @@ class CellNeighborsWindow(QDialog):
 
     def _export_neighbors_to_file(self) -> None:
         """Export neighbors (including drawings) to a JSON file."""
-        if self._reorder_edit_lock or self._missing_laminate_ui_lock:
+        if self._reorder_edit_lock or self._missing_laminate_ui_lock or self._review_ui_lock:
             return
         base_dir = None
         if self._project_manager is not None:
@@ -2491,7 +2944,7 @@ class CellNeighborsWindow(QDialog):
 
     def _import_neighbors_from_file(self) -> None:
         """Import neighbors (including drawings) from a JSON file."""
-        if self._reorder_edit_lock or self._missing_laminate_ui_lock:
+        if self._reorder_edit_lock or self._missing_laminate_ui_lock or self._review_ui_lock:
             return
         base_dir = None
         if self._project_manager is not None:
@@ -2656,7 +3109,13 @@ class CellNeighborsWindow(QDialog):
 
     def _update_all_plus_buttons_visibility(self) -> None:
         """Update visibility of all '+' buttons based on cell availability."""
-        if self._reorder_edit_lock or self._aml_highlight_enabled or self._aml_ui_lock or self._missing_laminate_ui_lock:
+        if (
+            self._reorder_edit_lock
+            or self._aml_highlight_enabled
+            or self._aml_ui_lock
+            or self._missing_laminate_ui_lock
+            or self._review_ui_lock
+        ):
             for record in self._nodes_by_grid.values():
                 for direction in DIR_OFFSETS.keys():
                     btn = record.item.plus_items.get(direction)
@@ -2771,7 +3230,7 @@ class CellNeighborsWindow(QDialog):
 
     def _delete_cell(self, record: _NodeRecord) -> None:
         """Delete a cell from the scene and update all neighbors."""
-        if self._reorder_edit_lock:
+        if self._reorder_edit_lock or self._review_ui_lock:
             return
         if len(self._nodes_by_grid) <= 1:
             QMessageBox.information(
@@ -2803,7 +3262,7 @@ class CellNeighborsWindow(QDialog):
 
     def _change_cell_orientation(self, record: _NodeRecord) -> None:
         """Change the orientation of a cell's layer for the current sequence."""
-        if self._reorder_edit_lock:
+        if self._reorder_edit_lock or self._review_ui_lock:
             return
         # Check if there is a cell assigned
         if not record.cell_id:
@@ -3405,6 +3864,8 @@ class CellNeighborsWindow(QDialog):
         source_record: Optional[_NodeRecord] = None,
         direction: Optional[str] = None,
     ) -> None:
+        if self._review_ui_lock:
+            return
         if not self._cells:
             return
         
@@ -3501,7 +3962,7 @@ class CellNeighborsWindow(QDialog):
         return choices
 
     def _prompt_apply_laminate(self, record: _NodeRecord) -> None:
-        if self._reorder_edit_lock:
+        if self._reorder_edit_lock or self._review_ui_lock:
             return
         if not record.cell_id:
             QMessageBox.information(
@@ -3530,6 +3991,8 @@ class CellNeighborsWindow(QDialog):
         self._apply_laminate_to_cell(record, selected_name)
 
     def _apply_laminate_to_cell(self, record: _NodeRecord, laminate_name: str) -> None:
+        if self._review_ui_lock:
+            return
         if not record.cell_id or self._model is None:
             return
         laminates = getattr(self._model, "laminados", {}) or {}
@@ -3583,7 +4046,7 @@ class CellNeighborsWindow(QDialog):
                 pass
 
     def _handle_add_neighbor(self, record: _NodeRecord, direction: str) -> None:
-        if self._reorder_edit_lock or self._missing_laminate_ui_lock:
+        if self._reorder_edit_lock or self._missing_laminate_ui_lock or self._review_ui_lock:
             return
         # Check if there are available cells before proceeding
         if not self._has_available_cells():
