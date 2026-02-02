@@ -1,0 +1,330 @@
+217 INFO: PyInstaller: 6.3.0
+217 INFO: Python: 3.11.5
+233 INFO: Platform: Windows-10-10.0.26100-SP0
+233 INFO: Removing temporary files and cleaning cache in C:\Users\pribe\AppData\Local\pyinstaller
+1133 INFO: Extending PYTHONPATH with paths
+['C:\\Users\\pribe\\OneDrive\\Documents\\GitHub\\GridLamEdit']
+1455 INFO: Appending 'datas' from .spec
+1455 INFO: checking Analysis
+1455 INFO: Building Analysis because Analysis-00.toc is non existent
+1455 INFO: Initializing module dependency graph...
+1455 INFO: Caching module graph hooks...
+1490 INFO: Analyzing base_library.zip ...
+2283 INFO: Loading module hook 'hook-heapq.py' from 'C:\\Users\\pribe\\OneDrive\\Documents\\GitHub\\GridLamEdit\\.venv\\Lib\\site-packages\\PyInstaller\\hooks'...
+2383 INFO: Loading module hook 'hook-encodings.py' from 'C:\\Users\\pribe\\OneDrive\\Documents\\GitHub\\GridLamEdit\\.venv\\Lib\\site-packages\\PyInstaller\\hooks'...
+4147 INFO: Loading module hook 'hook-pickle.py' from 'C:\\Users\\pribe\\OneDrive\\Documents\\GitHub\\GridLamEdit\\.venv\\Lib\\site-packages\\PyInstaller\\hooks'...
+5592 INFO: Caching module dependency graph...
+5687 INFO: Running Analysis Analysis-00.toc
+5687 INFO: Looking for Python shared library...
+5755 INFO: Using Python shared library: C:\Users\pribe\AppData\Local\Programs\Python\Python311\python311.dll
+5756 INFO: Analyzing C:\Users\pribe\OneDrive\Documents\GitHub\GridLamEdit\gridlamedit\app\main.py
+5763 INFO: Loading module hook 'hook-PySide6.py' from 'C:\\Users\\pribe\\OneDrive\\Documents\\GitHub\\GridLamEdit\\.venv\\Lib\\site-packages\\PyInstaller\\hooks'...
+6056 INFO: Loading module hook 'hook-shiboken6.py' from 'C:\\Users\\pribe\\OneDrive\\Documents\\GitHub\\GridLamEdit\\.venv\\Lib\\site-packages\\PyInstaller\\hooks'...
+6430 INFO: Loading module hook 'hook-pandas.py' from 'C:\\Users\\pribe\\OneDrive\\Documents\\GitHub\\GridLamEdit\\.venv\\Lib\\site-packages\\PyInstaller\\hooks'...
+8300 INFO: Loading module hook 'hook-platform.py' from 'C:\\Users\\pribe\\OneDrive\\Documents\\GitHub\\GridLamEdit\\.venv\\Lib\\site-packages\\PyInstaller\\hooks'...
+8337 INFO: Loading module hook 'hook-sysconfig.py' from 'C:\\Users\\pribe\\OneDrive\\Documents\\GitHub\\GridLamEdit\\.venv\\Lib\\site-packages\\PyInstaller\\hooks'...
+8367 INFO: Loading module hook 'hook-numpy.py' from 'C:\\Users\\pribe\\OneDrive\\Documents\\GitHub\\GridLamEdit\\.venv\\Lib\\site-packages\\numpy\\_pyinstaller'...
+8892 INFO: Loading module hook 'hook-difflib.py' from 'C:\\Users\\pribe\\OneDrive\\Documents\\GitHub\\GridLamEdit\\.venv\\Lib\\site-packages\\PyInstaller\\hooks'...
+9086 INFO: Loading module hook 'hook-multiprocessing.util.py' from 'C:\\Users\\pribe\\OneDrive\\Documents\\GitHub\\GridLamEdit\\.venv\\Lib\\site-packages\\PyInstaller\\hooks'...
+9307 INFO: Loading module hook 'hook-xml.py' from 'C:\\Users\\pribe\\OneDrive\\Documents\\GitHub\\GridLamEdit\\.venv\\Lib\\site-packages\\PyInstaller\\hooks'...
+12210 INFO: Loading module hook 'hook-pytz.py' from 'C:\\Users\\pribe\\OneDrive\\Documents\\GitHub\\GridLamEdit\\.venv\\Lib\\site-packages\\PyInstaller\\hooks'...
+12488 INFO: Loading module hook 'hook-pkg_resources.py' from 'C:\\Users\\pribe\\OneDrive\\Documents\\GitHub\\GridLamEdit\\.venv\\Lib\\site-packages\\PyInstaller\\hooks'...
+15549 INFO: Loading module hook 'hook-pandas.io.formats.style.py' from 'C:\\Users\\pribe\\OneDrive\\Documents\\GitHub\\GridLamEdit\\.venv\\Lib\\site-packages\\PyInstaller\\hooks'...
+18201 INFO: Loading module hook 'hook-pandas.plotting.py' from 'C:\\Users\\pribe\\OneDrive\\Documents\\GitHub\\GridLamEdit\\.venv\\Lib\\site-packages\\PyInstaller\\hooks'...
+18849 INFO: Loading module hook 'hook-openpyxl.py' from 'C:\\Users\\pribe\\OneDrive\\Documents\\GitHub\\GridLamEdit\\.venv\\Lib\\site-packages\\_pyinstaller_hooks_contrib\\stdhooks'...
+19233 INFO: Loading module hook 'hook-xml.etree.cElementTree.py' from 'C:\\Users\\pribe\\OneDrive\\Documents\\GitHub\\GridLamEdit\\.venv\\Lib\\site-packages\\PyInstaller\\hooks'...
+21019 INFO: Loading module hook 'hook-sqlite3.py' from 'C:\\Users\\pribe\\OneDrive\\Documents\\GitHub\\GridLamEdit\\.venv\\Lib\\site-packages\\PyInstaller\\hooks'...
+21858 INFO: Loading module hook 'hook-dateutil.py' from 'C:\\Users\\pribe\\OneDrive\\Documents\\GitHub\\GridLamEdit\\.venv\\Lib\\site-packages\\_pyinstaller_hooks_contrib\\stdhooks'...
+21995 INFO: Processing pre-safe import module hook six.moves from 'C:\\Users\\pribe\\OneDrive\\Documents\\GitHub\\GridLamEdit\\.venv\\Lib\\site-packages\\PyInstaller\\hooks\\pre_safe_import_module\\hook-six.moves.py'.
+22349 INFO: Loading module hook 'hook-xml.dom.domreg.py' from 'C:\\Users\\pribe\\OneDrive\\Documents\\GitHub\\GridLamEdit\\.venv\\Lib\\site-packages\\PyInstaller\\hooks'...
+22687 INFO: Loading module hook 'hook-pytest.py' from 'C:\\Users\\pribe\\OneDrive\\Documents\\GitHub\\GridLamEdit\\.venv\\Lib\\site-packages\\_pyinstaller_hooks_contrib\\stdhooks'...
+22950 INFO: Loading module hook 'hook-pygments.py' from 'C:\\Users\\pribe\\OneDrive\\Documents\\GitHub\\GridLamEdit\\.venv\\Lib\\site-packages\\PyInstaller\\hooks'...
+24346 INFO: Loading module hook 'hook-py.py' from 'C:\\Users\\pribe\\OneDrive\\Documents\\GitHub\\GridLamEdit\\.venv\\Lib\\site-packages\\_pyinstaller_hooks_contrib\\stdhooks'...
+24695 INFO: Loading module hook 'hook-packaging.py' from 'C:\\Users\\pribe\\OneDrive\\Documents\\GitHub\\GridLamEdit\\.venv\\Lib\\site-packages\\PyInstaller\\hooks'...
+26733 INFO: Analyzing hidden import 'jinja2'
+26735 INFO: Loading module hook 'hook-jinja2.py' from 'C:\\Users\\pribe\\OneDrive\\Documents\\GitHub\\GridLamEdit\\.venv\\Lib\\site-packages\\_pyinstaller_hooks_contrib\\stdhooks'...
+27133 INFO: Analyzing hidden import 'numpy._configtool'
+27133 INFO: Analyzing hidden import 'numpy._core._exceptions'
+27142 INFO: Analyzing hidden import 'numpy._core._multiarray_tests'
+27142 INFO: Analyzing hidden import 'numpy._core._operand_flag_tests'
+27142 INFO: Analyzing hidden import 'numpy._core._rational_tests'
+27142 INFO: Analyzing hidden import 'numpy._core._simd'
+27142 INFO: Analyzing hidden import 'numpy._core._struct_ufunc_tests'
+27142 INFO: Analyzing hidden import 'numpy._core._umath_tests'
+27142 INFO: Analyzing hidden import 'numpy._core.cversions'
+27147 INFO: Analyzing hidden import 'numpy._pyinstaller'
+27147 INFO: Analyzing hidden import 'numpy._pyinstaller.hook-numpy'
+27213 INFO: Loading module hook 'hook-win32ctypes.core.py' from 'C:\\Users\\pribe\\OneDrive\\Documents\\GitHub\\GridLamEdit\\.venv\\Lib\\site-packages\\PyInstaller\\hooks'...
+28035 INFO: Analyzing hidden import 'numpy._pyinstaller.tests'
+28035 INFO: Analyzing hidden import 'numpy._pyinstaller.tests.pyinstaller-smoke'
+28051 INFO: Analyzing hidden import 'numpy._pyinstaller.tests.test_pyinstaller'
+28053 INFO: Analyzing hidden import 'numpy._typing._extended_precision'
+28056 INFO: Analyzing hidden import 'numpy._utils._pep440'
+28056 INFO: Analyzing hidden import 'numpy.conftest'
+28068 INFO: Analyzing hidden import 'numpy.core._dtype'
+28068 INFO: Analyzing hidden import 'numpy.core._dtype_ctypes'
+28068 INFO: Analyzing hidden import 'numpy.core._internal'
+28134 INFO: Analyzing hidden import 'numpy.core._multiarray_umath'
+28140 INFO: Analyzing hidden import 'numpy.core.arrayprint'
+28144 INFO: Analyzing hidden import 'numpy.core.defchararray'
+28145 INFO: Analyzing hidden import 'numpy.core.einsumfunc'
+28147 INFO: Analyzing hidden import 'numpy.core.fromnumeric'
+28147 INFO: Analyzing hidden import 'numpy.core.function_base'
+28148 INFO: Analyzing hidden import 'numpy.core.getlimits'
+28149 INFO: Analyzing hidden import 'numpy.core.multiarray'
+28151 INFO: Analyzing hidden import 'numpy.core.numeric'
+28153 INFO: Analyzing hidden import 'numpy.core.numerictypes'
+28153 INFO: Analyzing hidden import 'numpy.core.overrides'
+28154 INFO: Analyzing hidden import 'numpy.core.records'
+28155 INFO: Analyzing hidden import 'numpy.core.shape_base'
+28156 INFO: Analyzing hidden import 'numpy.core.umath'
+28156 INFO: Analyzing hidden import 'numpy.distutils'
+28158 INFO: Analyzing hidden import 'numpy.distutils._shell_utils'
+28161 INFO: Analyzing hidden import 'numpy.distutils.armccompiler'
+28163 INFO: Analyzing hidden import 'numpy.distutils.ccompiler'
+28178 INFO: Analyzing hidden import 'numpy.distutils.ccompiler_opt'
+28233 INFO: Analyzing hidden import 'numpy.distutils.command'
+28235 INFO: Analyzing hidden import 'numpy.distutils.command.autodist'
+28239 INFO: Analyzing hidden import 'numpy.distutils.command.bdist_rpm'
+28241 INFO: Analyzing hidden import 'numpy.distutils.command.build'
+28243 INFO: Analyzing hidden import 'numpy.distutils.command.build_clib'
+28256 INFO: Analyzing hidden import 'numpy.distutils.command.build_ext'
+28271 INFO: Analyzing hidden import 'numpy.distutils.command.build_py'
+28273 INFO: Analyzing hidden import 'numpy.distutils.command.build_scripts'
+28276 INFO: Analyzing hidden import 'numpy.distutils.command.build_src'
+28305 INFO: Analyzing hidden import 'numpy.distutils.command.config'
+28352 INFO: Analyzing hidden import 'numpy.distutils.command.config_compiler'
+28352 INFO: Analyzing hidden import 'numpy.distutils.command.develop'
+28352 INFO: Analyzing hidden import 'numpy.distutils.command.egg_info'
+28407 INFO: Analyzing hidden import 'numpy.distutils.command.install'
+28409 INFO: Analyzing hidden import 'numpy.distutils.command.install_clib'
+28412 INFO: Analyzing hidden import 'numpy.distutils.command.install_data'
+28414 INFO: Analyzing hidden import 'numpy.distutils.command.install_headers'
+28416 INFO: Analyzing hidden import 'numpy.distutils.command.sdist'
+28420 INFO: Analyzing hidden import 'numpy.distutils.conv_template'
+28429 INFO: Analyzing hidden import 'numpy.distutils.core'
+28435 INFO: Analyzing hidden import 'numpy.distutils.cpuinfo'
+28466 INFO: Analyzing hidden import 'numpy.distutils.exec_command'
+28474 INFO: Analyzing hidden import 'numpy.distutils.extension'
+28477 INFO: Analyzing hidden import 'numpy.distutils.fcompiler'
+28507 INFO: Analyzing hidden import 'numpy.distutils.fcompiler.absoft'
+28514 INFO: Analyzing hidden import 'numpy.distutils.fcompiler.arm'
+28517 INFO: Analyzing hidden import 'numpy.distutils.fcompiler.compaq'
+28520 INFO: Analyzing hidden import 'numpy.distutils.fcompiler.environment'
+28523 INFO: Analyzing hidden import 'numpy.distutils.fcompiler.fujitsu'
+28525 INFO: Analyzing hidden import 'numpy.distutils.fcompiler.g95'
+28526 INFO: Analyzing hidden import 'numpy.distutils.fcompiler.gnu'
+28545 INFO: Analyzing hidden import 'numpy.distutils.fcompiler.hpux'
+28547 INFO: Analyzing hidden import 'numpy.distutils.fcompiler.ibm'
+28599 INFO: Analyzing hidden import 'numpy.distutils.fcompiler.intel'
+28622 INFO: Analyzing hidden import 'numpy.distutils.fcompiler.lahey'
+28626 INFO: Analyzing hidden import 'numpy.distutils.fcompiler.mips'
+28630 INFO: Analyzing hidden import 'numpy.distutils.fcompiler.nag'
+28635 INFO: Analyzing hidden import 'numpy.distutils.fcompiler.none'
+28636 INFO: Analyzing hidden import 'numpy.distutils.fcompiler.nv'
+28639 INFO: Analyzing hidden import 'numpy.distutils.fcompiler.pathf95'
+28641 INFO: Analyzing hidden import 'numpy.distutils.fcompiler.pg'
+28647 INFO: Analyzing hidden import 'numpy.distutils.fcompiler.sun'
+28658 INFO: Analyzing hidden import 'numpy.distutils.fcompiler.vast'
+28660 INFO: Analyzing hidden import 'numpy.distutils.from_template'
+28675 INFO: Analyzing hidden import 'numpy.distutils.fujitsuccompiler'
+28677 INFO: Analyzing hidden import 'numpy.distutils.intelccompiler'
+28681 INFO: Analyzing hidden import 'numpy.distutils.lib2def'
+28687 INFO: Analyzing hidden import 'numpy.distutils.line_endings'
+28692 INFO: Analyzing hidden import 'numpy.distutils.log'
+28698 INFO: Analyzing hidden import 'numpy.distutils.mingw32ccompiler'
+28719 INFO: Analyzing hidden import 'numpy.distutils.misc_util'
+28807 INFO: Analyzing hidden import 'numpy.distutils.msvc9compiler'
+28859 INFO: Analyzing hidden import 'numpy.distutils.msvccompiler'
+28862 INFO: Analyzing hidden import 'numpy.distutils.npy_pkg_config'
+28937 INFO: Analyzing hidden import 'numpy.distutils.numpy_distribution'
+28938 INFO: Analyzing hidden import 'numpy.distutils.pathccompiler'
+28939 INFO: Analyzing hidden import 'numpy.distutils.system_info'
+29036 INFO: Analyzing hidden import 'numpy.distutils.tests'
+29041 INFO: Analyzing hidden import 'numpy.distutils.tests.test_build_ext'
+29043 INFO: Analyzing hidden import 'numpy.distutils.tests.test_ccompiler_opt'
+29059 INFO: Analyzing hidden import 'numpy.distutils.tests.test_ccompiler_opt_conf'
+29064 INFO: Analyzing hidden import 'numpy.distutils.tests.test_exec_command'
+29073 INFO: Analyzing hidden import 'numpy.distutils.tests.test_fcompiler'
+29076 INFO: Analyzing hidden import 'numpy.distutils.tests.test_fcompiler_gnu'
+29078 INFO: Analyzing hidden import 'numpy.distutils.tests.test_fcompiler_intel'
+29081 INFO: Analyzing hidden import 'numpy.distutils.tests.test_fcompiler_nagfor'
+29081 INFO: Analyzing hidden import 'numpy.distutils.tests.test_from_template'
+29084 INFO: Analyzing hidden import 'numpy.distutils.tests.test_log'
+29086 INFO: Analyzing hidden import 'numpy.distutils.tests.test_mingw32ccompiler'
+29088 INFO: Analyzing hidden import 'numpy.distutils.tests.test_misc_util'
+29093 INFO: Analyzing hidden import 'numpy.distutils.tests.test_npy_pkg_config'
+29096 INFO: Analyzing hidden import 'numpy.distutils.tests.test_shell_utils'
+29098 INFO: Analyzing hidden import 'numpy.distutils.tests.test_system_info'
+29107 INFO: Analyzing hidden import 'numpy.distutils.tests.utilities'
+29163 INFO: Analyzing hidden import 'numpy.distutils.unixccompiler'
+29168 INFO: Analyzing hidden import 'numpy.f2py.__main__'
+29168 INFO: Analyzing hidden import 'numpy.f2py._src_pyf'
+29175 INFO: Analyzing hidden import 'numpy.f2py.tests'
+29175 INFO: Analyzing hidden import 'numpy.f2py.tests.test_abstract_interface'
+29188 INFO: Analyzing hidden import 'numpy.f2py.tests.test_array_from_pyobj'
+29210 INFO: Analyzing hidden import 'numpy.f2py.tests.test_assumed_shape'
+29213 INFO: Analyzing hidden import 'numpy.f2py.tests.test_block_docstring'
+29214 INFO: Analyzing hidden import 'numpy.f2py.tests.test_callback'
+29223 INFO: Analyzing hidden import 'numpy.f2py.tests.test_character'
+29241 INFO: Analyzing hidden import 'numpy.f2py.tests.test_common'
+29243 INFO: Analyzing hidden import 'numpy.f2py.tests.test_crackfortran'
+29257 INFO: Analyzing hidden import 'numpy.f2py.tests.test_data'
+29262 INFO: Analyzing hidden import 'numpy.f2py.tests.test_docs'
+29264 INFO: Analyzing hidden import 'numpy.f2py.tests.test_f2cmap'
+29265 INFO: Analyzing hidden import 'numpy.f2py.tests.test_f2py2e'
+29285 INFO: Analyzing hidden import 'numpy.f2py.tests.test_isoc'
+29340 INFO: Analyzing hidden import 'numpy.f2py.tests.test_kind'
+29343 INFO: Analyzing hidden import 'numpy.f2py.tests.test_mixed'
+29345 INFO: Analyzing hidden import 'numpy.f2py.tests.test_modules'
+29347 INFO: Analyzing hidden import 'numpy.f2py.tests.test_parameter'
+29352 INFO: Analyzing hidden import 'numpy.f2py.tests.test_pyf_src'
+29354 INFO: Analyzing hidden import 'numpy.f2py.tests.test_quoted_character'
+29355 INFO: Analyzing hidden import 'numpy.f2py.tests.test_regression'
+29361 INFO: Analyzing hidden import 'numpy.f2py.tests.test_return_character'
+29364 INFO: Analyzing hidden import 'numpy.f2py.tests.test_return_complex'
+29368 INFO: Analyzing hidden import 'numpy.f2py.tests.test_return_integer'
+29372 INFO: Analyzing hidden import 'numpy.f2py.tests.test_return_logical'
+29375 INFO: Analyzing hidden import 'numpy.f2py.tests.test_return_real'
+29378 INFO: Analyzing hidden import 'numpy.f2py.tests.test_routines'
+29381 INFO: Analyzing hidden import 'numpy.f2py.tests.test_semicolon_split'
+29384 INFO: Analyzing hidden import 'numpy.f2py.tests.test_size'
+29387 INFO: Analyzing hidden import 'numpy.f2py.tests.test_string'
+29391 INFO: Analyzing hidden import 'numpy.f2py.tests.test_symbolic'
+29410 INFO: Analyzing hidden import 'numpy.f2py.tests.test_value_attrspec'
+29411 INFO: Analyzing hidden import 'numpy.fft.tests'
+29412 INFO: Analyzing hidden import 'numpy.fft.tests.test_helper'
+29417 INFO: Analyzing hidden import 'numpy.fft.tests.test_pocketfft'
+29433 INFO: Analyzing hidden import 'numpy.lib._user_array_impl'
+29481 INFO: Analyzing hidden import 'numpy.lib.tests'
+29482 INFO: Analyzing hidden import 'numpy.lib.tests.test__datasource'
+29493 INFO: Analyzing hidden import 'numpy.lib.tests.test__iotools'
+29503 INFO: Analyzing hidden import 'numpy.lib.tests.test__version'
+29507 INFO: Analyzing hidden import 'numpy.lib.tests.test_array_utils'
+29509 INFO: Analyzing hidden import 'numpy.lib.tests.test_arraypad'
+29582 INFO: Analyzing hidden import 'numpy.lib.tests.test_arraysetops'
+29618 INFO: Analyzing hidden import 'numpy.lib.tests.test_arrayterator'
+29622 INFO: Analyzing hidden import 'numpy.lib.tests.test_format'
+29664 INFO: Analyzing hidden import 'numpy.lib.tests.test_function_base'
+29985 INFO: Analyzing hidden import 'numpy.lib.tests.test_histograms'
+30033 INFO: Analyzing hidden import 'numpy.lib.tests.test_index_tricks'
+30050 INFO: Analyzing hidden import 'numpy.lib.tests.test_io'
+30247 INFO: Analyzing hidden import 'numpy.lib.tests.test_loadtxt'
+30304 INFO: Analyzing hidden import 'numpy.lib.tests.test_mixins'
+30311 INFO: Analyzing hidden import 'numpy.lib.tests.test_nanfunctions'
+30369 INFO: Analyzing hidden import 'numpy.lib.tests.test_packbits'
+30397 INFO: Analyzing hidden import 'numpy.lib.tests.test_polynomial'
+30418 INFO: Analyzing hidden import 'numpy.lib.tests.test_recfunctions'
+30474 INFO: Analyzing hidden import 'numpy.lib.tests.test_regression'
+30483 INFO: Analyzing hidden import 'numpy.lib.tests.test_shape_base'
+30536 INFO: Analyzing hidden import 'numpy.lib.tests.test_stride_tricks'
+30591 INFO: Analyzing hidden import 'numpy.lib.tests.test_twodim_base'
+30610 INFO: Analyzing hidden import 'numpy.lib.tests.test_type_check'
+30640 INFO: Analyzing hidden import 'numpy.lib.tests.test_ufunclike'
+30681 INFO: Analyzing hidden import 'numpy.lib.tests.test_utils'
+30685 INFO: Analyzing hidden import 'numpy.lib.user_array'
+30685 INFO: Analyzing hidden import 'numpy.linalg.lapack_lite'
+30685 INFO: Analyzing hidden import 'numpy.linalg.tests'
+30685 INFO: Analyzing hidden import 'numpy.linalg.tests.test_deprecations'
+30685 INFO: Analyzing hidden import 'numpy.linalg.tests.test_linalg'
+30784 INFO: Analyzing hidden import 'numpy.linalg.tests.test_regression'
+30804 INFO: Analyzing hidden import 'numpy.ma.tests'
+30806 INFO: Analyzing hidden import 'numpy.ma.tests.test_arrayobject'
+30812 INFO: Analyzing hidden import 'numpy.ma.tests.test_core'
+31116 INFO: Analyzing hidden import 'numpy.ma.tests.test_deprecations'
+31116 INFO: Analyzing hidden import 'numpy.ma.tests.test_extras'
+31251 INFO: Analyzing hidden import 'numpy.ma.tests.test_mrecords'
+31291 INFO: Analyzing hidden import 'numpy.ma.tests.test_old_ma'
+31341 INFO: Analyzing hidden import 'numpy.ma.tests.test_regression'
+31351 INFO: Analyzing hidden import 'numpy.ma.tests.test_subclassing'
+31351 INFO: Analyzing hidden import 'numpy.matrixlib.tests'
+31366 INFO: Analyzing hidden import 'numpy.matrixlib.tests.test_defmatrix'
+31387 INFO: Analyzing hidden import 'numpy.matrixlib.tests.test_interaction'
+31409 INFO: Analyzing hidden import 'numpy.matrixlib.tests.test_masked_matrix'
+31426 INFO: Analyzing hidden import 'numpy.matrixlib.tests.test_matrix_linalg'
+31430 INFO: Analyzing hidden import 'numpy.matrixlib.tests.test_multiarray'
+31431 INFO: Analyzing hidden import 'numpy.matrixlib.tests.test_numeric'
+31433 INFO: Analyzing hidden import 'numpy.matrixlib.tests.test_regression'
+31437 INFO: Analyzing hidden import 'numpy.polynomial.tests'
+31437 INFO: Analyzing hidden import 'numpy.polynomial.tests.test_chebyshev'
+31460 INFO: Analyzing hidden import 'numpy.polynomial.tests.test_classes'
+31484 INFO: Analyzing hidden import 'numpy.polynomial.tests.test_hermite'
+31500 INFO: Analyzing hidden import 'numpy.polynomial.tests.test_hermite_e'
+31517 INFO: Analyzing hidden import 'numpy.polynomial.tests.test_laguerre'
+31602 INFO: Analyzing hidden import 'numpy.polynomial.tests.test_legendre'
+31638 INFO: Analyzing hidden import 'numpy.polynomial.tests.test_polynomial'
+31666 INFO: Analyzing hidden import 'numpy.polynomial.tests.test_polyutils'
+31672 INFO: Analyzing hidden import 'numpy.polynomial.tests.test_printing'
+31689 INFO: Analyzing hidden import 'numpy.polynomial.tests.test_symbol'
+31698 INFO: Analyzing hidden import 'numpy.random.tests'
+31700 INFO: Analyzing hidden import 'numpy.random.tests.data'
+31701 INFO: Analyzing hidden import 'numpy.random.tests.test_direct'
+31716 INFO: Analyzing hidden import 'numpy.random.tests.test_extending'
+31751 INFO: Analyzing hidden import 'numpy.random.tests.test_generator_mt19937'
+31871 INFO: Analyzing hidden import 'numpy.random.tests.test_generator_mt19937_regressions'
+31879 INFO: Analyzing hidden import 'numpy.random.tests.test_random'
+31996 INFO: Analyzing hidden import 'numpy.random.tests.test_randomstate'
+32067 INFO: Analyzing hidden import 'numpy.random.tests.test_randomstate_regression'
+32067 INFO: Analyzing hidden import 'numpy.random.tests.test_regression'
+32084 INFO: Analyzing hidden import 'numpy.random.tests.test_seed_sequence'
+32084 INFO: Analyzing hidden import 'numpy.random.tests.test_smoke'
+32138 INFO: Analyzing hidden import 'numpy.testing.print_coercion_tables'
+32147 INFO: Analyzing hidden import 'numpy.testing.tests'
+32147 INFO: Analyzing hidden import 'numpy.testing.tests.test_utils'
+32217 INFO: Analyzing hidden import 'numpy.tests'
+32217 INFO: Analyzing hidden import 'numpy.tests.test__all__'
+32217 INFO: Analyzing hidden import 'numpy.tests.test_configtool'
+32217 INFO: Analyzing hidden import 'numpy.tests.test_ctypeslib'
+32233 INFO: Analyzing hidden import 'numpy.tests.test_lazyloading'
+32233 INFO: Analyzing hidden import 'numpy.tests.test_matlib'
+32250 INFO: Analyzing hidden import 'numpy.tests.test_numpy_config'
+32350 INFO: Analyzing hidden import 'numpy.tests.test_numpy_version'
+32350 INFO: Analyzing hidden import 'numpy.tests.test_public_api'
+32367 INFO: Analyzing hidden import 'numpy.tests.test_reloading'
+32392 INFO: Analyzing hidden import 'numpy.tests.test_scripts'
+32398 INFO: Analyzing hidden import 'numpy.tests.test_warnings'
+32400 INFO: Analyzing hidden import 'numpy.typing.mypy_plugin'
+32400 INFO: Analyzing hidden import 'numpy.typing.tests'
+32400 INFO: Analyzing hidden import 'numpy.typing.tests.test_isfile'
+32400 INFO: Analyzing hidden import 'numpy.typing.tests.test_runtime'
+32422 INFO: Analyzing hidden import 'numpy.typing.tests.test_typing'
+32429 INFO: Processing module hooks...
+32531 INFO: Processing pre-safe import module hook win32com from 'C:\\Users\\pribe\\OneDrive\\Documents\\GitHub\\GridLamEdit\\.venv\\Lib\\site-packages\\_pyinstaller_hooks_contrib\\pre_safe_import_module\\hook-win32com.py'.
+35180 INFO: Loading module hook 'hook-PySide6.QtCore.py' from 'C:\\Users\\pribe\\OneDrive\\Documents\\GitHub\\GridLamEdit\\.venv\\Lib\\site-packages\\PyInstaller\\hooks'...
+37066 INFO: Loading module hook 'hook-PySide6.QtGui.py' from 'C:\\Users\\pribe\\OneDrive\\Documents\\GitHub\\GridLamEdit\\.venv\\Lib\\site-packages\\PyInstaller\\hooks'...
+38877 INFO: Loading module hook 'hook-PySide6.QtNetwork.py' from 'C:\\Users\\pribe\\OneDrive\\Documents\\GitHub\\GridLamEdit\\.venv\\Lib\\site-packages\\PyInstaller\\hooks'...
+40579 INFO: Loading module hook 'hook-PySide6.QtWidgets.py' from 'C:\\Users\\pribe\\OneDrive\\Documents\\GitHub\\GridLamEdit\\.venv\\Lib\\site-packages\\PyInstaller\\hooks'...
+41859 INFO: Performing binary vs. data reclassification (756 entries)
+70540 INFO: Looking for ctypes DLLs
+70753 INFO: Analyzing run-time hooks ...
+70756 INFO: Including run-time hook 'C:\\Users\\pribe\\OneDrive\\Documents\\GitHub\\GridLamEdit\\.venv\\Lib\\site-packages\\PyInstaller\\hooks\\rthooks\\pyi_rth_pkgres.py'
+70778 INFO: Including run-time hook 'C:\\Users\\pribe\\OneDrive\\Documents\\GitHub\\GridLamEdit\\.venv\\Lib\\site-packages\\PyInstaller\\hooks\\rthooks\\pyi_rth_pkgutil.py'
+70791 INFO: Processing pre-find module path hook _pyi_rth_utils from 'C:\\Users\\pribe\\OneDrive\\Documents\\GitHub\\GridLamEdit\\.venv\\Lib\\site-packages\\PyInstaller\\hooks\\pre_find_module_path\\hook-_pyi_rth_utils.py'.
+70800 INFO: Loading module hook 'hook-_pyi_rth_utils.py' from 'C:\\Users\\pribe\\OneDrive\\Documents\\GitHub\\GridLamEdit\\.venv\\Lib\\site-packages\\PyInstaller\\hooks'...
+70817 INFO: Including run-time hook 'C:\\Users\\pribe\\OneDrive\\Documents\\GitHub\\GridLamEdit\\.venv\\Lib\\site-packages\\PyInstaller\\hooks\\rthooks\\pyi_rth_multiprocessing.py'
+70829 INFO: Including run-time hook 'C:\\Users\\pribe\\OneDrive\\Documents\\GitHub\\GridLamEdit\\.venv\\Lib\\site-packages\\PyInstaller\\hooks\\rthooks\\pyi_rth_inspect.py'
+70841 INFO: Including run-time hook 'C:\\Users\\pribe\\OneDrive\\Documents\\GitHub\\GridLamEdit\\.venv\\Lib\\site-packages\\PyInstaller\\hooks\\rthooks\\pyi_rth_pyside6.py'
+70885 INFO: Looking for dynamic libraries
+72266 INFO: Extra DLL search directories (AddDllDirectory): ['C:\\Users\\pribe\\OneDrive\\Documents\\GitHub\\GridLamEdit\\.venv\\Lib\\site-packages\\numpy.libs', 'C:\\Users\\pribe\\OneDrive\\Documents\\GitHub\\GridLamEdit\\.venv\\Lib\\site-packages\\pandas.libs', 'C:\\Users\\pribe\\OneDrive\\Documents\\GitHub\\GridLamEdit\\.venv\\Lib\\site-packages\\shiboken6']
+72266 INFO: Extra DLL search directories (PATH): ['C:\\Users\\pribe\\OneDrive\\Documents\\GitHub\\GridLamEdit\\.venv\\Lib\\site-packages\\PySide6']
+132040 INFO: Warnings written to C:\Users\pribe\OneDrive\Documents\GitHub\GridLamEdit\build\GridLamEdit\warn-GridLamEdit.txt
+132334 INFO: Graph cross-reference written to C:\Users\pribe\OneDrive\Documents\GitHub\GridLamEdit\build\GridLamEdit\xref-GridLamEdit.html
+132533 INFO: checking PYZ
+132535 INFO: Building PYZ because PYZ-00.toc is non existent
+132535 INFO: Building PYZ (ZlibArchive) C:\Users\pribe\OneDrive\Documents\GitHub\GridLamEdit\build\GridLamEdit\PYZ-00.pyz
+136679 INFO: Building PYZ (ZlibArchive) C:\Users\pribe\OneDrive\Documents\GitHub\GridLamEdit\build\GridLamEdit\PYZ-00.pyz completed successfully.
+137272 INFO: checking PKG
+137272 INFO: Building PKG because PKG-00.toc is non existent
+137273 INFO: Building PKG (CArchive) GridLamEdit V15.pkg
+174161 INFO: Building PKG (CArchive) GridLamEdit V15.pkg completed successfully.
+174224 INFO: Bootloader C:\Users\pribe\OneDrive\Documents\GitHub\GridLamEdit\.venv\Lib\site-packages\PyInstaller\bootloader\Windows-64bit-intel\runw.exe
+174224 INFO: checking EXE
+174225 INFO: Building EXE because EXE-00.toc is non existent
+174227 INFO: Building EXE from EXE-00.toc
+174228 INFO: Copying bootloader EXE to C:\Users\pribe\OneDrive\Documents\GitHub\GridLamEdit\dist\GridLamEdit V15.exe
+174462 INFO: Copying icon to EXE
+174568 INFO: Copying 0 resources to EXE
+174568 INFO: Embedding manifest in EXE
+174682 INFO: Appending PKG archive to EXE
+174806 INFO: Fixing EXE headers
+175897 INFO: Building EXE from EXE-00.toc completed successfully.
