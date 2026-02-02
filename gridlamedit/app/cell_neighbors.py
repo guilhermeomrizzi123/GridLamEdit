@@ -1860,14 +1860,6 @@ class CellNeighborsWindow(QDialog):
                     "Laminado não aplicado",
                     "Existem células sem laminado aplicado. Elas foram destacadas em vermelho." + detail,
                 )
-                blocker = QSignalBlocker(self.reorder_neighbors_button)
-                self.reorder_neighbors_button.setChecked(False)
-                del blocker
-                if hasattr(window, "btn_reorganize_neighbors"):
-                    w_blocker = QSignalBlocker(window.btn_reorganize_neighbors)
-                    window.btn_reorganize_neighbors.setChecked(False)
-                    del w_blocker
-                return
             else:
                 self._clear_missing_laminate_highlight()
         else:
