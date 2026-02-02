@@ -39,14 +39,15 @@ class DuplicateRemovalDialog(QDialog):
         layout.setSpacing(12)
 
         info = QLabel(
-            "Os laminados listados abaixo s\u00e3o duplicados sem associa\u00e7\u00f5es e podem ser removidos com seguran\u00e7a."
+            "Os laminados listados abaixo s\u00e3o duplicados id\u00eanticos (incluindo tag) "
+            "e sem associa\u00e7\u00f5es."
         )
         info.setWordWrap(True)
         layout.addWidget(info)
 
         self._tree = QTreeWidget(self)
-        self._tree.setColumnCount(3)
-        self._tree.setHeaderLabels(["Nome", "Tipo", "Cor"])
+        self._tree.setColumnCount(4)
+        self._tree.setHeaderLabels(["Nome", "Tipo", "Tag", "Cor"])
         self._tree.setRootIsDecorated(False)
         self._tree.setSelectionMode(QTreeWidget.NoSelection)
         layout.addWidget(self._tree)
@@ -67,7 +68,7 @@ class DuplicateRemovalDialog(QDialog):
     def _populate_tree(self) -> None:
         self._tree.clear()
         if not self._laminates:
-            QTreeWidgetItem(self._tree, ["(nenhum laminado eleg\u00edvel)", "", ""])
+            QTreeWidgetItem(self._tree, ["(nenhum laminado eleg\u00edvel)", "", "", ""])
             self._tree.setEnabled(False)
             return
         self._tree.setEnabled(True)
@@ -79,6 +80,7 @@ class DuplicateRemovalDialog(QDialog):
                 [
                     laminado.nome or "",
                     laminado.tipo or "",
+                    str(getattr(laminado, "tag", "") or ""),
                     str(color_value),
                 ],
             )

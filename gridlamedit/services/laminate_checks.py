@@ -148,7 +148,7 @@ def check_duplicates_by_sequence(laminates: Sequence[Laminado]) -> List[Duplicat
         duplicate_groups.append(
             DuplicateGroup(
                 signature=signature,
-                summary="Sequência, material e orientação idênticos",
+                summary="Sequência, material, orientação e tag idênticos",
                 laminates=unique_names,
             )
         )
@@ -165,6 +165,12 @@ def _normalize_material(value: object) -> str:
     text = str(value or "").strip()
     collapsed = " ".join(text.split())
     return collapsed.upper()
+
+
+def _normalize_tag_token(value: object) -> str:
+    text = str(value or "").strip()
+    collapsed = " ".join(text.split()).lower()
+    return collapsed or "none"
 
 
 def _normalize_orientation(value: object) -> float | None:
@@ -429,7 +435,10 @@ def _build_duplicate_signature(laminado: Laminado) -> str:
 def _build_sequence_duplicate_signature(laminado: Laminado) -> str:
     layers = laminado.camadas or []
     if not layers:
-        return "stacking:empty"
+        tag_token = _normalize_tag_token(getattr(laminado, "tag", ""))
+        return f"tag:{tag_token}|stacking:empty"
+
+    tag_token = _normalize_tag_token(getattr(laminado, "tag", ""))
 
     tokens: list[str] = []
     for layer in layers:
@@ -437,7 +446,7 @@ def _build_sequence_duplicate_signature(laminado: Laminado) -> str:
         material = _normalize_material(getattr(layer, "material", "")) or "none"
         orientation = _normalize_orientation(getattr(layer, "orientacao", None))
         tokens.append(f"{seq}@{material}@{_orientation_token(orientation)}")
-    return ";".join(tokens)
+    return f"tag:{tag_token}|" + ";".join(tokens)
 
 
 def _summarize_duplicate_signature(signature: str) -> str:

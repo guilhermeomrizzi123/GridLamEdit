@@ -712,20 +712,76 @@ class MainWindow(QMainWindow):
             )
             return
 
-        groups = check_duplicates_by_sequence(list(self._grid_model.laminados.values()))
-        if not groups:
+        eligible = self._duplicates_by_sequence_without_association()
+        if not eligible:
             QMessageBox.information(
                 self,
                 "Comparar Todos os Laminados",
-                "Nenhum laminado duplicado foi encontrado.",
+                "Nenhum laminado duplicado sem associações foi encontrado.",
             )
             return
 
-        dialog = self._ensure_duplicate_laminates_dialog()
-        dialog.set_duplicate_groups(groups)
-        dialog.show()
-        dialog.raise_()
-        dialog.activateWindow()
+        cleanup_dialog = DuplicateRemovalDialog(eligible, self)
+        if cleanup_dialog.exec() != QDialog.Accepted:
+            return
+
+        removed_names = self._remove_laminates_by_name(
+            lam.nome for lam in eligible if lam.nome
+        )
+        if not removed_names:
+            QMessageBox.information(
+                self,
+                "Remover Duplicados",
+                "Nenhum laminado foi removido.",
+            )
+            return
+
+        preferred_name = ""
+        if self._grid_model.laminados:
+            current_combo = ""
+            if hasattr(self, "laminate_name_combo"):
+                current_combo = self.laminate_name_combo.currentText().strip()
+            if current_combo and current_combo in self._grid_model.laminados:
+                preferred_name = current_combo
+            else:
+                preferred_name = next(iter(self._grid_model.laminados.keys()), "")
+
+        self._refresh_after_new_laminate(preferred_name)
+        QMessageBox.information(
+            self,
+            "Remover Duplicados",
+            f"{len(removed_names)} laminado(s) duplicados removidos.",
+        )
+
+    def _duplicates_by_sequence_without_association(self) -> list[Laminado]:
+        """Retorna laminados duplicados idênticos (incluindo tag) sem associações."""
+        if self._grid_model is None:
+            return []
+        associated_names: set[str] = {
+            str(name).strip()
+            for name in self._grid_model.cell_to_laminate.values()
+            if str(name).strip()
+        }
+        for name, laminado in self._grid_model.laminados.items():
+            if any((cell or "").strip() for cell in getattr(laminado, "celulas", [])):
+                associated_names.add(name)
+
+        groups = check_duplicates_by_sequence(list(self._grid_model.laminados.values()))
+        ordered: OrderedDict[str, Laminado] = OrderedDict()
+        for group in groups:
+            eligible_names = [
+                name
+                for name in group.laminates
+                if name and name not in associated_names
+            ]
+            if len(eligible_names) < 2:
+                continue
+            for lam_name in eligible_names:
+                laminado = self._grid_model.laminados.get(lam_name)
+                if laminado is None:
+                    continue
+                ordered.setdefault(lam_name, laminado)
+        return list(ordered.values())
 
     def _ensure_duplicate_laminates_dialog(self) -> DuplicateLaminatesDialog:
         if self._duplicate_laminates_dialog is None:
