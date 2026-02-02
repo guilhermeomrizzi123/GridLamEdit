@@ -33,6 +33,7 @@ from PySide6.QtWidgets import (
     QGraphicsScene,
     QGraphicsSimpleTextItem,
     QGraphicsTextItem,
+    QGraphicsItemGroup,
     QGraphicsView,
     QHBoxLayout,
     QVBoxLayout,
@@ -114,6 +115,9 @@ COLOR_AML_SOFT = QColor(78, 153, 223)  # Clear blue for Soft
 COLOR_AML_QUASI = QColor(147, 112, 219)  # Purple for Quasi-iso
 COLOR_AML_HARD = QColor(240, 148, 69)  # Amber for Hard
 COLOR_AML_UNKNOWN = QColor(108, 117, 125)  # Neutral gray fallback
+
+COLOR_LAYER_COUNT_MIN = QColor(173, 216, 230)  # Light blue for fewer layers
+COLOR_LAYER_COUNT_MAX = QColor(255, 0, 0)  # Red for most layers
 
 AML_TYPE_COLORS = {
     "Soft": COLOR_AML_SOFT,
@@ -943,6 +947,15 @@ class CellNeighborsWindow(QDialog):
         self.aml_toggle_button.toggled.connect(self._on_aml_toggle)
         toolbar.addWidget(self.aml_toggle_button)
 
+        # Layer count scale highlight toggle
+        self.layer_count_toggle_button = QPushButton("Escala Camadas", self)
+        self.layer_count_toggle_button.setCheckable(True)
+        self.layer_count_toggle_button.setToolTip(
+            "Colorir células por quantidade de camadas (azul claro -> vermelho)"
+        )
+        self.layer_count_toggle_button.toggled.connect(self._on_layer_count_toggle)
+        toolbar.addWidget(self.layer_count_toggle_button)
+
         # Missing laminate highlight toggle
         self.missing_laminate_button = QPushButton("Sem laminado (0)", self)
         self.missing_laminate_button.setCheckable(True)
@@ -999,6 +1012,8 @@ class CellNeighborsWindow(QDialog):
         self._aml_highlight_enabled = False
         self._previous_sequence_index_for_aml: int = 0
         self._aml_ui_lock = False
+        self._layer_count_highlight_enabled = False
+        self._previous_sequence_index_for_layer_count: int = 0
         
         # Connect undo stack signals
         self._undo_stack.canUndoChanged.connect(self._update_command_buttons)
@@ -1031,6 +1046,7 @@ class CellNeighborsWindow(QDialog):
         self._disconnected_highlight_rects: list[QGraphicsRectItem] = []
         self._missing_laminate_cells: set[str] = set()
         self._missing_laminate_highlight_enabled = False
+        self._layer_count_legend_group: Optional[QGraphicsItemGroup] = None
 
         # Add initial placeholder node with better positioning (away from edges)
         anchor_x = 300.0
@@ -1339,6 +1355,7 @@ class CellNeighborsWindow(QDialog):
                     self._last_pan_point = event.pos()
                     self.view.horizontalScrollBar().setValue(self.view.horizontalScrollBar().value() - delta.x())
                     self.view.verticalScrollBar().setValue(self.view.verticalScrollBar().value() - delta.y())
+                    self._update_layer_count_legend_position()
                     return True
             elif event.type() == QEvent.MouseButtonRelease:
                 if event.button() == Qt.MiddleButton:
@@ -1352,8 +1369,13 @@ class CellNeighborsWindow(QDialog):
                 angle = wheel.angleDelta().y()
                 factor = 1.15 if angle > 0 else 1/1.15
                 self.view.scale(factor, factor)
+                self._update_layer_count_legend_position()
                 return True
         return super().eventFilter(obj, event)
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._update_layer_count_legend_position()
 
     def closeEvent(self, event) -> None:
         """Handle window close event - check for disconnected blocks."""
@@ -1414,6 +1436,7 @@ class CellNeighborsWindow(QDialog):
 
         # Editing-related buttons
         self.aml_toggle_button.setEnabled(not locked and not self._missing_laminate_ui_lock)
+        self.layer_count_toggle_button.setEnabled(not locked and not self._missing_laminate_ui_lock)
         self.export_neighbors_button.setEnabled(not locked and not self._missing_laminate_ui_lock)
         self.import_neighbors_button.setEnabled(not locked and not self._missing_laminate_ui_lock)
         if hasattr(self, "missing_laminate_button"):
@@ -1451,6 +1474,7 @@ class CellNeighborsWindow(QDialog):
         self.reorder_neighbors_button.setEnabled(not locked and not self._missing_laminate_ui_lock)
         self.export_neighbors_button.setEnabled(not locked and not self._missing_laminate_ui_lock)
         self.import_neighbors_button.setEnabled(not locked and not self._missing_laminate_ui_lock)
+        self.layer_count_toggle_button.setEnabled(not locked and not self._missing_laminate_ui_lock)
         if hasattr(self, "missing_laminate_button"):
             self.missing_laminate_button.setEnabled(not locked and not self._reorder_edit_lock)
 
@@ -1476,10 +1500,15 @@ class CellNeighborsWindow(QDialog):
             action.setEnabled(not locked and not self._reorder_edit_lock and not self._aml_ui_lock)
 
         # Editing-related buttons
-        self.sequence_combo.setEnabled(not locked and not self._aml_highlight_enabled)
-        self.sequence_label.setEnabled(not locked and not self._aml_highlight_enabled)
+        self.sequence_combo.setEnabled(
+            not locked and not self._aml_highlight_enabled and not self._layer_count_highlight_enabled
+        )
+        self.sequence_label.setEnabled(
+            not locked and not self._aml_highlight_enabled and not self._layer_count_highlight_enabled
+        )
         self.reorder_neighbors_button.setEnabled(not locked and not self._aml_ui_lock)
         self.aml_toggle_button.setEnabled(not locked and not self._reorder_edit_lock)
+        self.layer_count_toggle_button.setEnabled(not locked and not self._reorder_edit_lock)
         self.export_neighbors_button.setEnabled(not locked and not self._reorder_edit_lock and not self._aml_ui_lock)
         self.import_neighbors_button.setEnabled(not locked and not self._reorder_edit_lock and not self._aml_ui_lock)
 
@@ -1500,6 +1529,8 @@ class CellNeighborsWindow(QDialog):
         self._project_manager = project_manager
         # Always start with AML highlight disabled for a fresh load
         self.aml_toggle_button.setChecked(False)
+        if hasattr(self, "layer_count_toggle_button"):
+            self.layer_count_toggle_button.setChecked(False)
         if hasattr(self, "missing_laminate_button"):
             self.missing_laminate_button.setChecked(False)
         cells = []
@@ -1550,6 +1581,8 @@ class CellNeighborsWindow(QDialog):
             self._update_node_cell_display(rec)
         if self._aml_highlight_enabled:
             self.update_cell_colors_for_aml()
+        elif self._layer_count_highlight_enabled:
+            self.update_cell_colors_for_layer_count()
         elif self._current_sequence_index is not None:
             self.update_cell_colors_for_sequence(self._current_sequence_index)
         self._refresh_missing_laminate_highlight()
@@ -1610,6 +1643,8 @@ class CellNeighborsWindow(QDialog):
     def _auto_save_if_needed(self) -> None:
         """Auto-save changes immediately when possible."""
         if self._aml_highlight_enabled:
+            return
+        if self._layer_count_highlight_enabled:
             return
         if not self._has_unsaved_changes:
             return
@@ -1677,6 +1712,8 @@ class CellNeighborsWindow(QDialog):
         self._current_sequence_index = None
         if self._aml_highlight_enabled:
             self.update_cell_colors_for_aml()
+        elif self._layer_count_highlight_enabled:
+            self.update_cell_colors_for_layer_count()
         else:
             self.update_cell_colors_for_sequence(None)
         self._update_command_buttons()
@@ -1710,6 +1747,14 @@ class CellNeighborsWindow(QDialog):
                 self.sequence_combo.blockSignals(False)
             self._current_sequence_index = None
             self.update_cell_colors_for_aml()
+            return
+        if self._layer_count_highlight_enabled:
+            if combo_index != 0:
+                self.sequence_combo.blockSignals(True)
+                self.sequence_combo.setCurrentIndex(0)
+                self.sequence_combo.blockSignals(False)
+            self._current_sequence_index = None
+            self.update_cell_colors_for_layer_count()
             return
         if combo_index <= 0:
             self._current_sequence_index = None
@@ -1754,7 +1799,7 @@ class CellNeighborsWindow(QDialog):
             self.reorder_neighbors_button.setChecked(False)
             del blocker
             return
-        if self._aml_highlight_enabled or self._aml_ui_lock:
+        if self._aml_highlight_enabled or self._aml_ui_lock or self._layer_count_highlight_enabled:
             blocker = QSignalBlocker(self.reorder_neighbors_button)
             self.reorder_neighbors_button.setChecked(False)
             del blocker
@@ -1816,6 +1861,8 @@ class CellNeighborsWindow(QDialog):
             del blocker
             return
         if enabled:
+            if self.layer_count_toggle_button.isChecked():
+                self.layer_count_toggle_button.setChecked(False)
             if not self._show_aml_formula_dialog():
                 blocker = QSignalBlocker(self.aml_toggle_button)
                 self.aml_toggle_button.setChecked(False)
@@ -1825,12 +1872,27 @@ class CellNeighborsWindow(QDialog):
         else:
             self._deactivate_aml_highlight()
 
+    def _on_layer_count_toggle(self, enabled: bool) -> None:
+        if self._missing_laminate_ui_lock:
+            blocker = QSignalBlocker(self.layer_count_toggle_button)
+            self.layer_count_toggle_button.setChecked(False)
+            del blocker
+            return
+        if enabled:
+            if self.aml_toggle_button.isChecked():
+                self.aml_toggle_button.setChecked(False)
+            self._activate_layer_count_highlight()
+        else:
+            self._deactivate_layer_count_highlight()
+
     def _on_missing_laminate_toggle(self, enabled: bool) -> None:
         if enabled:
             if self.reorder_neighbors_button.isChecked():
                 self.reorder_neighbors_button.setChecked(False)
             if self.aml_toggle_button.isChecked():
                 self.aml_toggle_button.setChecked(False)
+            if self.layer_count_toggle_button.isChecked():
+                self.layer_count_toggle_button.setChecked(False)
             self._missing_laminate_toggle_active = True
             missing_cells = self._collect_missing_laminate_cells()
             if missing_cells:
@@ -1925,6 +1987,36 @@ class CellNeighborsWindow(QDialog):
         self._update_command_buttons()
         self._on_sequence_changed(self.sequence_combo.currentIndex())
 
+    def _activate_layer_count_highlight(self) -> None:
+        if self._layer_count_highlight_enabled:
+            return
+        if self.reorder_neighbors_button.isChecked():
+            self.reorder_neighbors_button.setChecked(False)
+        self._layer_count_highlight_enabled = True
+        self._previous_sequence_index_for_layer_count = self.sequence_combo.currentIndex()
+        self.sequence_combo.blockSignals(True)
+        self.sequence_combo.setCurrentIndex(0)
+        self.sequence_combo.blockSignals(False)
+        self._current_sequence_index = None
+        self.sequence_combo.setEnabled(False)
+        self.sequence_label.setEnabled(False)
+        self.update_cell_colors_for_layer_count()
+
+    def _deactivate_layer_count_highlight(self) -> None:
+        if not self._layer_count_highlight_enabled:
+            return
+        self._layer_count_highlight_enabled = False
+        self._clear_layer_count_legend()
+        self.sequence_combo.setEnabled(True)
+        self.sequence_label.setEnabled(True)
+        restore_index = self._previous_sequence_index_for_layer_count
+        if restore_index < 0 or restore_index >= self.sequence_combo.count():
+            restore_index = 0
+        self.sequence_combo.blockSignals(True)
+        self.sequence_combo.setCurrentIndex(restore_index)
+        self.sequence_combo.blockSignals(False)
+        self._on_sequence_changed(self.sequence_combo.currentIndex())
+
     def _apply_border_highlight(self, item: CellNodeItem, highlighted: bool) -> None:
         if highlighted:
             item.set_border_highlight(COLOR_CENTER_BORDER, CENTER_BORDER_WIDTH)
@@ -1976,6 +2068,8 @@ class CellNeighborsWindow(QDialog):
         self._missing_laminate_highlight_enabled = self._missing_laminate_toggle_active or bool(missing_cells)
         if self._aml_highlight_enabled:
             self.update_cell_colors_for_aml()
+        elif self._layer_count_highlight_enabled:
+            self.update_cell_colors_for_layer_count()
         else:
             self.update_cell_colors_for_sequence(self._current_sequence_index)
         self._refresh_missing_laminate_button_state()
@@ -1987,6 +2081,8 @@ class CellNeighborsWindow(QDialog):
         self._missing_laminate_highlight_enabled = self._missing_laminate_toggle_active
         if self._aml_highlight_enabled:
             self.update_cell_colors_for_aml()
+        elif self._layer_count_highlight_enabled:
+            self.update_cell_colors_for_layer_count()
         else:
             self.update_cell_colors_for_sequence(self._current_sequence_index)
         self._refresh_missing_laminate_button_state()
@@ -2026,6 +2122,9 @@ class CellNeighborsWindow(QDialog):
         """
         if self._aml_highlight_enabled:
             self.update_cell_colors_for_aml()
+            return
+        if self._layer_count_highlight_enabled:
+            self.update_cell_colors_for_layer_count()
             return
         symmetry_cache: dict[int, object] = {}
         for record in self._nodes_by_grid.values():
@@ -2091,6 +2190,143 @@ class CellNeighborsWindow(QDialog):
             item._recenter_label()
             self._apply_border_highlight(item, is_center_sequence)
             self._apply_missing_laminate_border_if_needed(record, item)
+
+    @staticmethod
+    def _interpolate_color(start: QColor, end: QColor, t: float) -> QColor:
+        t = max(0.0, min(1.0, t))
+        r = round(start.red() + (end.red() - start.red()) * t)
+        g = round(start.green() + (end.green() - start.green()) * t)
+        b = round(start.blue() + (end.blue() - start.blue()) * t)
+        return QColor(r, g, b)
+
+    def _collect_layer_counts_for_cells(self) -> tuple[dict[str, int], int, int]:
+        if self._model is None:
+            return {}, 0, 0
+        try:
+            cell_to_laminate = getattr(self._model, "cell_to_laminate", {}) or {}
+        except Exception:
+            cell_to_laminate = {}
+        try:
+            laminados = getattr(self._model, "laminados", {}) or {}
+        except Exception:
+            laminados = {}
+        counts: dict[str, int] = {}
+        values: list[int] = []
+        for record in self._nodes_by_grid.values():
+            cell_id = record.cell_id
+            if not cell_id:
+                continue
+            laminate_name = cell_to_laminate.get(cell_id)
+            if not laminate_name:
+                continue
+            laminado = laminados.get(laminate_name)
+            if laminado is None:
+                continue
+            count = len(getattr(laminado, "camadas", []) or [])
+            if count <= 0:
+                continue
+            counts[cell_id] = count
+            values.append(count)
+        if not values:
+            return counts, 0, 0
+        return counts, min(values), max(values)
+
+    def update_cell_colors_for_layer_count(self) -> None:
+        """Colour cells by layer count using a blue-to-red scale."""
+        if self._aml_highlight_enabled:
+            self.update_cell_colors_for_aml()
+            return
+        counts, min_count, max_count = self._collect_layer_counts_for_cells()
+        if min_count <= 0 or max_count <= 0:
+            self._clear_layer_count_legend()
+        else:
+            self._build_layer_count_legend(min_count, max_count)
+        for record in self._nodes_by_grid.values():
+            item = record.item
+            item._orientation_label.setText("")
+            item._aml_label.setText("")
+            if not record.cell_id or self._model is None:
+                item.setBrush(item._normal_brush)
+                self._apply_border_highlight(item, False)
+                item._recenter_label()
+                self._apply_missing_laminate_border_if_needed(record, item)
+                continue
+            count = counts.get(record.cell_id)
+            if not count or min_count <= 0 or max_count <= 0:
+                item.setBrush(item._normal_brush)
+                self._apply_border_highlight(item, False)
+                item._recenter_label()
+                self._apply_missing_laminate_border_if_needed(record, item)
+                continue
+            if count == max_count:
+                color = COLOR_LAYER_COUNT_MAX
+            else:
+                if max_count == min_count:
+                    t = 1.0
+                else:
+                    t = (count - min_count) / float(max_count - min_count)
+                color = self._interpolate_color(COLOR_LAYER_COUNT_MIN, COLOR_LAYER_COUNT_MAX, t)
+            item.setBrush(QBrush(color))
+            self._apply_border_highlight(item, False)
+            item._recenter_label()
+            self._apply_missing_laminate_border_if_needed(record, item)
+
+    def _clear_layer_count_legend(self) -> None:
+        if self._layer_count_legend_group is None:
+            return
+        try:
+            self.scene.removeItem(self._layer_count_legend_group)
+        except Exception:
+            pass
+        self._layer_count_legend_group = None
+
+    def _build_layer_count_legend(self, min_count: int, max_count: int) -> None:
+        if min_count <= 0 or max_count <= 0:
+            self._clear_layer_count_legend()
+            return
+        self._clear_layer_count_legend()
+
+        bar_width = 22
+        bar_height = 220
+        label_offset = 8
+        gradient = QLinearGradient(0, 0, 0, bar_height)
+        gradient.setColorAt(0.0, COLOR_LAYER_COUNT_MAX)
+        gradient.setColorAt(1.0, COLOR_LAYER_COUNT_MIN)
+
+        bar = QGraphicsRectItem(0, 0, bar_width, bar_height)
+        bar.setBrush(QBrush(gradient))
+        bar.setPen(QPen(QColor(90, 90, 90)))
+
+        group = QGraphicsItemGroup()
+        group.addToGroup(bar)
+
+        steps = 5 if max_count > min_count else 1
+        for i in range(steps):
+            if steps == 1:
+                t = 0.0
+                value = max_count
+            else:
+                t = i / float(steps - 1)
+                value = round(max_count - t * (max_count - min_count))
+            text_item = QGraphicsSimpleTextItem(str(int(value)))
+            text_item.setBrush(COLOR_CONTOUR_TEXT)
+            text_item.setPos(bar_width + label_offset, t * bar_height - text_item.boundingRect().height() / 2)
+            group.addToGroup(text_item)
+
+        group.setZValue(20)
+        self.scene.addItem(group)
+        self._layer_count_legend_group = group
+        self._update_layer_count_legend_position()
+
+    def _update_layer_count_legend_position(self) -> None:
+        if self._layer_count_legend_group is None:
+            return
+        visible_rect = self.view.mapToScene(self.view.viewport().rect()).boundingRect()
+        group_rect = self._layer_count_legend_group.boundingRect()
+        margin = 24
+        x = visible_rect.right() - group_rect.width() - margin
+        y = visible_rect.top() + margin
+        self._layer_count_legend_group.setPos(x - group_rect.left(), y - group_rect.top())
 
     # ---------- AML colouring ----------
     def _aml_orientation_bucket(self, value: object) -> Optional[str]:
@@ -3231,7 +3467,9 @@ class CellNeighborsWindow(QDialog):
         self._recalculate_cell_neighbors_from_scene()
         self._update_all_plus_buttons_visibility()
         # Update colors for current sequence if one is selected
-        if self._current_sequence_index is not None:
+        if self._layer_count_highlight_enabled:
+            self.update_cell_colors_for_layer_count()
+        elif self._current_sequence_index is not None:
             self.update_cell_colors_for_sequence(self._current_sequence_index)
         self._mark_as_modified()
 
@@ -3320,6 +3558,8 @@ class CellNeighborsWindow(QDialog):
         self._update_node_cell_display(record)
         if self._aml_highlight_enabled:
             self.update_cell_colors_for_aml()
+        elif self._layer_count_highlight_enabled:
+            self.update_cell_colors_for_layer_count()
         elif self._current_sequence_index is not None:
             self.update_cell_colors_for_sequence(self._current_sequence_index)
         self._refresh_missing_laminate_highlight()
