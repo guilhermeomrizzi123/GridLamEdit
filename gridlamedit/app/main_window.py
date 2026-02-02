@@ -2861,7 +2861,45 @@ class MainWindow(QMainWindow):
             return
 
         if hasattr(self, "_grid_binding"):
-            self._grid_binding._on_laminate_selected(selected_name)
+            binding = self._grid_binding
+            cell_id = getattr(binding, "_current_cell_id", None)
+            if not cell_id:
+                list_widget = getattr(self, "lstCelulas", None)
+                if not isinstance(list_widget, QListWidget):
+                    list_widget = getattr(self, "cells_list", None)
+                if isinstance(list_widget, QListWidget):
+                    current_item = list_widget.currentItem()
+                    if current_item is not None:
+                        item_cell = current_item.data(Qt.UserRole)
+                        if not item_cell:
+                            item_cell = current_item.text().split("|")[0].strip()
+                        cell_id = str(item_cell or "").strip()
+
+            current_name = None
+            if cell_id:
+                resolve = getattr(binding, "_laminate_for_cell", None)
+                if callable(resolve):
+                    try:
+                        current_name = resolve(cell_id)
+                    except Exception:  # pragma: no cover - defensive
+                        current_name = None
+                if not current_name and self._grid_model is not None:
+                    mapped = self._grid_model.cell_to_laminate.get(cell_id)
+                    current_name = (mapped or "").strip() or None
+
+            if current_name and current_name != selected_name:
+                response = QMessageBox.question(
+                    self,
+                    "Confirmar troca",
+                    f"O laminado será trocado de '{current_name}' para '{selected_name}'.\n\nDeseja confirmar?",
+                    QMessageBox.Yes | QMessageBox.No,
+                    QMessageBox.No,
+                )
+                if response != QMessageBox.Yes:
+                    self._clear_laminate_combo_display()
+                    return
+
+            binding._on_laminate_selected(selected_name)
 
         self._reset_laminate_filter(clear_text=True)
 
