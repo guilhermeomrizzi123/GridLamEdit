@@ -72,9 +72,10 @@ def reassociate_laminates_by_contours(
     """Reassociate laminates from old_model to new_model using contour signatures."""
     report = ReassociationReport()
     contour_index = _build_contour_index(getattr(new_model, "cell_contours", {}))
-    cell_map = (
-        new_model.cell_to_laminate if apply else dict(new_model.cell_to_laminate)
-    )
+    if apply:
+        cell_map: Dict[str, str] = {}
+    else:
+        cell_map = dict(new_model.cell_to_laminate)
 
     for old_cell, laminate_name in old_model.cell_to_laminate.items():
         if not laminate_name:
