@@ -68,6 +68,47 @@ def add_custom_material(material: str, settings: QSettings | None = None) -> lis
     return save_custom_materials(current, settings)
 
 
+def remove_custom_material(
+    material: str, settings: QSettings | None = None
+) -> list[str]:
+    """Remove a material from the custom list, returning the updated list."""
+    current = load_custom_materials(settings)
+    key = str(material or "").strip().casefold()
+    if not key:
+        return current
+    updated = [item for item in current if item.casefold() != key]
+    return save_custom_materials(updated, settings)
+
+
+def update_custom_material(
+    old_material: str,
+    new_material: str,
+    settings: QSettings | None = None,
+) -> list[str]:
+    """Update a material in the custom list, returning the updated list."""
+    current = load_custom_materials(settings)
+    old_key = str(old_material or "").strip().casefold()
+    new_text = str(new_material or "").strip()
+    if not old_key or not new_text:
+        return current
+    new_key = new_text.casefold()
+    remaining = [item for item in current if item.casefold() != old_key]
+    if new_key in {item.casefold() for item in remaining}:
+        return save_custom_materials(remaining, settings)
+    try:
+        index = next(
+            idx
+            for idx, item in enumerate(current)
+            if item.casefold() == old_key
+        )
+    except StopIteration:
+        remaining.append(new_text)
+        return save_custom_materials(remaining, settings)
+    insert_at = min(index, len(remaining))
+    remaining.insert(insert_at, new_text)
+    return save_custom_materials(remaining, settings)
+
+
 def available_materials(
     project: Any = None, settings: QSettings | None = None
 ) -> list[str]:

@@ -91,6 +91,7 @@ from gridlamedit.app.dialogs.bulk_material_dialog import BulkMaterialDialog
 from gridlamedit.app.dialogs.bulk_orientation_dialog import BulkOrientationDialog
 from gridlamedit.app.dialogs.compare_laminates_dialog import CompareLaminatesDialog
 from gridlamedit.app.dialogs.duplicate_laminate_dialog import DuplicateLaminateDialog
+from gridlamedit.app.dialogs.manage_materials_dialog import ManageMaterialsDialog
 from gridlamedit.app.dialogs.name_laminate_dialog import NameLaminateDialog
 from gridlamedit.app.dialogs.new_laminate_paste_dialog import NewLaminatePasteDialog
 from gridlamedit.app.dialogs.stacking_summary_dialog import StackingSummaryDialog
@@ -504,6 +505,13 @@ class MainWindow(QMainWindow):
                 None,
             ),
             (
+                "manage_materials_action",
+                "Gerenciar Materiais...",
+                self._on_manage_materials,
+                "Editar ou excluir materiais cadastrados.",
+                None,
+            ),
+            (
                 "virtual_stacking_action",
                 "Open Virtual Stacking",
                 self.open_virtual_stacking,
@@ -592,6 +600,7 @@ class MainWindow(QMainWindow):
         tools_menu.addAction(self.compare_all_laminates_action)
         tools_menu.addSeparator()
         tools_menu.addAction(self.register_material_action)
+        tools_menu.addAction(self.manage_materials_action)
         tools_menu.addAction(self.batch_import_action)
 
         help_menu = menu_bar.addMenu("Help")
@@ -4413,6 +4422,13 @@ class MainWindow(QMainWindow):
 
         self._start_export_verification()
         return True
+
+    def _on_manage_materials(self, checked: bool = False) -> None:  # noqa: ARG002
+        dialog = ManageMaterialsDialog(self, settings=self._settings)
+        dialog.exec()
+        status_bar = self.statusBar()
+        if status_bar:
+            status_bar.showMessage("Materiais atualizados", 3000)
 
     def _on_register_material(self, checked: bool = False) -> None:  # noqa: ARG002
         text, ok = QInputDialog.getText(
