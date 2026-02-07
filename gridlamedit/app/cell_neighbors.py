@@ -24,8 +24,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Optional, Tuple
 
-from PySide6.QtCore import QPointF, QRectF, Qt, QSize, QLineF, QSignalBlocker
-from PySide6.QtGui import QColor, QFont, QPainterPath, QPen, QAction, QUndoStack, QUndoCommand, QLinearGradient, QRadialGradient, QBrush, QIcon, QPainter, QTextOption, QPixmap
+from PySide6.QtCore import QPointF, QRectF, QRect, Qt, QSize, QLineF, QSignalBlocker
+from PySide6.QtGui import QColor, QFont, QPainterPath, QPen, QAction, QUndoStack, QUndoCommand, QLinearGradient, QRadialGradient, QBrush, QIcon, QPainter, QTextOption, QPixmap, QPdfWriter, QPageSize, QPageLayout
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
@@ -54,6 +54,7 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QProgressDialog,
     QTextEdit,
+    QRubberBand,
 )
 
 from gridlamedit.core.paths import package_path
@@ -994,6 +995,13 @@ class CellNeighborsWindow(QDialog):
         self.import_neighbors_button.clicked.connect(self._import_neighbors_from_file)
         toolbar.addWidget(self.import_neighbors_button)
 
+        # PDF print selection
+        self.print_pdf_button = QPushButton("Imprimir PDF", self)
+        self.print_pdf_button.setCheckable(True)
+        self.print_pdf_button.setToolTip("Selecionar área e exportar vizinhanças para PDF")
+        self.print_pdf_button.toggled.connect(self._toggle_print_selection)
+        toolbar.addWidget(self.print_pdf_button)
+
         # Drawing tools palette
         self._drawing_tool: Optional[str] = None
         self._drawing_line_item: Optional[QGraphicsLineItem] = None
@@ -1004,6 +1012,10 @@ class CellNeighborsWindow(QDialog):
         default_font_size = max(9, QFont().pointSize())
         self._drawing_text_size = float(default_font_size)
         self._drawing_text_color = QColor(33, 37, 41)
+        self._print_selection_active = False
+        self._print_origin = None
+        self._print_rubber_band: Optional[QRubberBand] = None
+        self._print_rect_scene: Optional[QRectF] = None
 
         drawing_toolbar = QToolBar(self)
         drawing_toolbar.setMovable(False)
@@ -1144,7 +1156,9 @@ class CellNeighborsWindow(QDialog):
         self._apply_drawing_cursor()
 
     def _apply_drawing_cursor(self) -> None:
-        if self._drawing_tool == "line":
+        if self._print_selection_active:
+            cursor = Qt.CrossCursor
+        elif self._drawing_tool == "line":
             cursor = Qt.CrossCursor
         elif self._drawing_tool == "text":
             cursor = Qt.IBeamCursor
@@ -1560,6 +1574,16 @@ class CellNeighborsWindow(QDialog):
         from PySide6.QtCore import QEvent
         from PySide6.QtGui import QWheelEvent, QMouseEvent
         if obj is self.view.viewport():
+            if self._print_selection_active:
+                if event.type() == QEvent.MouseButtonPress and event.button() == Qt.LeftButton:
+                    self._start_print_selection(event.pos())
+                    return True
+                elif event.type() == QEvent.MouseMove and self._print_origin is not None:
+                    self._update_print_selection(event.pos())
+                    return True
+                elif event.type() == QEvent.MouseButtonRelease and event.button() == Qt.LeftButton:
+                    self._finish_print_selection(event.pos())
+                    return True
             if self._drawing_tool is not None:
                 if event.type() == QEvent.MouseButtonPress and event.button() == Qt.LeftButton:
                     scene_pos = self.view.mapToScene(event.pos())
@@ -1620,6 +1644,18 @@ class CellNeighborsWindow(QDialog):
         super().resizeEvent(event)
         self._update_layer_count_legend_position()
 
+    def keyPressEvent(self, event) -> None:
+        if event.key() == Qt.Key_Escape and self._print_selection_active:
+            self._cancel_print_selection()
+            if self.print_pdf_button.isChecked():
+                blocker = QSignalBlocker(self.print_pdf_button)
+                self.print_pdf_button.setChecked(False)
+                del blocker
+            self._apply_drawing_cursor()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
     def closeEvent(self, event) -> None:
         """Handle window close event - check for disconnected blocks."""
         # Check for disconnected blocks before closing
@@ -1673,6 +1709,13 @@ class CellNeighborsWindow(QDialog):
 
         # Drawing tools
         if locked:
+            if self._print_selection_active:
+                self._cancel_print_selection()
+                if self.print_pdf_button.isChecked():
+                    blocker = QSignalBlocker(self.print_pdf_button)
+                    self.print_pdf_button.setChecked(False)
+                    del blocker
+                self._apply_drawing_cursor()
             for action in self._drawing_actions.values():
                 if action.isChecked():
                     blocker = QSignalBlocker(action)
@@ -1692,6 +1735,7 @@ class CellNeighborsWindow(QDialog):
         self.layer_count_toggle_button.setEnabled(not locked and not self._missing_laminate_ui_lock and not self._review_ui_lock)
         self.export_neighbors_button.setEnabled(not locked and not self._missing_laminate_ui_lock and not self._review_ui_lock)
         self.import_neighbors_button.setEnabled(not locked and not self._missing_laminate_ui_lock and not self._review_ui_lock)
+        self.print_pdf_button.setEnabled(not locked and not self._missing_laminate_ui_lock and not self._review_ui_lock)
         if hasattr(self, "missing_laminate_button"):
             self.missing_laminate_button.setEnabled(not locked and not self._aml_ui_lock and not self._review_ui_lock)
 
@@ -1712,6 +1756,13 @@ class CellNeighborsWindow(QDialog):
 
         # Drawing tools
         if locked:
+            if self._print_selection_active:
+                self._cancel_print_selection()
+                if self.print_pdf_button.isChecked():
+                    blocker = QSignalBlocker(self.print_pdf_button)
+                    self.print_pdf_button.setChecked(False)
+                    del blocker
+                self._apply_drawing_cursor()
             for action in self._drawing_actions.values():
                 if action.isChecked():
                     blocker = QSignalBlocker(action)
@@ -1730,6 +1781,7 @@ class CellNeighborsWindow(QDialog):
         self.reorder_neighbors_button.setEnabled(not locked and not self._missing_laminate_ui_lock and not self._review_ui_lock)
         self.export_neighbors_button.setEnabled(not locked and not self._missing_laminate_ui_lock and not self._review_ui_lock)
         self.import_neighbors_button.setEnabled(not locked and not self._missing_laminate_ui_lock and not self._review_ui_lock)
+        self.print_pdf_button.setEnabled(not locked and not self._missing_laminate_ui_lock and not self._review_ui_lock)
         self.layer_count_toggle_button.setEnabled(not locked and not self._missing_laminate_ui_lock and not self._review_ui_lock)
         if hasattr(self, "missing_laminate_button"):
             self.missing_laminate_button.setEnabled(not locked and not self._reorder_edit_lock and not self._review_ui_lock)
@@ -1744,6 +1796,13 @@ class CellNeighborsWindow(QDialog):
 
         # Drawing tools
         if locked:
+            if self._print_selection_active:
+                self._cancel_print_selection()
+                if self.print_pdf_button.isChecked():
+                    blocker = QSignalBlocker(self.print_pdf_button)
+                    self.print_pdf_button.setChecked(False)
+                    del blocker
+                self._apply_drawing_cursor()
             for action in self._drawing_actions.values():
                 if action.isChecked():
                     blocker = QSignalBlocker(action)
@@ -1770,6 +1829,7 @@ class CellNeighborsWindow(QDialog):
         self.layer_count_toggle_button.setEnabled(not locked and not self._reorder_edit_lock and not self._review_ui_lock)
         self.export_neighbors_button.setEnabled(not locked and not self._reorder_edit_lock and not self._aml_ui_lock and not self._review_ui_lock)
         self.import_neighbors_button.setEnabled(not locked and not self._reorder_edit_lock and not self._aml_ui_lock and not self._review_ui_lock)
+        self.print_pdf_button.setEnabled(not locked and not self._reorder_edit_lock and not self._aml_ui_lock and not self._review_ui_lock)
 
         # Undo/Redo actions
         if locked or self._review_ui_lock:
@@ -2334,6 +2394,13 @@ class CellNeighborsWindow(QDialog):
         self._review_ui_lock = locked
 
         if locked:
+            if self._print_selection_active:
+                self._cancel_print_selection()
+                if self.print_pdf_button.isChecked():
+                    blocker = QSignalBlocker(self.print_pdf_button)
+                    self.print_pdf_button.setChecked(False)
+                    del blocker
+                self._apply_drawing_cursor()
             for action in self._drawing_actions.values():
                 if action.isChecked():
                     blocker = QSignalBlocker(action)
@@ -2368,6 +2435,7 @@ class CellNeighborsWindow(QDialog):
         self.layer_count_toggle_button.setEnabled(not locked and not self._missing_laminate_ui_lock)
         self.export_neighbors_button.setEnabled(not locked and not self._missing_laminate_ui_lock)
         self.import_neighbors_button.setEnabled(not locked and not self._missing_laminate_ui_lock)
+        self.print_pdf_button.setEnabled(not locked and not self._missing_laminate_ui_lock)
         if hasattr(self, "missing_laminate_button"):
             self.missing_laminate_button.setEnabled(not locked and not self._aml_ui_lock)
 
@@ -3163,6 +3231,134 @@ class CellNeighborsWindow(QDialog):
                 self,
                 "Falha ao exportar",
                 f"Não foi possível exportar o arquivo.\nErro: {exc}",
+            )
+
+    def _toggle_print_selection(self, checked: bool) -> None:
+        if checked and (self._reorder_edit_lock or self._missing_laminate_ui_lock or self._review_ui_lock):
+            blocker = QSignalBlocker(self.print_pdf_button)
+            self.print_pdf_button.setChecked(False)
+            del blocker
+            return
+
+        self._print_selection_active = checked
+        if checked:
+            for action in self._drawing_actions.values():
+                if action.isChecked():
+                    blocker = QSignalBlocker(action)
+                    action.setChecked(False)
+                    del blocker
+            self._drawing_tool = None
+            self._cancel_active_line()
+            QMessageBox.information(
+                self,
+                "Seleção de impressão",
+                "Arraste para selecionar a área que será exportada para PDF.",
+            )
+        else:
+            self._cancel_print_selection()
+        self._apply_drawing_cursor()
+
+    def _cancel_print_selection(self) -> None:
+        self._print_selection_active = False
+        self._print_origin = None
+        self._print_rect_scene = None
+        if self._print_rubber_band is not None:
+            self._print_rubber_band.hide()
+
+    def _start_print_selection(self, pos) -> None:
+        self._print_origin = pos
+        if self._print_rubber_band is None:
+            self._print_rubber_band = QRubberBand(QRubberBand.Rectangle, self.view.viewport())
+        self._print_rubber_band.setGeometry(QRect(self._print_origin, self._print_origin))
+        self._print_rubber_band.show()
+
+    def _update_print_selection(self, pos) -> None:
+        if self._print_rubber_band is None or self._print_origin is None:
+            return
+        rect = QRect(self._print_origin, pos).normalized()
+        self._print_rubber_band.setGeometry(rect)
+
+    def _finish_print_selection(self, pos) -> None:
+        if self._print_origin is None or self._print_rubber_band is None:
+            self._cancel_print_selection()
+            return
+
+        rect = QRect(self._print_origin, pos).normalized()
+        self._print_rubber_band.hide()
+        self._print_origin = None
+
+        if rect.width() < 10 or rect.height() < 10:
+            self._cancel_print_selection()
+            if self.print_pdf_button.isChecked():
+                blocker = QSignalBlocker(self.print_pdf_button)
+                self.print_pdf_button.setChecked(False)
+                del blocker
+            return
+
+        scene_rect = self.view.mapToScene(rect).boundingRect()
+        self._print_rect_scene = scene_rect
+        self._export_selection_to_pdf(scene_rect)
+        self._cancel_print_selection()
+        if self.print_pdf_button.isChecked():
+            blocker = QSignalBlocker(self.print_pdf_button)
+            self.print_pdf_button.setChecked(False)
+            del blocker
+        self._apply_drawing_cursor()
+
+    def _export_selection_to_pdf(self, scene_rect: QRectF) -> None:
+        if scene_rect.isEmpty():
+            return
+        base_dir = None
+        if self._project_manager is not None:
+            try:
+                if self._project_manager.current_path is not None:
+                    base_dir = Path(self._project_manager.current_path).parent
+            except Exception:
+                base_dir = None
+        if base_dir is None:
+            base_dir = Path.cwd()
+
+        default_path = base_dir / "Cell.Neighbors.Export.pdf"
+        file_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Exportar PDF",
+            str(default_path),
+            "PDF (*.pdf)",
+        )
+        if not file_path:
+            return
+
+        output_path = Path(file_path)
+        if output_path.suffix.lower() != ".pdf":
+            output_path = output_path.with_suffix(".pdf")
+
+        try:
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            writer = QPdfWriter(str(output_path))
+            writer.setResolution(300)
+            writer.setPageSize(QPageSize(QPageSize.A4))
+            if scene_rect.width() > scene_rect.height():
+                writer.setPageOrientation(QPageLayout.Landscape)
+            else:
+                writer.setPageOrientation(QPageLayout.Portrait)
+
+            painter = QPainter(writer)
+            painter.setRenderHint(QPainter.Antialiasing, True)
+            page_rect = writer.pageLayout().paintRectPixels(writer.resolution())
+            target = QRectF(0, 0, float(page_rect.width()), float(page_rect.height()))
+            self.scene.render(painter, target, scene_rect, Qt.KeepAspectRatio)
+            painter.end()
+
+            QMessageBox.information(
+                self,
+                "PDF gerado",
+                f"PDF exportado para:\n{output_path}",
+            )
+        except Exception as exc:
+            QMessageBox.warning(
+                self,
+                "Falha ao exportar PDF",
+                f"Não foi possível exportar o PDF.\nErro: {exc}",
             )
 
     def _import_neighbors_from_file(self) -> None:
