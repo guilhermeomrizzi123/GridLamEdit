@@ -183,17 +183,20 @@ class LaminateFilterProxy(QSortFilterProxyModel):
         self._filter_norm: str = ""
         self._sentinel: str = sentinel
         self.setFilterCaseSensitivity(Qt.CaseInsensitive)
-
-    @staticmethod
-    def _normalize(text: str) -> str:
-        base = unicodedata.normalize("NFKD", text)
-        stripped = "".join(ch for ch in base if not unicodedata.combining(ch))
-        return re.sub(r"[^0-9A-Za-z]+", "", stripped).lower()
-
-    def set_filter_text(self, text: str) -> None:
-        self._filter_text = text.strip()
         self._filter_norm = self._normalize(self._filter_text) if self._filter_text else ""
         self.invalidateFilter()
+
+    def set_filter_text(self, text: str) -> None:
+        """Set the filter text and update the normalized version."""
+        self._filter_text = str(text or "").strip()
+        self._filter_norm = self._normalize(self._filter_text) if self._filter_text else ""
+        self.invalidateFilter()
+
+    def _normalize(self, text: str) -> str:
+        """Normalize text by removing accents and common punctuation."""
+        import unicodedata
+        nfd = unicodedata.normalize("NFD", text)
+        return "".join(c for c in nfd if unicodedata.category(c) != "Mn")
 
     def filterAcceptsRow(self, source_row: int, source_parent) -> bool:  # type: ignore[override]
         if not self._filter_text:
@@ -1894,14 +1897,6 @@ class MainWindow(QMainWindow):
             self._show_todo_message,  # type: ignore[arg-type]
             "Duplicar camada",
             QStyle.SP_FileDialogDetailedView,
-        )
-        self.btn_renumber_sequence = make_button(
-            ":/icons/renumber_sequence.svg",
-            "Renumerar sequ\u00eancia (Seq.1, Seq.2...)",
-            self.on_renumber_sequences,
-            "Renumerar sequ\u00eancia das camadas",
-            QStyle.SP_BrowserReload,
-            tool_button_style=Qt.ToolButtonIconOnly,
         )
         self.btn_bulk_change_material = QToolButton(self)
         self.btn_bulk_change_material.setObjectName("btn_bulk_change_material")

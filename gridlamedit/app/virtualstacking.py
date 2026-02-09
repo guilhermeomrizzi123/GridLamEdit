@@ -1579,6 +1579,33 @@ class VirtualStackingWindow(QtWidgets.QDialog):
                     return self._extract_label_prefix(label, default)
         return default
 
+    def _current_label_seed_from_project(
+        self,
+        attr: str,
+        default_prefix: str,
+        default_separator: str = ".",
+        default_start: int = 1,
+    ) -> tuple[str, str, int]:
+        if self._project is None:
+            return default_prefix, default_separator, default_start
+        for laminate in getattr(self._project, "laminados", {}).values():
+            layers = getattr(laminate, "camadas", [])
+            for idx, layer in enumerate(layers):
+                label = str(getattr(layer, attr, "") or "").strip()
+                if not label:
+                    continue
+                match = _PREFIX_NUMBER_PATTERN.fullmatch(label)
+                if match:
+                    prefix = (match.group(1) or default_prefix).strip() or default_prefix
+                    separator = "." if "." in label else ""
+                    try:
+                        number = int(match.group(2))
+                    except ValueError:
+                        number = idx + 1
+                    start_number = max(1, number - idx)
+                    return prefix, separator, start_number
+        return default_prefix, default_separator, default_start
+
     def _current_sequence_prefix(self) -> str:
         return self._current_prefix_from_project("sequence", "Seq")
 
@@ -1599,13 +1626,15 @@ class VirtualStackingWindow(QtWidgets.QDialog):
             stacking_model_provider=self._stacking_model_for,
         )
 
-    def _prompt_prefix_dialog(self, title: str, current_prefix: str) -> Optional[str]:
+    def _prompt_prefix_dialog(self, title: str, current_label: str) -> Optional[str]:
         dialog = QtWidgets.QDialog(self)
         dialog.setWindowTitle(title)
         layout = QtWidgets.QVBoxLayout(dialog)
-        layout.addWidget(QtWidgets.QLabel(f"Current prefix: {current_prefix}", dialog))
+        layout.addWidget(
+            QtWidgets.QLabel(f"Current base label: {current_label}", dialog)
+        )
         input_box = QtWidgets.QLineEdit(dialog)
-        input_box.setText(current_prefix)
+        input_box.setText(current_label)
         layout.addWidget(input_box)
         buttons = QtWidgets.QDialogButtonBox(
             QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel,
@@ -1625,12 +1654,16 @@ class VirtualStackingWindow(QtWidgets.QDialog):
         target_attr: str,
         column: int,
         new_prefix: str,
+        *,
+        separator: str,
+        start_number: int,
     ) -> list[str]:
         if self._project is None:
             return []
         prefix = new_prefix.strip().rstrip(".")
         if not prefix:
             return []
+        base_number = max(1, int(start_number))
         changed: list[str] = []
         for laminate in getattr(self._project, "laminados", {}).values():
             model = self._stacking_model_for(laminate)
@@ -1640,8 +1673,7 @@ class VirtualStackingWindow(QtWidgets.QDialog):
             updated = False
             for idx, layer in enumerate(layers):
                 current_label = getattr(layer, target_attr, "")
-                separator = "." if "." in str(current_label) else ""
-                target_label = f"{prefix}{separator}{idx + 1}"
+                target_label = f"{prefix}{separator}{base_number + idx}"
                 if str(current_label or "") == target_label:
                     continue
                 if model.apply_field_value(idx, column, target_label):
@@ -1657,33 +1689,85 @@ class VirtualStackingWindow(QtWidgets.QDialog):
         return changed
 
     def _rename_all_sequences(self) -> None:
-        current_prefix = self._current_sequence_prefix()
-        new_prefix = self._prompt_prefix_dialog("Rename Sequence", current_prefix)
-        if new_prefix is None:
+        current_prefix, current_sep, current_start = self._current_label_seed_from_project(
+            "sequence", "Seq"
+        )
+        current_label = f"{current_prefix}{current_sep}{current_start}"
+        new_label = self._prompt_prefix_dialog("Rename Sequence", current_label)
+        if new_label is None:
             return
-        cleaned = new_prefix.strip().rstrip(".")
-        if not cleaned or cleaned == current_prefix.rstrip("."):
+        cleaned = new_label.strip()
+        if not cleaned:
+            return
+        cleaned_no_dot = cleaned.rstrip(".")
+        match = _PREFIX_NUMBER_PATTERN.fullmatch(cleaned_no_dot)
+        if match:
+            prefix = (match.group(1) or current_prefix).strip() or current_prefix
+            separator = "." if "." in cleaned_no_dot else ""
+            try:
+                start_number = int(match.group(2))
+            except ValueError:
+                start_number = current_start
+        else:
+            prefix = cleaned_no_dot
+            separator = "." if "." in cleaned_no_dot else ""
+            start_number = current_start
+        if not prefix:
+            return
+        if (
+            prefix == current_prefix
+            and separator == current_sep
+            and int(start_number) == int(current_start)
+        ):
             return
         self._push_virtual_snapshot()
         self._apply_global_prefix_change(
             "sequence",
             StackingTableModel.COL_SEQUENCE,
-            cleaned,
+            prefix,
+            separator=separator,
+            start_number=start_number,
         )
 
     def _rename_all_ply(self) -> None:
-        current_prefix = self._current_ply_prefix()
-        new_prefix = self._prompt_prefix_dialog("Rename Ply", current_prefix)
-        if new_prefix is None:
+        current_prefix, current_sep, current_start = self._current_label_seed_from_project(
+            "ply_label", "Ply"
+        )
+        current_label = f"{current_prefix}{current_sep}{current_start}"
+        new_label = self._prompt_prefix_dialog("Rename Ply", current_label)
+        if new_label is None:
             return
-        cleaned = new_prefix.strip().rstrip(".")
-        if not cleaned or cleaned == current_prefix.rstrip("."):
+        cleaned = new_label.strip()
+        if not cleaned:
+            return
+        cleaned_no_dot = cleaned.rstrip(".")
+        match = _PREFIX_NUMBER_PATTERN.fullmatch(cleaned_no_dot)
+        if match:
+            prefix = (match.group(1) or current_prefix).strip() or current_prefix
+            separator = "." if "." in cleaned_no_dot else ""
+            try:
+                start_number = int(match.group(2))
+            except ValueError:
+                start_number = current_start
+        else:
+            prefix = cleaned_no_dot
+            separator = "." if "." in cleaned_no_dot else ""
+            start_number = current_start
+        if not prefix:
+            return
+        if (
+            prefix == current_prefix
+            and separator == current_sep
+            and int(start_number) == int(current_start)
+        ):
             return
         self._push_virtual_snapshot()
         self._apply_global_prefix_change(
             "ply_label",
             StackingTableModel.COL_PLY,
-            cleaned,
+            prefix,
+            separator=separator,
+            start_number=start_number,
         )
 
     def _auto_rename_if_enabled(self, laminate: Laminado) -> None:
@@ -2810,26 +2894,35 @@ class VirtualStackingWindow(QtWidgets.QDialog):
     def _sync_sequence_and_ply_labels(self, layers: list[Camada]) -> None:
         if not layers:
             return
-        seq_prefix, seq_sep = self._label_prefix_and_separator(layers, "sequence", "Seq")
-        ply_prefix, ply_sep = self._label_prefix_and_separator(layers, "ply_label", "Ply")
+        seq_prefix, seq_sep, seq_start = self._label_prefix_and_separator(
+            layers, "sequence", "Seq"
+        )
+        ply_prefix, ply_sep, ply_start = self._label_prefix_and_separator(
+            layers, "ply_label", "Ply"
+        )
         for idx, layer in enumerate(layers):
-            layer.sequence = f"{seq_prefix}{seq_sep}{idx + 1}"
-            layer.ply_label = f"{ply_prefix}{ply_sep}{idx + 1}"
+            layer.sequence = f"{seq_prefix}{seq_sep}{seq_start + idx}"
+            layer.ply_label = f"{ply_prefix}{ply_sep}{ply_start + idx}"
 
     def _label_prefix_and_separator(
         self,
         layers: list[Camada],
         attr: str,
         default_prefix: str,
-    ) -> tuple[str, str]:
-        for layer in layers:
+    ) -> tuple[str, str, int]:
+        for idx, layer in enumerate(layers):
             text = str(getattr(layer, attr, "") or "").strip()
             match = _PREFIX_NUMBER_PATTERN.fullmatch(text)
             if match:
-                prefix = match.group(1) or default_prefix
+                prefix = (match.group(1) or default_prefix).strip() or default_prefix
                 separator = "." if "." in text else ""
-                return prefix, separator
-        return default_prefix, "."
+                try:
+                    number = int(match.group(2))
+                except ValueError:
+                    number = idx + 1
+                start_number = max(1, number - idx)
+                return prefix, separator, start_number
+        return default_prefix, ".", 1
 
     def _split_center_row_groups(
         self,

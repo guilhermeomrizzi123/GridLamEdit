@@ -855,23 +855,34 @@ class StackingTableModel(QAbstractTableModel):
     def _should_record_undo(self) -> bool:
         return self._undo_stack is not None and self._undo_suppressed == 0
 
-    def _prefix_and_separator(self, attr: str, default_prefix: str) -> tuple[str, str]:
-        for camada in self._camadas:
+    def _prefix_and_separator(
+        self, attr: str, default_prefix: str
+    ) -> tuple[str, str, int]:
+        for idx, camada in enumerate(self._camadas):
             text = str(getattr(camada, attr, "") or "").strip()
             match = self._LABEL_PATTERN.fullmatch(text)
             if match:
                 prefix = match.group("prefix") or default_prefix
                 separator = "." if "." in text else ""
-                return prefix, separator
-        return default_prefix, "."
+                try:
+                    number = int(match.group("number"))
+                except ValueError:
+                    number = idx + 1
+                start_number = max(1, number - idx)
+                return prefix, separator, start_number
+        return default_prefix, ".", 1
 
     def _default_sequence_label(self, row: int) -> str:
-        prefix, separator = self._prefix_and_separator("sequence", "Seq")
-        return f"{prefix}{separator}{row + 1}"
+        prefix, separator, start_number = self._prefix_and_separator(
+            "sequence", "Seq"
+        )
+        return f"{prefix}{separator}{start_number + row}"
 
     def _default_ply_label(self, row: int) -> str:
-        prefix, separator = self._prefix_and_separator("ply_label", "Ply")
-        return f"{prefix}{separator}{row + 1}"
+        prefix, separator, start_number = self._prefix_and_separator(
+            "ply_label", "Ply"
+        )
+        return f"{prefix}{separator}{start_number + row}"
 
     def _normalize_sequence_input(self, value: object, row: int) -> Optional[str]:
         text = str(value or "").strip()
@@ -910,10 +921,12 @@ class StackingTableModel(QAbstractTableModel):
     def _force_sequence_sync(self) -> None:
         if not self._camadas:
             return
-        prefix, separator = self._prefix_and_separator("sequence", "Seq")
+        prefix, separator, start_number = self._prefix_and_separator(
+            "sequence", "Seq"
+        )
         changed_rows: list[int] = []
         for idx, camada in enumerate(self._camadas):
-            expected = f"{prefix}{separator}{idx + 1}"
+            expected = f"{prefix}{separator}{start_number + idx}"
             if camada.sequence != expected:
                 camada.sequence = expected
                 changed_rows.append(idx)
@@ -926,10 +939,12 @@ class StackingTableModel(QAbstractTableModel):
     def _force_ply_sync(self) -> None:
         if not self._camadas:
             return
-        prefix, separator = self._prefix_and_separator("ply_label", "Ply")
+        prefix, separator, start_number = self._prefix_and_separator(
+            "ply_label", "Ply"
+        )
         changed_rows: list[int] = []
         for idx, camada in enumerate(self._camadas):
-            expected = f"{prefix}{separator}{idx + 1}"
+            expected = f"{prefix}{separator}{start_number + idx}"
             if camada.ply_label != expected:
                 camada.ply_label = expected
                 changed_rows.append(idx)
