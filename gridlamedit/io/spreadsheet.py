@@ -94,7 +94,7 @@ DEFAULT_ROSETTE_LABEL = "Rosette.1"
 DEFAULT_COLOR_INDEX = 1
 MIN_COLOR_INDEX = 1
 MAX_COLOR_INDEX = 150
-MAX_CONTOUR_SIDES = 30
+MAX_CONTOUR_SIDES = 220
 _HEX_COLOR_PATTERN = re.compile(r"#?[0-9a-fA-F]{6}")
 ORIENTATION_SYMMETRY_ROLE = Qt.UserRole + 50  # Custom role to signal symmetric pairing.
 

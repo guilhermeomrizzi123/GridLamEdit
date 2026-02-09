@@ -9,7 +9,7 @@ from typing import Dict, Iterable, List, Sequence, Tuple
 from gridlamedit.io.spreadsheet import GridModel
 
 logger = logging.getLogger(__name__)
-MAX_CONTOUR_SIDES = 30
+MAX_CONTOUR_SIDES = 220
 
 
 def _normalize_contour_token(value: object) -> str:
