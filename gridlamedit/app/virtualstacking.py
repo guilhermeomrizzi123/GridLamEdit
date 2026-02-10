@@ -1256,7 +1256,7 @@ class VirtualStackingWindow(QtWidgets.QDialog):
         self.btn_export_virtual.setToolTip(
             "Exporta a planilha em .xlsx (template Grid Lam Vs Exported_RevC) para importação no CATIA."
         )
-        self.btn_export_virtual.setEnabled(False)
+        self.btn_export_virtual.setEnabled(True)
         self.btn_export_virtual.clicked.connect(self._export_virtual_stacking)
         toolbar.addWidget(self.btn_export_virtual)
 
@@ -1310,13 +1310,17 @@ class VirtualStackingWindow(QtWidgets.QDialog):
         return str(Path.home())
 
     def _export_virtual_stacking(self) -> None:
+        # Verificar se reordenação por vizinhança foi feita e mostrar aviso se não foi
         if hasattr(self, "btn_reorganize_neighbors") and not self.btn_reorganize_neighbors.isChecked():
-            QtWidgets.QMessageBox.information(
+            result = QtWidgets.QMessageBox.warning(
                 self,
-                "Export Virtual Stacking",
-                "Selecione 'Reorder by Neighborhood' para habilitar a exportação.",
+                "Aviso: Reordenação por Vizinhança não foi feita",
+                "A reordenação por vizinhança não foi realizada.\n\nVocê pode continuar com a exportação, mas tenha em mente que a ordem das células pode não estar otimizada segundo as regras de vizinhança.",
+                QtWidgets.QMessageBox.Ok | QtWidgets.QMessageBox.Cancel,
+                QtWidgets.QMessageBox.Cancel,
             )
-            return
+            if result == QtWidgets.QMessageBox.Cancel:
+                return
         if self._project is None or not getattr(self._project, "celulas_ordenadas", []):
             QtWidgets.QMessageBox.information(
                 self,
@@ -2694,8 +2698,6 @@ class VirtualStackingWindow(QtWidgets.QDialog):
             self._restore_virtual_snapshot(snapshot, keep_project_ref=True)
             laminate_names = [cell.laminate.nome for cell in self._cells]
             self._notify_changes(laminate_names, mark_dirty=False)
-        if hasattr(self, "btn_export_virtual"):
-            self.btn_export_virtual.setEnabled(False)
 
     def _neighbors_adjacency(self) -> dict[str, set[str]]:
         """Converte o mapeamento de vizinhos do projeto em um grafo não direcionado."""
