@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
     QGraphicsView,
     QLabel,
     QMessageBox,
+    QInputDialog,
     QPushButton,
     QStyle,
     QToolBar,
@@ -44,6 +45,7 @@ class IntermediateLaminateWindow(QDialog):
         self._min_cell_button: Optional[QPushButton] = None
         self._max_cell_button: Optional[QPushButton] = None
         self._distance_button: Optional[QPushButton] = None
+        self._distance_mm: Optional[float] = None
         self._cell_button_proxies: list[QGraphicsProxyWidget] = []
 
         main_layout = QVBoxLayout(self)
@@ -285,11 +287,29 @@ class IntermediateLaminateWindow(QDialog):
         return cells
 
     def _on_distance_button_clicked(self) -> None:
-        QMessageBox.information(
+        current = self._distance_mm if self._distance_mm is not None else 0.0
+        value, ok = QInputDialog.getDouble(
             self,
             "Distância entre Stringers",
-            "Funcionalidade em construção.",
+            "Espaço disponível para rampa de drop-off (mm):",
+            current,
+            0.0,
+            100000.0,
+            2,
         )
+        if not ok:
+            return
+        self._distance_mm = float(value)
+        if self._distance_button is not None:
+            if self._distance_mm.is_integer():
+                label = f"{int(self._distance_mm)} mm"
+            else:
+                label = f"{self._distance_mm:.2f} mm"
+            self._distance_button.setText(label)
+            self._distance_button.setFixedSize(
+                self._distance_button.sizeHint().width(),
+                self._distance_button.sizeHint().height(),
+            )
 
     def _setup_view_interaction(self) -> None:
         self.view.viewport().installEventFilter(self)
