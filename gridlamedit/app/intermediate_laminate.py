@@ -52,6 +52,7 @@ class IntermediateLaminateWindow(QDialog):
         self._dropoff_ratio_button: Optional[QPushButton] = None
         self._dropoff_ratio: Optional[tuple[int, int]] = None
         self._cell_button_proxies: list[QGraphicsProxyWidget] = []
+        self._summary_item: Optional[QGraphicsTextItem] = None
 
         main_layout = QVBoxLayout(self)
 
@@ -284,6 +285,8 @@ class IntermediateLaminateWindow(QDialog):
         summary_item.setPos(summary_x + 12.0, summary_y + 10.0)
         summary_item.setZValue(2)
         self.scene.addItem(summary_item)
+        self._summary_item = summary_item
+        self._update_summary_box()
 
     def _build_cell_select_button(self, text: str) -> QPushButton:
         button = QPushButton(text)
@@ -389,6 +392,7 @@ class IntermediateLaminateWindow(QDialog):
                 self._distance_button.sizeHint().width(),
                 self._distance_button.sizeHint().height(),
             )
+        self._update_summary_box()
 
     def _on_dropoff_ratio_clicked(self) -> None:
         current = self._dropoff_ratio or (1, 20)
@@ -406,6 +410,37 @@ class IntermediateLaminateWindow(QDialog):
                 self._dropoff_ratio_button.sizeHint().width(),
                 self._dropoff_ratio_button.sizeHint().height(),
             )
+        self._update_summary_box()
+
+    def _update_summary_box(self) -> None:
+        if self._summary_item is None:
+            return
+        if self._distance_mm is None:
+            distance_text = "—"
+        else:
+            distance_text = (
+                f"{int(self._distance_mm)} mm"
+                if self._distance_mm.is_integer()
+                else f"{self._distance_mm:.2f} mm"
+            )
+        if self._dropoff_ratio is None:
+            ratio_text = "—"
+        else:
+            ratio_text = f"{self._dropoff_ratio[0]}/{self._dropoff_ratio[1]}"
+
+        summary_html = (
+            "<div style='font-family:Segoe UI; font-size:11pt; color:#222;'>"
+            "<div style='font-weight:600; margin-bottom:6px;'>Resumo</div>"
+            "<table style='border-collapse:collapse;'>"
+            f"<tr><td>Espaço para Drop Off</td><td style='padding-left:16px;'>{distance_text}</td></tr>"
+            f"<tr><td>Razão de Drop Off</td><td style='padding-left:16px;'>{ratio_text}</td></tr>"
+            "<tr><td>Diferença de Camadas Entre Células</td><td style='padding-left:16px;'>—</td></tr>"
+            "</table>"
+            "<div style='margin:8px 0; border-bottom:1px solid #cfcfcf;'></div>"
+            "<div style='color:#555;'>Nesse espaço iremos adicionar o resultado<br>da análise.</div>"
+            "</div>"
+        )
+        self._summary_item.setHtml(summary_html)
 
 
 class DropoffRatioDialog(QDialog):
