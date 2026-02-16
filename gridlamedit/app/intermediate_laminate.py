@@ -8,6 +8,7 @@ from PySide6.QtCore import Qt, QSize, QEvent
 from PySide6.QtGui import QAction, QColor, QPainter, QPen, QBrush, QFont, QWheelEvent
 from PySide6.QtWidgets import (
     QDialog,
+    QDialogButtonBox,
     QGraphicsScene,
     QGraphicsProxyWidget,
     QGraphicsTextItem,
@@ -17,6 +18,7 @@ from PySide6.QtWidgets import (
     QInputDialog,
     QPushButton,
     QHBoxLayout,
+    QSpinBox,
     QStyle,
     QToolBar,
     QVBoxLayout,
@@ -48,6 +50,7 @@ class IntermediateLaminateWindow(QDialog):
         self._distance_button: Optional[QPushButton] = None
         self._distance_mm: Optional[float] = None
         self._dropoff_ratio_button: Optional[QPushButton] = None
+        self._dropoff_ratio: Optional[tuple[int, int]] = None
         self._cell_button_proxies: list[QGraphicsProxyWidget] = []
 
         main_layout = QVBoxLayout(self)
@@ -59,6 +62,7 @@ class IntermediateLaminateWindow(QDialog):
         main_layout.addLayout(top_bar)
         self._dropoff_ratio_button = dropoff_button
         dropoff_button.setStyleSheet("")
+        dropoff_button.clicked.connect(self._on_dropoff_ratio_clicked)
 
         self.view = QGraphicsView(self)
         self.view.setRenderHint(QPainter.Antialiasing, True)
@@ -284,31 +288,6 @@ class IntermediateLaminateWindow(QDialog):
             cells = sorted(self._model.cell_to_laminate.keys())
         return cells
 
-    def _on_distance_button_clicked(self) -> None:
-        current = self._distance_mm if self._distance_mm is not None else 0.0
-        value, ok = QInputDialog.getDouble(
-            self,
-            "Distância entre Stringers",
-            "Espaço disponível para rampa de drop-off (mm):",
-            current,
-            0.0,
-            100000.0,
-            2,
-        )
-        if not ok:
-            return
-        self._distance_mm = float(value)
-        if self._distance_button is not None:
-            if self._distance_mm.is_integer():
-                label = f"{int(self._distance_mm)} mm"
-            else:
-                label = f"{self._distance_mm:.2f} mm"
-            self._distance_button.setText(label)
-            self._distance_button.setFixedSize(
-                self._distance_button.sizeHint().width(),
-                self._distance_button.sizeHint().height(),
-            )
-
     def _setup_view_interaction(self) -> None:
         self.view.viewport().installEventFilter(self)
 
@@ -351,3 +330,96 @@ class IntermediateLaminateWindow(QDialog):
                 self._apply_zoom(factor)
                 return True
         return super().eventFilter(obj, event)
+
+    def _on_distance_button_clicked(self) -> None:
+        current = self._distance_mm if self._distance_mm is not None else 0.0
+        value, ok = QInputDialog.getDouble(
+            self,
+            "Distância entre Stringers",
+            "Espaço disponível para rampa de drop-off (mm):",
+            current,
+            0.0,
+            100000.0,
+            2,
+        )
+        if not ok:
+            return
+        self._distance_mm = float(value)
+        if self._distance_button is not None:
+            if self._distance_mm.is_integer():
+                label = f"{int(self._distance_mm)} mm"
+            else:
+                label = f"{self._distance_mm:.2f} mm"
+            self._distance_button.setText(label)
+            self._distance_button.setFixedSize(
+                self._distance_button.sizeHint().width(),
+                self._distance_button.sizeHint().height(),
+            )
+
+    def _on_dropoff_ratio_clicked(self) -> None:
+        current = self._dropoff_ratio or (1, 20)
+        dialog = DropoffRatioDialog(current[0], current[1], parent=self)
+        if dialog.exec() != QDialog.Accepted:
+            return
+        ratio = dialog.selected_ratio()
+        if ratio is None:
+            return
+        self._dropoff_ratio = ratio
+        if self._dropoff_ratio_button is not None:
+            num, den = ratio
+            self._dropoff_ratio_button.setText(f"Razão de Drop Off: {num}/{den}")
+            self._dropoff_ratio_button.setFixedSize(
+                self._dropoff_ratio_button.sizeHint().width(),
+                self._dropoff_ratio_button.sizeHint().height(),
+            )
+
+
+class DropoffRatioDialog(QDialog):
+    """Dialog to capture drop-off ratio (e.g., 1/20)."""
+
+    def __init__(self, numerator: int = 1, denominator: int = 20, parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Razão de Drop Off")
+        self.resize(320, 160)
+
+        layout = QVBoxLayout(self)
+
+        helper = QLabel("Informe a razão de drop-off (ex.: 1/20):", self)
+        layout.addWidget(helper)
+
+        row = QHBoxLayout()
+        self.numerator_spin = QSpinBox(self)
+        self.numerator_spin.setRange(1, 20)
+        self.numerator_spin.setValue(max(1, int(numerator)))
+        row.addWidget(self.numerator_spin)
+
+        slash = QLabel("/", self)
+        row.addWidget(slash)
+
+        self.denominator_spin = QSpinBox(self)
+        self.denominator_spin.setRange(1, 500)
+        self.denominator_spin.setValue(max(1, int(denominator)))
+        row.addWidget(self.denominator_spin)
+        row.addStretch(1)
+        layout.addLayout(row)
+
+        preview = QLabel(self)
+        preview.setText(self._preview_text())
+        layout.addWidget(preview)
+
+        def _update_preview() -> None:
+            preview.setText(self._preview_text())
+
+        self.numerator_spin.valueChanged.connect(_update_preview)
+        self.denominator_spin.valueChanged.connect(_update_preview)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel, parent=self)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _preview_text(self) -> str:
+        return f"Razão: {self.numerator_spin.value()}/{self.denominator_spin.value()}"
+
+    def selected_ratio(self) -> Optional[tuple[int, int]]:
+        return (self.numerator_spin.value(), self.denominator_spin.value())
