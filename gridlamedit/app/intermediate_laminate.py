@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QInputDialog,
     QPushButton,
+    QHBoxLayout,
     QStyle,
     QToolBar,
     QVBoxLayout,
@@ -46,9 +47,18 @@ class IntermediateLaminateWindow(QDialog):
         self._max_cell_button: Optional[QPushButton] = None
         self._distance_button: Optional[QPushButton] = None
         self._distance_mm: Optional[float] = None
+        self._dropoff_ratio_button: Optional[QPushButton] = None
         self._cell_button_proxies: list[QGraphicsProxyWidget] = []
 
         main_layout = QVBoxLayout(self)
+
+        top_bar = QHBoxLayout()
+        dropoff_button = self._build_cell_select_button("Razão de Drop Off")
+        dropoff_button.setMinimumWidth(180)
+        top_bar.addWidget(dropoff_button, alignment=Qt.AlignLeft)
+        main_layout.addLayout(top_bar)
+        self._dropoff_ratio_button = dropoff_button
+        dropoff_button.setStyleSheet("")
 
         self.view = QGraphicsView(self)
         self.view.setRenderHint(QPainter.Antialiasing, True)
@@ -189,9 +199,9 @@ class IntermediateLaminateWindow(QDialog):
                 button = self._build_cell_select_button(text)
                 proxy = QGraphicsProxyWidget()
                 proxy.setWidget(button)
-                button_width = max(460, button.sizeHint().width() + 20)
-                button_height = max(42, button.sizeHint().height() + 6)
-                button.setMinimumSize(button_width, button_height)
+                button_width = button.sizeHint().width()
+                button_height = button.sizeHint().height()
+                button.setFixedSize(button_width, button_height)
                 proxy.setPos(
                     margin_x + (block_width - button_width) / 2.0,
                     y + (height - button_height) / 2.0,
@@ -239,18 +249,6 @@ class IntermediateLaminateWindow(QDialog):
 
     def _build_cell_select_button(self, text: str) -> QPushButton:
         button = QPushButton(text)
-        button.setStyleSheet(
-            "QPushButton {"
-            "  background-color: rgba(255, 255, 255, 220);"
-            "  border: 1px solid #444;"
-            "  border-radius: 6px;"
-            "  padding: 6px 12px;"
-            "  font-weight: 600;"
-            "}"
-            "QPushButton:hover {"
-            "  background-color: rgba(255, 255, 255, 245);"
-            "}"
-        )
         return button
 
     def _select_cell(self, mode: str) -> None:
