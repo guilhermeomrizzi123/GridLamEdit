@@ -48,37 +48,6 @@ class IntermediateLaminateWindow(QDialog):
 
         main_layout = QVBoxLayout(self)
 
-        toolbar = QToolBar(self)
-        toolbar.setMovable(False)
-        toolbar.setToolButtonStyle(Qt.ToolButtonTextOnly)
-        toolbar.setIconSize(QSize(18, 18))
-        toolbar.setWindowTitle("Navegação")
-
-        zoom_in_action = QAction(self.style().standardIcon(QStyle.SP_ArrowUp), "Zoom +", self)
-        zoom_in_action.setToolTip("Aumentar zoom")
-        zoom_in_action.triggered.connect(lambda: self._apply_zoom(1.15))
-        toolbar.addAction(zoom_in_action)
-
-        zoom_out_action = QAction(self.style().standardIcon(QStyle.SP_ArrowDown), "Zoom -", self)
-        zoom_out_action.setToolTip("Diminuir zoom")
-        zoom_out_action.triggered.connect(lambda: self._apply_zoom(1 / 1.15))
-        toolbar.addAction(zoom_out_action)
-
-        reset_zoom_action = QAction(self.style().standardIcon(QStyle.SP_BrowserReload), "Reset Zoom", self)
-        reset_zoom_action.setToolTip("Restaurar zoom")
-        reset_zoom_action.triggered.connect(self._reset_zoom)
-        toolbar.addAction(reset_zoom_action)
-
-        center_action = QAction(self.style().standardIcon(QStyle.SP_ArrowRight), "Centralizar", self)
-        center_action.setToolTip("Centralizar visualização")
-        center_action.triggered.connect(self._center_view)
-        toolbar.addAction(center_action)
-
-        toolbar.addSeparator()
-        toolbar.addWidget(QLabel("Pan: botão do meio", self))
-
-        main_layout.addWidget(toolbar)
-
         self.view = QGraphicsView(self)
         self.view.setRenderHint(QPainter.Antialiasing, True)
         self.view.setBackgroundBrush(QColor(248, 248, 248))
@@ -247,12 +216,6 @@ class IntermediateLaminateWindow(QDialog):
                 self.scene.addItem(label)
             current_y += height
 
-        hint = QGraphicsTextItem(
-            "Use a roda do mouse para zoom e o botão do meio para deslocar."
-        )
-        hint.setDefaultTextColor(QColor(90, 90, 90))
-        hint.setPos(margin_x, margin_y - 10.0)
-        self.scene.addItem(hint)
 
         # Distance button label
         distance_button = self._build_cell_select_button("?(mm)")
