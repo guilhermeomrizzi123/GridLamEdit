@@ -9,9 +9,12 @@ from PySide6.QtGui import QAction, QColor, QPainter, QPen, QBrush, QFont, QWheel
 from PySide6.QtWidgets import (
     QDialog,
     QGraphicsScene,
+    QGraphicsProxyWidget,
     QGraphicsTextItem,
     QGraphicsView,
     QLabel,
+    QMessageBox,
+    QPushButton,
     QStyle,
     QToolBar,
     QVBoxLayout,
@@ -19,6 +22,7 @@ from PySide6.QtWidgets import (
 )
 
 from gridlamedit.io.spreadsheet import GridModel
+from gridlamedit.app.cell_neighbors import SelectCellDialog
 
 
 class IntermediateLaminateWindow(QDialog):
@@ -35,6 +39,11 @@ class IntermediateLaminateWindow(QDialog):
 
         self._model: Optional[GridModel] = None
         self._project_manager = None
+        self._selected_min_cell: Optional[str] = None
+        self._selected_max_cell: Optional[str] = None
+        self._min_cell_button: Optional[QPushButton] = None
+        self._max_cell_button: Optional[QPushButton] = None
+        self._cell_button_proxies: list[QGraphicsProxyWidget] = []
 
         main_layout = QVBoxLayout(self)
 
@@ -74,7 +83,7 @@ class IntermediateLaminateWindow(QDialog):
         self.view.setBackgroundBrush(QColor(248, 248, 248))
         self.view.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.view.setDragMode(QGraphicsView.NoDrag)
-        self.view.setInteractive(False)
+        self.view.setInteractive(True)
         main_layout.addWidget(self.view)
 
         self.scene = QGraphicsScene(self)
@@ -98,6 +107,7 @@ class IntermediateLaminateWindow(QDialog):
 
     def _build_schematic_scene(self) -> None:
         self.scene.clear()
+        self._cell_button_proxies.clear()
 
         width = 1800.0
         height = 920.0
@@ -158,16 +168,19 @@ class IntermediateLaminateWindow(QDialog):
                 QColor(153, 213, 92),
                 "SELECIONAR CELULA COM MENOR ESPESSURA",
                 green_height,
+                "min",
             ),
             (
                 QColor(248, 190, 60),
                 "NOVA CELULA COM NOVO LAMINADO",
                 orange_height,
+                "label",
             ),
             (
                 QColor(220, 220, 220),
                 "SELECIONAR CELULA COM MAIOR ESPESSURA",
                 blue_height,
+                "max",
             ),
         ]
 
@@ -176,7 +189,7 @@ class IntermediateLaminateWindow(QDialog):
         font.setBold(True)
 
         current_y = block_top
-        for color, text, height in sections:
+        for color, text, height, mode in sections:
             y = current_y
             rect_item = self.scene.addRect(
                 margin_x,
@@ -187,16 +200,37 @@ class IntermediateLaminateWindow(QDialog):
                 QBrush(color),
             )
             rect_item.setZValue(1)
-            label = QGraphicsTextItem(text)
-            label.setFont(font)
-            label.setDefaultTextColor(QColor(20, 20, 20))
-            label_rect = label.boundingRect()
-            label.setPos(
-                margin_x + (block_width - label_rect.width()) / 2.0,
-                y + (height - label_rect.height()) / 2.0,
-            )
-            label.setZValue(2)
-            self.scene.addItem(label)
+            if mode in {"min", "max"}:
+                button = self._build_cell_select_button(text)
+                proxy = QGraphicsProxyWidget()
+                proxy.setWidget(button)
+                button_width = max(460, button.sizeHint().width() + 20)
+                button_height = max(42, button.sizeHint().height() + 6)
+                button.setMinimumSize(button_width, button_height)
+                proxy.setPos(
+                    margin_x + (block_width - button_width) / 2.0,
+                    y + (height - button_height) / 2.0,
+                )
+                proxy.setZValue(2)
+                self.scene.addItem(proxy)
+                self._cell_button_proxies.append(proxy)
+                if mode == "min":
+                    self._min_cell_button = button
+                    button.clicked.connect(lambda _=False: self._select_cell("min"))
+                else:
+                    self._max_cell_button = button
+                    button.clicked.connect(lambda _=False: self._select_cell("max"))
+            else:
+                label = QGraphicsTextItem(text)
+                label.setFont(font)
+                label.setDefaultTextColor(QColor(20, 20, 20))
+                label_rect = label.boundingRect()
+                label.setPos(
+                    margin_x + (block_width - label_rect.width()) / 2.0,
+                    y + (height - label_rect.height()) / 2.0,
+                )
+                label.setZValue(2)
+                self.scene.addItem(label)
             current_y += height
 
         hint = QGraphicsTextItem(
@@ -205,6 +239,55 @@ class IntermediateLaminateWindow(QDialog):
         hint.setDefaultTextColor(QColor(90, 90, 90))
         hint.setPos(margin_x, margin_y - 10.0)
         self.scene.addItem(hint)
+
+    def _build_cell_select_button(self, text: str) -> QPushButton:
+        button = QPushButton(text)
+        button.setStyleSheet(
+            "QPushButton {"
+            "  background-color: rgba(255, 255, 255, 220);"
+            "  border: 1px solid #444;"
+            "  border-radius: 6px;"
+            "  padding: 6px 12px;"
+            "  font-weight: 600;"
+            "}"
+            "QPushButton:hover {"
+            "  background-color: rgba(255, 255, 255, 245);"
+            "}"
+        )
+        return button
+
+    def _select_cell(self, mode: str) -> None:
+        cells = self._available_cells()
+        if not cells:
+            QMessageBox.information(
+                self,
+                "Selecionar Celula",
+                "Carregue um projeto com celulas para selecionar.",
+            )
+            return
+        current = self._selected_min_cell if mode == "min" else self._selected_max_cell
+        dialog = SelectCellDialog(cells, current=current, parent=self)
+        if dialog.exec() != QDialog.Accepted:
+            return
+        selected = dialog.selected_cell()
+        if not selected:
+            return
+        if mode == "min":
+            self._selected_min_cell = selected
+            if self._min_cell_button is not None:
+                self._min_cell_button.setText(selected)
+        else:
+            self._selected_max_cell = selected
+            if self._max_cell_button is not None:
+                self._max_cell_button.setText(selected)
+
+    def _available_cells(self) -> list[str]:
+        if self._model is None:
+            return []
+        cells = list(self._model.celulas_ordenadas or [])
+        if not cells:
+            cells = sorted(self._model.cell_to_laminate.keys())
+        return cells
 
     def _setup_view_interaction(self) -> None:
         self.view.viewport().installEventFilter(self)
