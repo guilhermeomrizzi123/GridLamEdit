@@ -43,6 +43,7 @@ class IntermediateLaminateWindow(QDialog):
         self._selected_max_cell: Optional[str] = None
         self._min_cell_button: Optional[QPushButton] = None
         self._max_cell_button: Optional[QPushButton] = None
+        self._distance_button: Optional[QPushButton] = None
         self._cell_button_proxies: list[QGraphicsProxyWidget] = []
 
         main_layout = QVBoxLayout(self)
@@ -162,6 +163,19 @@ class IntermediateLaminateWindow(QDialog):
             label.setZValue(4)
             self.scene.addItem(label)
 
+        # Distance between stringers (red marker)
+        red_pen = QPen(QColor(220, 38, 38))
+        red_pen.setWidthF(3.0)
+        top_y = block_top + band_height
+        bottom_y = block_top + green_height
+        marker_x = margin_x + block_width + 18.0
+        red_main = self.scene.addLine(marker_x, top_y, marker_x, bottom_y, red_pen)
+        red_top = self.scene.addLine(marker_x - 10.0, top_y, marker_x + 10.0, top_y, red_pen)
+        red_bottom = self.scene.addLine(marker_x - 10.0, bottom_y, marker_x + 10.0, bottom_y, red_pen)
+        red_main.setZValue(6)
+        red_top.setZValue(6)
+        red_bottom.setZValue(6)
+
         # Main colored blocks
         sections = [
             (
@@ -240,6 +254,24 @@ class IntermediateLaminateWindow(QDialog):
         hint.setPos(margin_x, margin_y - 10.0)
         self.scene.addItem(hint)
 
+        # Distance button label
+        distance_button = self._build_cell_select_button("?(mm)")
+        distance_button.setStyleSheet(
+            distance_button.styleSheet()
+            + "QPushButton { text-align: center; padding: 4px 10px; }"
+        )
+        distance_proxy = QGraphicsProxyWidget()
+        distance_proxy.setWidget(distance_button)
+        distance_width = distance_button.sizeHint().width()
+        distance_height = distance_button.sizeHint().height()
+        distance_button.setFixedSize(distance_width, distance_height)
+        distance_proxy.setPos(marker_x + 18.0, top_y + (bottom_y - top_y) / 2.0 - distance_height / 2.0)
+        distance_proxy.setZValue(5)
+        self.scene.addItem(distance_proxy)
+        self._cell_button_proxies.append(distance_proxy)
+        self._distance_button = distance_button
+        distance_button.clicked.connect(self._on_distance_button_clicked)
+
     def _build_cell_select_button(self, text: str) -> QPushButton:
         button = QPushButton(text)
         button.setStyleSheet(
@@ -288,6 +320,13 @@ class IntermediateLaminateWindow(QDialog):
         if not cells:
             cells = sorted(self._model.cell_to_laminate.keys())
         return cells
+
+    def _on_distance_button_clicked(self) -> None:
+        QMessageBox.information(
+            self,
+            "Distância entre Stringers",
+            "Funcionalidade em construção.",
+        )
 
     def _setup_view_interaction(self) -> None:
         self.view.viewport().installEventFilter(self)
