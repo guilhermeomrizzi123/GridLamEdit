@@ -55,6 +55,11 @@ class IntermediateLaminateWindow(QDialog):
         self._layer_thickness_mm: Optional[float] = None
         self._cell_button_proxies: list[QGraphicsProxyWidget] = []
         self._summary_item: Optional[QGraphicsTextItem] = None
+        self._summary_rect = None
+        self._summary_min_height = 180.0
+        self._min_cell_label = "SELECIONAR CELULA COM MENOR ESPESSURA"
+        self._max_cell_label = "SELECIONAR CELULA COM MAIOR ESPESSURA"
+        self._distance_label = "?(mm)"
 
         main_layout = QVBoxLayout(self)
 
@@ -67,6 +72,10 @@ class IntermediateLaminateWindow(QDialog):
         thickness_button = self._build_cell_select_button("Espessura da Camada (mm)")
         thickness_button.setMinimumWidth(200)
         top_bar.addWidget(thickness_button)
+        top_bar.addStretch(1)
+        clear_button = self._build_cell_select_button("Limpar")
+        clear_button.setMinimumWidth(120)
+        top_bar.addWidget(clear_button)
         main_layout.addLayout(top_bar)
         self._dropoff_ratio_button = dropoff_button
         dropoff_button.setStyleSheet("")
@@ -74,6 +83,8 @@ class IntermediateLaminateWindow(QDialog):
         self._layer_thickness_button = thickness_button
         thickness_button.setStyleSheet("")
         thickness_button.clicked.connect(self._on_layer_thickness_clicked)
+        clear_button.setStyleSheet("")
+        clear_button.clicked.connect(self._on_clear_clicked)
 
         self.view = QGraphicsView(self)
         self.view.setRenderHint(QPainter.Antialiasing, True)
@@ -178,24 +189,14 @@ class IntermediateLaminateWindow(QDialog):
 
         # Main colored blocks
         sections = [
-            (
-                QColor(153, 213, 92),
-                "SELECIONAR CELULA COM MENOR ESPESSURA",
-                green_height,
-                "min",
-            ),
+            (QColor(153, 213, 92), self._min_cell_label, green_height, "min"),
             (
                 QColor(248, 190, 60),
                 "NOVA CELULA COM NOVO LAMINADO",
                 orange_height,
                 "label",
             ),
-            (
-                QColor(220, 220, 220),
-                "SELECIONAR CELULA COM MAIOR ESPESSURA",
-                blue_height,
-                "max",
-            ),
+            (QColor(220, 220, 220), self._max_cell_label, blue_height, "max"),
         ]
 
         font = QFont()
@@ -249,7 +250,7 @@ class IntermediateLaminateWindow(QDialog):
 
 
         # Distance button label
-        distance_button = self._build_cell_select_button("?(mm)")
+        distance_button = self._build_cell_select_button(self._distance_label)
         distance_button.setStyleSheet(
             distance_button.styleSheet()
             + "QPushButton { text-align: center; padding: 4px 10px; }"
@@ -270,7 +271,7 @@ class IntermediateLaminateWindow(QDialog):
         summary_x = margin_x - 10.0
         summary_y = block_top + block_height + 40.0
         summary_width = 620.0
-        summary_height = 180.0
+        summary_height = self._summary_min_height
         summary_rect = self.scene.addRect(
             summary_x,
             summary_y,
@@ -280,6 +281,7 @@ class IntermediateLaminateWindow(QDialog):
             QBrush(QColor(252, 252, 252)),
         )
         summary_rect.setZValue(1)
+        self._summary_rect = summary_rect
 
         summary_html = (
             "<div style='font-family:Segoe UI; font-size:11pt; color:#222;'>"
@@ -290,12 +292,13 @@ class IntermediateLaminateWindow(QDialog):
             "<tr><td>Diferença de Camadas Entre Células</td><td style='padding-left:16px;'>—</td></tr>"
             "</table>"
             "<div style='margin:8px 0; border-bottom:1px solid #cfcfcf;'></div>"
-            "<div style='color:#555;'>Nesse espaço iremos adicionar o resultado<br>da análise.</div>"
+            "<div style='color:#555;'>---</div>"
             "</div>"
         )
         summary_item = QGraphicsTextItem()
         summary_item.setHtml(summary_html)
         summary_item.setDefaultTextColor(QColor(20, 20, 20))
+        summary_item.setTextWidth(summary_width - 24.0)
         summary_item.setPos(summary_x + 12.0, summary_y + 10.0)
         summary_item.setZValue(2)
         self.scene.addItem(summary_item)
@@ -514,11 +517,15 @@ class IntermediateLaminateWindow(QDialog):
 
         diff_text = "—"
         ramp_text = "—"
+        diff_layers_value: Optional[int] = None
+        ramp_length_value: Optional[float] = None
+        step_length_value: Optional[float] = None
         if self._model is not None and self._selected_min_cell and self._selected_max_cell:
             count_a = self._count_oriented_layers_for_cell(self._selected_min_cell)
             count_b = self._count_oriented_layers_for_cell(self._selected_max_cell)
             if count_a is not None and count_b is not None:
                 diff_layers = abs(count_a - count_b)
+                diff_layers_value = diff_layers
                 diff_text = str(diff_layers)
                 if (
                     self._dropoff_ratio is not None
@@ -528,11 +535,33 @@ class IntermediateLaminateWindow(QDialog):
                 ):
                     num, den = self._dropoff_ratio
                     if num > 0:
-                        ramp_length = diff_layers * self._layer_thickness_mm * (den / num)
+                        step_length_value = self._layer_thickness_mm * (den / num)
+                        ramp_length = diff_layers * step_length_value
+                        ramp_length_value = ramp_length
                         if abs(ramp_length - int(ramp_length)) < 1e-6:
                             ramp_text = f"{int(ramp_length)} mm"
                         else:
                             ramp_text = f"{ramp_length:.2f} mm"
+
+        analysis_html = "---"
+        if (
+            self._distance_mm is not None
+            and ramp_length_value is not None
+            and diff_layers_value is not None
+            and step_length_value is not None
+            and step_length_value > 0
+        ):
+            if self._distance_mm < ramp_length_value:
+                max_layers = int(self._distance_mm / step_length_value)
+                reduce_by = max(0, diff_layers_value - max_layers)
+                analysis_html = (
+                    "O espaço para drop off não é suficiente para o "
+                    "comprimento da rampa de drop off.<br>"
+                    f"Reduza a diferença de camadas entre células em {reduce_by} "
+                    "para que a rampa caiba no espaço disponível."
+                )
+            else:
+                analysis_html = "O espaço para drop off é suficiente para a rampa de drop off."
 
         summary_html = (
             "<div style='font-family:Segoe UI; font-size:11pt; color:#222;'>"
@@ -545,10 +574,47 @@ class IntermediateLaminateWindow(QDialog):
             f"<tr><td>Comprimento da Rampa de Drop Off</td><td style='padding-left:16px;'>{ramp_text}</td></tr>"
             "</table>"
             "<div style='margin:8px 0; border-bottom:1px solid #cfcfcf;'></div>"
-            "<div style='color:#555;'>Nesse espaço iremos adicionar o resultado<br>da análise.</div>"
+            f"<div style='color:#555;'>{analysis_html}</div>"
             "</div>"
         )
         self._summary_item.setHtml(summary_html)
+        if self._summary_rect is not None:
+            rect = self._summary_rect.rect()
+            self._summary_item.setTextWidth(rect.width() - 24.0)
+            text_height = self._summary_item.boundingRect().height() + 20.0
+            new_height = max(self._summary_min_height, text_height)
+            if abs(new_height - rect.height()) > 0.5:
+                self._summary_rect.setRect(rect.x(), rect.y(), rect.width(), new_height)
+
+    def _on_clear_clicked(self) -> None:
+        self._distance_mm = None
+        self._dropoff_ratio = None
+        self._layer_thickness_mm = None
+        self._selected_min_cell = None
+        self._selected_max_cell = None
+        if self._distance_button is not None:
+            self._distance_button.setText(self._distance_label)
+            self._distance_button.setFixedSize(
+                self._distance_button.sizeHint().width(),
+                self._distance_button.sizeHint().height(),
+            )
+        if self._dropoff_ratio_button is not None:
+            self._dropoff_ratio_button.setText("Razão de Drop Off")
+            self._dropoff_ratio_button.setFixedSize(
+                self._dropoff_ratio_button.sizeHint().width(),
+                self._dropoff_ratio_button.sizeHint().height(),
+            )
+        if self._layer_thickness_button is not None:
+            self._layer_thickness_button.setText("Espessura da Camada (mm)")
+            self._layer_thickness_button.setFixedSize(
+                self._layer_thickness_button.sizeHint().width(),
+                self._layer_thickness_button.sizeHint().height(),
+            )
+        if self._min_cell_button is not None:
+            self._min_cell_button.setText(self._min_cell_label)
+        if self._max_cell_button is not None:
+            self._max_cell_button.setText(self._max_cell_label)
+        self._update_summary_box()
 
     def _count_oriented_layers_for_cell(self, cell_id: str) -> Optional[int]:
         if self._model is None:
