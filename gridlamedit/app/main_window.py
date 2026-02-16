@@ -97,6 +97,7 @@ from gridlamedit.app.dialogs.new_laminate_paste_dialog import NewLaminatePasteDi
 from gridlamedit.app.dialogs.stacking_summary_dialog import StackingSummaryDialog
 from gridlamedit.app.virtualstacking import VirtualStackingWindow
 from gridlamedit.app.cell_neighbors import CellNeighborsWindow
+from gridlamedit.app.intermediate_laminate import IntermediateLaminateWindow
 from gridlamedit.core.project_manager import ProjectManager
 from gridlamedit.core.paths import package_path
 from gridlamedit.io.spreadsheet import (
@@ -339,6 +340,7 @@ class MainWindow(QMainWindow):
         self._new_laminate_dialog: Optional[NewLaminateDialog] = None
         self._virtual_stacking_window: Optional[VirtualStackingWindow] = None
         self._cell_neighbors_window: Optional[CellNeighborsWindow] = None
+        self._intermediate_laminate_window: Optional[IntermediateLaminateWindow] = None
         self._new_laminate_button_icon: Optional[QIcon] = None
         self._new_laminate_icon_warning_emitted = False
         self._setting_new_laminate_name = False
@@ -529,6 +531,13 @@ class MainWindow(QMainWindow):
                 QKeySequence("Ctrl+Shift+N"),
             ),
             (
+                "intermediate_laminate_action",
+                "Sugestão de Laminado Intermediário",
+                self.open_intermediate_laminate,
+                "Abrir a interface para sugerir laminado intermediário.",
+                None,
+            ),
+            (
                 "reassociate_contours_action",
                 "Reassociar Laminados por Contorno",
                 self._reassociate_by_contours,
@@ -598,6 +607,7 @@ class MainWindow(QMainWindow):
         tools_menu = menu_bar.addMenu("Tools")
         tools_menu.addAction(self.virtual_stacking_action)
         tools_menu.addAction(self.cell_neighbors_action)
+        tools_menu.addAction(self.intermediate_laminate_action)
         tools_menu.addAction(self.reassociate_contours_action)
         tools_menu.addAction(self.compare_laminates_action)
         tools_menu.addAction(self.compare_all_laminates_action)
@@ -652,6 +662,17 @@ class MainWindow(QMainWindow):
         self._cell_neighbors_window.show()
         self._cell_neighbors_window.raise_()
         self._cell_neighbors_window.activateWindow()
+
+    def open_intermediate_laminate(self) -> None:
+        """Open the intermediate laminate suggestion dialog."""
+        if self._intermediate_laminate_window is None:
+            self._intermediate_laminate_window = IntermediateLaminateWindow(self)
+        self._intermediate_laminate_window.populate_from_project(
+            self._grid_model, self.project_manager
+        )
+        self._intermediate_laminate_window.show()
+        self._intermediate_laminate_window.raise_()
+        self._intermediate_laminate_window.activateWindow()
 
     def _on_compare_laminates(self) -> None:
         if self._grid_model is None or not self._grid_model.laminados:
@@ -4008,6 +4029,13 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
             self._cell_neighbors_window = None
+
+        if self._intermediate_laminate_window is not None:
+            try:
+                self._intermediate_laminate_window.close()
+            except Exception:
+                pass
+            self._intermediate_laminate_window = None
 
         binding = getattr(self, "_grid_binding", None)
         if binding is not None:
