@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from PySide6.QtCore import Qt, QSize, QEvent
+from PySide6.QtCore import Qt, QSize, QEvent, QPoint
 from PySide6.QtGui import QAction, QColor, QPainter, QPen, QBrush, QFont, QWheelEvent
 from PySide6.QtWidgets import (
     QDialog,
@@ -81,17 +81,21 @@ class IntermediateLaminateWindow(QDialog):
         self.view.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.view.setDragMode(QGraphicsView.NoDrag)
         self.view.setInteractive(True)
+        self.view.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.view.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         main_layout.addWidget(self.view)
 
         self.scene = QGraphicsScene(self)
-        self.scene.setSceneRect(0, 0, 2000, 1200)
+        self.scene.setSceneRect(-50000, -50000, 100000, 100000)
         self.view.setScene(self.scene)
 
         self._is_panning = False
-        self._last_pan_point = None
+        self._last_pan_point: Optional[QPoint] = None
+        self._last_pan_scene_pos = None
         self._setup_view_interaction()
 
         self._build_schematic_scene()
+        self._center_view()
 
     def populate_from_project(self, model: Optional[GridModel], project_manager=None) -> None:
         """Store references for future use (interface still in construction)."""
@@ -108,7 +112,7 @@ class IntermediateLaminateWindow(QDialog):
 
         width = 1800.0
         height = 920.0
-        self.scene.setSceneRect(0, 0, width, height)
+        self.scene.setSceneRect(-50000, -50000, 100000, 100000)
 
         margin_x = 160.0
         margin_y = 80.0
@@ -297,9 +301,11 @@ class IntermediateLaminateWindow(QDialog):
         self.scene.addItem(summary_item)
         self._summary_item = summary_item
         self._update_summary_box()
+        self._center_view()
 
     def _build_cell_select_button(self, text: str) -> QPushButton:
         button = QPushButton(text)
+        button.installEventFilter(self)
         return button
 
     def _select_cell(self, mode: str) -> None:
@@ -338,6 +344,8 @@ class IntermediateLaminateWindow(QDialog):
 
     def _setup_view_interaction(self) -> None:
         self.view.viewport().installEventFilter(self)
+        self.view.installEventFilter(self)
+        self.view.setMouseTracking(True)
 
     def _apply_zoom(self, factor: float) -> None:
         self.view.scale(factor, factor)
@@ -346,30 +354,28 @@ class IntermediateLaminateWindow(QDialog):
         self.view.resetTransform()
 
     def _center_view(self) -> None:
-        rect = self.scene.sceneRect()
+        if self.scene is None or self.view is None:
+            return
+        rect = self.scene.itemsBoundingRect()
+        if rect.isNull():
+            rect = self.scene.sceneRect()
         self.view.centerOn(rect.center())
 
     def eventFilter(self, obj, event):
-        if obj is self.view.viewport():
+        if not hasattr(self, "view"):
+            return super().eventFilter(obj, event)
+        if obj is self.view or obj is self.view.viewport() or isinstance(obj, QPushButton):
             if event.type() == QEvent.MouseButtonPress and event.button() == Qt.MiddleButton:
-                self._is_panning = True
-                self._last_pan_point = event.pos()
+                global_pos = event.globalPosition().toPoint()
+                self._start_pan(global_pos)
                 return True
             if event.type() == QEvent.MouseMove and self._is_panning and self._last_pan_point is not None:
-                delta = event.pos() - self._last_pan_point
-                self._last_pan_point = event.pos()
-                self.view.horizontalScrollBar().setValue(
-                    self.view.horizontalScrollBar().value() - delta.x()
-                )
-                self.view.verticalScrollBar().setValue(
-                    self.view.verticalScrollBar().value() - delta.y()
-                )
+                self._pan_to(event.globalPosition().toPoint())
                 return True
             if event.type() == QEvent.MouseButtonRelease and event.button() == Qt.MiddleButton:
-                self._is_panning = False
-                self._last_pan_point = None
+                self._end_pan()
                 return True
-            if event.type() == QEvent.Wheel:
+            if obj is self.view.viewport() and event.type() == QEvent.Wheel:
                 wheel: QWheelEvent = event
                 if wheel.modifiers() & Qt.ControlModifier:
                     return False
@@ -378,6 +384,38 @@ class IntermediateLaminateWindow(QDialog):
                 self._apply_zoom(factor)
                 return True
         return super().eventFilter(obj, event)
+
+    def _start_pan(self, global_pos: QPoint) -> None:
+        self._is_panning = True
+        self._last_pan_point = global_pos
+        viewport_pos = self.view.viewport().mapFromGlobal(global_pos)
+        self._last_pan_scene_pos = self.view.mapToScene(viewport_pos)
+        self.view.viewport().setCursor(Qt.ClosedHandCursor)
+        self.view.viewport().grabMouse()
+
+    def _pan_to(self, global_pos: QPoint) -> None:
+        if self._last_pan_point is None:
+            self._last_pan_point = global_pos
+            return
+        viewport_pos = self.view.viewport().mapFromGlobal(global_pos)
+        current_scene_pos = self.view.mapToScene(viewport_pos)
+        if self._last_pan_scene_pos is None:
+            self._last_pan_scene_pos = current_scene_pos
+            return
+        delta = current_scene_pos - self._last_pan_scene_pos
+        self._last_pan_scene_pos = current_scene_pos
+        self.view.centerOn(self.view.mapToScene(self.view.viewport().rect().center()) - delta)
+
+    def _end_pan(self) -> None:
+        self._is_panning = False
+        self._last_pan_point = None
+        self._last_pan_scene_pos = None
+        self.view.viewport().releaseMouse()
+        self.view.viewport().unsetCursor()
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        self._center_view()
 
     def _on_distance_button_clicked(self) -> None:
         current = self._distance_mm if self._distance_mm is not None else 0.0
