@@ -251,6 +251,40 @@ class IntermediateLaminateWindow(QDialog):
         self._distance_button = distance_button
         distance_button.clicked.connect(self._on_distance_button_clicked)
 
+        # Summary box
+        summary_x = margin_x - 10.0
+        summary_y = block_top + block_height + 40.0
+        summary_width = 620.0
+        summary_height = 180.0
+        summary_rect = self.scene.addRect(
+            summary_x,
+            summary_y,
+            summary_width,
+            summary_height,
+            QPen(QColor(160, 160, 160), 1.2),
+            QBrush(QColor(252, 252, 252)),
+        )
+        summary_rect.setZValue(1)
+
+        summary_html = (
+            "<div style='font-family:Segoe UI; font-size:11pt; color:#222;'>"
+            "<div style='font-weight:600; margin-bottom:6px;'>Resumo</div>"
+            "<table style='border-collapse:collapse;'>"
+            "<tr><td>Espaço para Drop Off</td><td style='padding-left:16px;'>—</td></tr>"
+            "<tr><td>Razão de Drop Off</td><td style='padding-left:16px;'>—</td></tr>"
+            "<tr><td>Diferença de Camadas Entre Células</td><td style='padding-left:16px;'>—</td></tr>"
+            "</table>"
+            "<div style='margin:8px 0; border-bottom:1px solid #cfcfcf;'></div>"
+            "<div style='color:#555;'>Nesse espaço iremos adicionar o resultado<br>da análise.</div>"
+            "</div>"
+        )
+        summary_item = QGraphicsTextItem()
+        summary_item.setHtml(summary_html)
+        summary_item.setDefaultTextColor(QColor(20, 20, 20))
+        summary_item.setPos(summary_x + 12.0, summary_y + 10.0)
+        summary_item.setZValue(2)
+        self.scene.addItem(summary_item)
+
     def _build_cell_select_button(self, text: str) -> QPushButton:
         button = QPushButton(text)
         return button
