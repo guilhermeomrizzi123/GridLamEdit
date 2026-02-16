@@ -25,7 +25,7 @@ from PySide6.QtWidgets import (
     QSizePolicy,
 )
 
-from gridlamedit.io.spreadsheet import GridModel
+from gridlamedit.io.spreadsheet import GridModel, count_oriented_layers
 from gridlamedit.app.cell_neighbors import SelectCellDialog
 
 
@@ -51,19 +51,29 @@ class IntermediateLaminateWindow(QDialog):
         self._distance_mm: Optional[float] = None
         self._dropoff_ratio_button: Optional[QPushButton] = None
         self._dropoff_ratio: Optional[tuple[int, int]] = None
+        self._layer_thickness_button: Optional[QPushButton] = None
+        self._layer_thickness_mm: Optional[float] = None
         self._cell_button_proxies: list[QGraphicsProxyWidget] = []
         self._summary_item: Optional[QGraphicsTextItem] = None
 
         main_layout = QVBoxLayout(self)
 
         top_bar = QHBoxLayout()
+        top_bar.setSpacing(8)
+        top_bar.setAlignment(Qt.AlignLeft)
         dropoff_button = self._build_cell_select_button("Razão de Drop Off")
         dropoff_button.setMinimumWidth(180)
-        top_bar.addWidget(dropoff_button, alignment=Qt.AlignLeft)
+        top_bar.addWidget(dropoff_button)
+        thickness_button = self._build_cell_select_button("Espessura da Camada (mm)")
+        thickness_button.setMinimumWidth(200)
+        top_bar.addWidget(thickness_button)
         main_layout.addLayout(top_bar)
         self._dropoff_ratio_button = dropoff_button
         dropoff_button.setStyleSheet("")
         dropoff_button.clicked.connect(self._on_dropoff_ratio_clicked)
+        self._layer_thickness_button = thickness_button
+        thickness_button.setStyleSheet("")
+        thickness_button.clicked.connect(self._on_layer_thickness_clicked)
 
         self.view = QGraphicsView(self)
         self.view.setRenderHint(QPainter.Antialiasing, True)
@@ -316,6 +326,7 @@ class IntermediateLaminateWindow(QDialog):
             self._selected_max_cell = selected
             if self._max_cell_button is not None:
                 self._max_cell_button.setText(selected)
+        self._update_summary_box()
 
     def _available_cells(self) -> list[str]:
         if self._model is None:
@@ -412,6 +423,32 @@ class IntermediateLaminateWindow(QDialog):
             )
         self._update_summary_box()
 
+    def _on_layer_thickness_clicked(self) -> None:
+        current = self._layer_thickness_mm if self._layer_thickness_mm is not None else 0.0
+        value, ok = QInputDialog.getDouble(
+            self,
+            "Espessura da Camada",
+            "Informe a espessura da camada (mm):",
+            current,
+            0.0,
+            1000.0,
+            3,
+        )
+        if not ok:
+            return
+        self._layer_thickness_mm = float(value)
+        if self._layer_thickness_button is not None:
+            if self._layer_thickness_mm.is_integer():
+                label = f"Espessura: {int(self._layer_thickness_mm)} mm"
+            else:
+                label = f"Espessura: {self._layer_thickness_mm:.3f} mm"
+            self._layer_thickness_button.setText(label)
+            self._layer_thickness_button.setFixedSize(
+                self._layer_thickness_button.sizeHint().width(),
+                self._layer_thickness_button.sizeHint().height(),
+            )
+        self._update_summary_box()
+
     def _update_summary_box(self) -> None:
         if self._summary_item is None:
             return
@@ -428,19 +465,66 @@ class IntermediateLaminateWindow(QDialog):
         else:
             ratio_text = f"{self._dropoff_ratio[0]}/{self._dropoff_ratio[1]}"
 
+        if self._layer_thickness_mm is None:
+            thickness_text = "—"
+        else:
+            thickness_text = (
+                f"{int(self._layer_thickness_mm)} mm"
+                if self._layer_thickness_mm.is_integer()
+                else f"{self._layer_thickness_mm:.3f} mm"
+            )
+
+        diff_text = "—"
+        ramp_text = "—"
+        if self._model is not None and self._selected_min_cell and self._selected_max_cell:
+            count_a = self._count_oriented_layers_for_cell(self._selected_min_cell)
+            count_b = self._count_oriented_layers_for_cell(self._selected_max_cell)
+            if count_a is not None and count_b is not None:
+                diff_layers = abs(count_a - count_b)
+                diff_text = str(diff_layers)
+                if (
+                    self._dropoff_ratio is not None
+                    and diff_layers > 0
+                    and self._layer_thickness_mm is not None
+                    and self._layer_thickness_mm > 0
+                ):
+                    num, den = self._dropoff_ratio
+                    if num > 0:
+                        ramp_length = diff_layers * self._layer_thickness_mm * (den / num)
+                        if abs(ramp_length - int(ramp_length)) < 1e-6:
+                            ramp_text = f"{int(ramp_length)} mm"
+                        else:
+                            ramp_text = f"{ramp_length:.2f} mm"
+
         summary_html = (
             "<div style='font-family:Segoe UI; font-size:11pt; color:#222;'>"
             "<div style='font-weight:600; margin-bottom:6px;'>Resumo</div>"
             "<table style='border-collapse:collapse;'>"
             f"<tr><td>Espaço para Drop Off</td><td style='padding-left:16px;'>{distance_text}</td></tr>"
             f"<tr><td>Razão de Drop Off</td><td style='padding-left:16px;'>{ratio_text}</td></tr>"
-            "<tr><td>Diferença de Camadas Entre Células</td><td style='padding-left:16px;'>—</td></tr>"
+            f"<tr><td>Espessura da Camada</td><td style='padding-left:16px;'>{thickness_text}</td></tr>"
+            f"<tr><td>Diferença de Camadas Entre Células</td><td style='padding-left:16px;'>{diff_text}</td></tr>"
+            f"<tr><td>Comprimento da Rampa de Drop Off</td><td style='padding-left:16px;'>{ramp_text}</td></tr>"
             "</table>"
             "<div style='margin:8px 0; border-bottom:1px solid #cfcfcf;'></div>"
             "<div style='color:#555;'>Nesse espaço iremos adicionar o resultado<br>da análise.</div>"
             "</div>"
         )
         self._summary_item.setHtml(summary_html)
+
+    def _count_oriented_layers_for_cell(self, cell_id: str) -> Optional[int]:
+        if self._model is None:
+            return None
+        laminate_name = self._model.cell_to_laminate.get(cell_id)
+        if not laminate_name:
+            return None
+        laminate = self._model.laminados.get(laminate_name)
+        if laminate is None:
+            return None
+        try:
+            return int(count_oriented_layers(laminate.camadas))
+        except Exception:
+            return None
 
 
 class DropoffRatioDialog(QDialog):
