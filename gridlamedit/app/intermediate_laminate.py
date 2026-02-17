@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Optional
+import math
 import copy
 
 from PySide6.QtCore import Qt, QSize, QEvent, QPoint
@@ -27,6 +28,9 @@ from PySide6.QtWidgets import (
     QTableWidget,
     QTableWidgetItem,
     QHeaderView,
+    QAbstractItemView,
+    QStyledItemDelegate,
+    QComboBox,
 )
 
 from gridlamedit.io.spreadsheet import (
@@ -36,6 +40,7 @@ from gridlamedit.io.spreadsheet import (
     count_oriented_layers,
     normalize_angle,
     format_orientation_value,
+    orientation_highlight_color,
 )
 from gridlamedit.app.cell_neighbors import SelectCellDialog
 from gridlamedit.services.laminate_checks import (
@@ -567,6 +572,7 @@ class IntermediateLaminateWindow(QDialog):
         analysis_html = "---"
         self._analysis_requires_reduction = False
         self._reduce_layers_needed = None
+        center_note = ""
         if (
             self._distance_mm is not None
             and ramp_length_value is not None
@@ -577,6 +583,16 @@ class IntermediateLaminateWindow(QDialog):
             if self._distance_mm < ramp_length_value:
                 max_layers = int(self._distance_mm / step_length_value)
                 reduce_by = max(0, diff_layers_value - max_layers)
+                if reduce_by % 2 == 1:
+                    min_laminate = self._laminate_for_cell(self._selected_min_cell)
+                    max_laminate = self._laminate_for_cell(self._selected_max_cell)
+                    if min_laminate is not None and max_laminate is not None:
+                        if not self._has_center_excess(max_laminate, min_laminate):
+                            reduce_by += 1
+                            center_note = (
+                                "<br>Para manter simetria e balanceamento, "
+                                "o número de camadas removidas foi ajustado para um número par."
+                            )
                 if reduce_by == 1:
                     reduce_by = 2
                 self._analysis_requires_reduction = reduce_by > 0
@@ -595,6 +611,7 @@ class IntermediateLaminateWindow(QDialog):
                         "comprimento da rampa de drop off.<br>"
                         f"Reduza a diferença de camadas entre células em {reduce_by} "
                         "para que a rampa caiba no espaço disponível."
+                        f"{center_note}"
                     )
             else:
                 analysis_html = "O espaço para drop off é suficiente para a rampa de drop off."
@@ -724,10 +741,25 @@ class IntermediateLaminateWindow(QDialog):
             )
             return
 
+        allow_non_45 = True
+        if not self._has_excess_45_layers(max_laminate, min_laminate):
+            reply = QMessageBox.question(
+                self,
+                "Criar Laminado Intermediário",
+                "Não existem camadas excedentes em 45° ou -45° para remoção. "
+                "Deseja permitir remoção em outras orientações?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if reply != QMessageBox.Yes:
+                return
+            allow_non_45 = True
+
         new_laminate, error = self._build_intermediate_laminate(
             max_laminate,
             min_laminate,
             self._reduce_layers_needed,
+            allow_non_45,
         )
         if new_laminate is None:
             QMessageBox.warning(
@@ -755,11 +787,71 @@ class IntermediateLaminateWindow(QDialog):
             return None
         return self._model.laminados.get(laminate_name)
 
+    def _has_center_excess(self, max_laminate: Laminado, min_laminate: Laminado) -> bool:
+        max_layers = list(getattr(max_laminate, "camadas", []) or [])
+        min_layers = list(getattr(min_laminate, "camadas", []) or [])
+        if len(max_layers) % 2 == 0:
+            return False
+        center_idx = len(max_layers) // 2
+        if not (0 <= center_idx < len(max_layers)):
+            return False
+
+        def _orientation_token(layer: Camada) -> Optional[float]:
+            try:
+                value = getattr(layer, "orientacao", None)
+            except Exception:
+                return None
+            if value is None:
+                return None
+            try:
+                return normalize_angle(value)
+            except Exception:
+                return None
+
+        max_token = _orientation_token(max_layers[center_idx])
+        min_token = None
+        if 0 <= center_idx < len(min_layers):
+            min_token = _orientation_token(min_layers[center_idx])
+        if max_token is None:
+            return False
+        return max_token != min_token
+
+    def _has_excess_45_layers(self, max_laminate: Laminado, min_laminate: Laminado) -> bool:
+        def _orientation_token(layer: Camada) -> Optional[float]:
+            try:
+                value = getattr(layer, "orientacao", None)
+            except Exception:
+                return None
+            if value is None:
+                return None
+            try:
+                return normalize_angle(value)
+            except Exception:
+                return None
+
+        def _count_tokens(layers_list: list[Camada]) -> dict[float, int]:
+            counts: dict[float, int] = {}
+            for layer in layers_list:
+                token = _orientation_token(layer)
+                if token is None:
+                    continue
+                counts[token] = counts.get(token, 0) + 1
+            return counts
+
+        max_counts = _count_tokens(list(getattr(max_laminate, "camadas", []) or []))
+        min_counts = _count_tokens(list(getattr(min_laminate, "camadas", []) or []))
+        for angle in (45.0, -45.0):
+            excess = max_counts.get(angle, 0) - min_counts.get(angle, 0)
+            if excess > 0:
+                return True
+        return False
+
     def _build_intermediate_laminate(
         self,
         max_laminate: Laminado,
         min_laminate: Laminado,
         reduce_by: int,
+        allow_non_45: bool,
     ) -> tuple[Optional[Laminado], Optional[str]]:
         if reduce_by <= 0:
             return None, "Nenhuma redução de camadas é necessária."
@@ -803,7 +895,23 @@ class IntermediateLaminateWindow(QDialog):
                 "Não existem camadas suficientes com orientações excedentes para atender a redução necessária.",
             )
 
-        pairs: list[tuple[int, int, float, float]] = []
+        preferred_pairs: list[tuple[int, int, float, float, int]] = []
+        other_pairs: list[tuple[int, int, float, float, int]] = []
+        min_layers = list(getattr(min_laminate, "camadas", []) or [])
+
+        def _row_priority(idx: int, jdx: int, token_a: float, token_b: float) -> int:
+            score = 0
+            min_token_a = None
+            min_token_b = None
+            if 0 <= idx < len(min_layers):
+                min_token_a = _orientation_token(min_layers[idx])
+            if 0 <= jdx < len(min_layers):
+                min_token_b = _orientation_token(min_layers[jdx])
+            if min_token_a != token_a:
+                score += 1
+            if min_token_b != token_b:
+                score += 1
+            return score
         for idx in range(len(layers) // 2):
             jdx = len(layers) - 1 - idx
             token_a = _orientation_token(layers[idx])
@@ -812,7 +920,22 @@ class IntermediateLaminateWindow(QDialog):
                 continue
             if token_a not in excess_counts or token_b not in excess_counts:
                 continue
-            pairs.append((idx, jdx, token_a, token_b))
+            is_preferred = (
+                math.isclose(token_a, 45.0, abs_tol=1e-6)
+                or math.isclose(token_a, -45.0, abs_tol=1e-6)
+            ) and (
+                math.isclose(token_b, 45.0, abs_tol=1e-6)
+                or math.isclose(token_b, -45.0, abs_tol=1e-6)
+            )
+            priority = _row_priority(idx, jdx, token_a, token_b)
+            if is_preferred:
+                preferred_pairs.append((idx, jdx, token_a, token_b, priority))
+            else:
+                other_pairs.append((idx, jdx, token_a, token_b, priority))
+
+        preferred_pairs.sort(key=lambda item: item[4], reverse=True)
+        other_pairs.sort(key=lambda item: item[4], reverse=True)
+
 
         center_idx: Optional[int] = None
         center_token: Optional[float] = None
@@ -848,16 +971,17 @@ class IntermediateLaminateWindow(QDialog):
             return new_layers
 
         def _search(
+            pairs_list: list[tuple[int, int, float, float, int]],
             pair_idx: int,
             remaining: int,
             available: dict[float, int],
-            selected_pairs: list[tuple[int, int, float, float]],
+            selected_pairs: list[tuple[int, int, float, float, int]],
         ) -> Optional[set[int]]:
             if remaining == 0:
                 indices: set[int] = set()
                 if use_center and center_idx is not None:
                     indices.add(center_idx)
-                for i, j, _, _ in selected_pairs:
+                for i, j, _, _, _ in selected_pairs:
                     indices.update([i, j])
                 new_layers = _apply_removal(indices)
                 if not evaluate_symmetry_for_layers(new_layers).is_symmetric:
@@ -866,12 +990,12 @@ class IntermediateLaminateWindow(QDialog):
                     return None
                 return indices
 
-            if pair_idx >= len(pairs):
+            if pair_idx >= len(pairs_list):
                 return None
-            if remaining > (len(pairs) - pair_idx):
+            if remaining > (len(pairs_list) - pair_idx):
                 return None
 
-            idx, jdx, token_a, token_b = pairs[pair_idx]
+            idx, jdx, token_a, token_b, _priority = pairs_list[pair_idx]
             can_include = False
             if token_a == token_b:
                 can_include = available.get(token_a, 0) >= 2
@@ -884,8 +1008,8 @@ class IntermediateLaminateWindow(QDialog):
                 else:
                     available[token_a] -= 1
                     available[token_b] -= 1
-                selected_pairs.append((idx, jdx, token_a, token_b))
-                found = _search(pair_idx + 1, remaining - 1, available, selected_pairs)
+                selected_pairs.append((idx, jdx, token_a, token_b, _priority))
+                found = _search(pairs_list, pair_idx + 1, remaining - 1, available, selected_pairs)
                 if found is not None:
                     return found
                 selected_pairs.pop()
@@ -895,15 +1019,21 @@ class IntermediateLaminateWindow(QDialog):
                     available[token_a] += 1
                     available[token_b] += 1
 
-            return _search(pair_idx + 1, remaining, available, selected_pairs)
+            return _search(pairs_list, pair_idx + 1, remaining, available, selected_pairs)
 
-        available_counts = dict(excess_counts)
-        if use_center and center_token is not None:
-            if available_counts.get(center_token, 0) < 1:
-                return None, "Não há camadas excedentes disponíveis para a redução necessária."
-            available_counts[center_token] -= 1
+        def _try_with_pairs(pairs_list: list[tuple[int, int, float, float, int]]) -> Optional[set[int]]:
+            if remaining_pairs > 0 and not pairs_list:
+                return None
+            available_counts = dict(excess_counts)
+            if use_center and center_token is not None:
+                if available_counts.get(center_token, 0) < 1:
+                    return None
+                available_counts[center_token] -= 1
+            return _search(pairs_list, 0, remaining_pairs, available_counts, [])
 
-        indices = _search(0, remaining_pairs, available_counts, [])
+        indices = _try_with_pairs(preferred_pairs)
+        if indices is None and allow_non_45:
+            indices = _try_with_pairs(preferred_pairs + other_pairs)
         if indices is None:
             return (
                 None,
@@ -1017,21 +1147,52 @@ class IntermediateLaminatePreviewDialog(QDialog):
                 return "Empty"
             return format_orientation_value(orientation)
 
+        def _apply_cell_style(item: QTableWidgetItem, orientation: Optional[float]) -> None:
+            item.setTextAlignment(Qt.AlignCenter)
+            bg_color = orientation_highlight_color(orientation)
+            if bg_color is not None:
+                item.setBackground(QBrush(bg_color))
+            else:
+                item.setBackground(QBrush())
+            if orientation is None:
+                item.setForeground(QBrush(QColor(160, 160, 160)))
+            else:
+                try:
+                    angle = normalize_angle(orientation)
+                except Exception:
+                    angle = None
+                if angle is not None and abs(float(angle) - 90.0) <= 1e-9:
+                    item.setForeground(QBrush(QColor(255, 255, 255)))
+                else:
+                    item.setForeground(QBrush())
+
         for row in range(row_count):
             seq_item = QTableWidgetItem(f"Seq.{row + 1}")
             seq_item.setFlags(seq_item.flags() & ~Qt.ItemIsEditable)
             table.setItem(row, 0, seq_item)
 
-            min_item = QTableWidgetItem(_layer_text(min_layers[row] if row < len(min_layers) else None))
+            min_layer = min_layers[row] if row < len(min_layers) else None
+            min_item = QTableWidgetItem(_layer_text(min_layer))
             min_item.setFlags(min_item.flags() & ~Qt.ItemIsEditable)
+            min_orientation = getattr(min_layer, "orientacao", None) if min_layer else None
+            min_item.setData(Qt.UserRole, min_orientation)
+            _apply_cell_style(min_item, min_orientation)
             table.setItem(row, 1, min_item)
 
-            mid_item = QTableWidgetItem(_layer_text(mid_layers[row] if row < len(mid_layers) else None))
-            mid_item.setFlags(mid_item.flags() & ~Qt.ItemIsEditable)
+            mid_layer = mid_layers[row] if row < len(mid_layers) else None
+            mid_item = QTableWidgetItem(_layer_text(mid_layer))
+            mid_item.setFlags(mid_item.flags() | Qt.ItemIsEditable)
+            mid_orientation = getattr(mid_layer, "orientacao", None) if mid_layer else None
+            mid_item.setData(Qt.UserRole, mid_orientation)
+            _apply_cell_style(mid_item, mid_orientation)
             table.setItem(row, 2, mid_item)
 
-            max_item = QTableWidgetItem(_layer_text(max_layers[row] if row < len(max_layers) else None))
+            max_layer = max_layers[row] if row < len(max_layers) else None
+            max_item = QTableWidgetItem(_layer_text(max_layer))
             max_item.setFlags(max_item.flags() & ~Qt.ItemIsEditable)
+            max_orientation = getattr(max_layer, "orientacao", None) if max_layer else None
+            max_item.setData(Qt.UserRole, max_orientation)
+            _apply_cell_style(max_item, max_orientation)
             table.setItem(row, 3, max_item)
 
         table.verticalHeader().setVisible(False)
@@ -1043,11 +1204,149 @@ class IntermediateLaminatePreviewDialog(QDialog):
         header.setSectionResizeMode(3, QHeaderView.Stretch)
         header.setMinimumHeight(48)
         table.setAlternatingRowColors(True)
-        table.setSelectionMode(QTableWidget.NoSelection)
-        table.setFocusPolicy(Qt.NoFocus)
+        table.setSelectionMode(QTableWidget.SingleSelection)
+        table.setSelectionBehavior(QTableWidget.SelectItems)
+        table.setEditTriggers(QAbstractItemView.DoubleClicked)
+        table.setFocusPolicy(Qt.StrongFocus)
+
+        replaced_rows: set[int] = set()
+        for idx in range(row_count):
+            max_layer = max_layers[idx] if idx < len(max_layers) else None
+            mid_layer = mid_layers[idx] if idx < len(mid_layers) else None
+            max_orient = getattr(max_layer, "orientacao", None) if max_layer else None
+            mid_orient = getattr(mid_layer, "orientacao", None) if mid_layer else None
+            if max_orient is not None and mid_orient is None:
+                replaced_rows.add(idx)
+
+        delegate = _IntermediateOrientationDelegate(replaced_rows, table)
+        table.setItemDelegateForColumn(2, delegate)
+
+        symmetry_color = QColor(250, 128, 114)
+
+        def _center_rows() -> set[int]:
+            total = row_count
+            if total <= 0:
+                return set()
+            if total % 2 == 1:
+                return {total // 2}
+            return {total // 2 - 1, total // 2}
+
+        def _apply_symmetry_highlight() -> set[int]:
+            rows = _center_rows()
+            for row in range(row_count):
+                for col in range(table.columnCount()):
+                    item = table.item(row, col)
+                    if item is None:
+                        continue
+                    if row in rows:
+                        item.setBackground(QBrush(symmetry_color))
+                    else:
+                        if col == 0:
+                            item.setBackground(QBrush())
+                        else:
+                            orientation = item.data(Qt.UserRole)
+                            _apply_cell_style(item, orientation)
+            return rows
+
+        symmetry_rows = _apply_symmetry_highlight()
+
+        def _on_item_changed(item: QTableWidgetItem) -> None:
+            if item.column() != 2:
+                return
+            row = item.row()
+            text = item.text().strip()
+            if text.lower() in {"", "empty"}:
+                new_value: Optional[float] = None
+            else:
+                try:
+                    new_value = normalize_angle(text.replace("°", ""))
+                except Exception:
+                    QMessageBox.warning(
+                        self,
+                        "Orientação inválida",
+                        "Informe uma orientação válida (ex.: 45, -45, 0, 90) ou 'Empty'.",
+                    )
+                    prev = item.data(Qt.UserRole)
+                    table.blockSignals(True)
+                    item.setText("Empty" if prev is None else format_orientation_value(prev))
+                    table.blockSignals(False)
+                    return
+
+            if 0 <= row < len(mid_layers):
+                mid_layers[row].orientacao = new_value
+            item.setData(Qt.UserRole, new_value)
+            table.blockSignals(True)
+            item.setText("Empty" if new_value is None else format_orientation_value(new_value))
+            table.blockSignals(False)
+            _apply_cell_style(item, new_value)
+
+            max_layer = max_layers[row] if row < len(max_layers) else None
+            max_orient = getattr(max_layer, "orientacao", None) if max_layer else None
+            if max_orient is not None and new_value is None:
+                replaced_rows.add(row)
+            else:
+                replaced_rows.discard(row)
+            table.blockSignals(True)
+            _apply_symmetry_highlight()
+            table.blockSignals(False)
+            table.viewport().update()
+
+        table.itemChanged.connect(_on_item_changed)
         layout.addWidget(table, stretch=1)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Close, parent=self)
         buttons.rejected.connect(self.reject)
         buttons.accepted.connect(self.accept)
         layout.addWidget(buttons)
+
+
+class _IntermediateOrientationDelegate(QStyledItemDelegate):
+    def __init__(self, replaced_rows: set[int], parent=None) -> None:
+        super().__init__(parent)
+        self._replaced_rows = replaced_rows
+        self._common_orientations = [
+            "45°",
+            "-45°",
+            "0°",
+            "90°",
+            "30°",
+            "-30°",
+            "60°",
+            "-60°",
+        ]
+
+    def createEditor(self, parent, option, index):  # type: ignore[override]
+        combo = QComboBox(parent)
+        combo.setEditable(True)
+        combo.setInsertPolicy(QComboBox.NoInsert)
+        combo.addItems(self._common_orientations)
+        line_edit = combo.lineEdit()
+        if line_edit is not None:
+            line_edit.setPlaceholderText("Digite a orientação (ex.: 45)")
+        return combo
+
+    def setEditorData(self, editor, index) -> None:  # type: ignore[override]
+        text = str(index.data(Qt.DisplayRole) or "")
+        if isinstance(editor, QComboBox):
+            editor.setCurrentText(text)
+
+    def setModelData(self, editor, model, index) -> None:  # type: ignore[override]
+        if isinstance(editor, QComboBox):
+            text = editor.currentText().strip()
+        else:
+            text = ""
+        model.setData(index, text, Qt.EditRole)
+
+    def paint(self, painter: QPainter, option, index) -> None:  # type: ignore[override]
+        super().paint(painter, option, index)
+        if index.column() != 2:
+            return
+        if index.row() not in self._replaced_rows:
+            return
+        painter.save()
+        pen = QPen(QColor(220, 53, 69))
+        pen.setWidth(2)
+        painter.setPen(pen)
+        rect = option.rect.adjusted(4, 4, -4, -4)
+        painter.drawRect(rect)
+        painter.restore()
