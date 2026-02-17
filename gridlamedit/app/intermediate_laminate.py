@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Optional
+import copy
 
 from PySide6.QtCore import Qt, QSize, QEvent, QPoint
 from PySide6.QtGui import QAction, QColor, QPainter, QPen, QBrush, QFont, QWheelEvent
@@ -23,10 +24,24 @@ from PySide6.QtWidgets import (
     QToolBar,
     QVBoxLayout,
     QSizePolicy,
+    QTableWidget,
+    QTableWidgetItem,
+    QHeaderView,
 )
 
-from gridlamedit.io.spreadsheet import GridModel, count_oriented_layers
+from gridlamedit.io.spreadsheet import (
+    GridModel,
+    Camada,
+    Laminado,
+    count_oriented_layers,
+    normalize_angle,
+    format_orientation_value,
+)
 from gridlamedit.app.cell_neighbors import SelectCellDialog
+from gridlamedit.services.laminate_checks import (
+    evaluate_symmetry_for_layers,
+    evaluate_laminate_balance_clt,
+)
 
 
 class IntermediateLaminateWindow(QDialog):
@@ -53,6 +68,7 @@ class IntermediateLaminateWindow(QDialog):
         self._dropoff_ratio: Optional[tuple[int, int]] = None
         self._layer_thickness_button: Optional[QPushButton] = None
         self._layer_thickness_mm: Optional[float] = None
+        self._create_intermediate_button: Optional[QPushButton] = None
         self._cell_button_proxies: list[QGraphicsProxyWidget] = []
         self._summary_item: Optional[QGraphicsTextItem] = None
         self._summary_rect = None
@@ -60,6 +76,8 @@ class IntermediateLaminateWindow(QDialog):
         self._min_cell_label = "SELECIONAR CELULA COM MENOR ESPESSURA"
         self._max_cell_label = "SELECIONAR CELULA COM MAIOR ESPESSURA"
         self._distance_label = "?(mm)"
+        self._reduce_layers_needed: Optional[int] = None
+        self._analysis_requires_reduction: bool = False
 
         main_layout = QVBoxLayout(self)
 
@@ -72,6 +90,10 @@ class IntermediateLaminateWindow(QDialog):
         thickness_button = self._build_cell_select_button("Espessura da Camada (mm)")
         thickness_button.setMinimumWidth(200)
         top_bar.addWidget(thickness_button)
+        create_button = self._build_cell_select_button("Criar Laminado Intermediário")
+        create_button.setMinimumWidth(240)
+        create_button.setEnabled(False)
+        top_bar.addWidget(create_button)
         top_bar.addStretch(1)
         clear_button = self._build_cell_select_button("Limpar")
         clear_button.setMinimumWidth(120)
@@ -83,6 +105,9 @@ class IntermediateLaminateWindow(QDialog):
         self._layer_thickness_button = thickness_button
         thickness_button.setStyleSheet("")
         thickness_button.clicked.connect(self._on_layer_thickness_clicked)
+        self._create_intermediate_button = create_button
+        create_button.setStyleSheet("")
+        create_button.clicked.connect(self._on_create_intermediate_clicked)
         clear_button.setStyleSheet("")
         clear_button.clicked.connect(self._on_clear_clicked)
 
@@ -190,12 +215,7 @@ class IntermediateLaminateWindow(QDialog):
         # Main colored blocks
         sections = [
             (QColor(153, 213, 92), self._min_cell_label, green_height, "min"),
-            (
-                QColor(248, 190, 60),
-                "NOVA CELULA COM NOVO LAMINADO",
-                orange_height,
-                "label",
-            ),
+            (QColor(230, 230, 230), "", orange_height, "label"),
             (QColor(220, 220, 220), self._max_cell_label, blue_height, "max"),
         ]
 
@@ -236,16 +256,17 @@ class IntermediateLaminateWindow(QDialog):
                     self._max_cell_button = button
                     button.clicked.connect(lambda _=False: self._select_cell("max"))
             else:
-                label = QGraphicsTextItem(text)
-                label.setFont(font)
-                label.setDefaultTextColor(QColor(20, 20, 20))
-                label_rect = label.boundingRect()
-                label.setPos(
-                    margin_x + (block_width - label_rect.width()) / 2.0,
-                    y + (height - label_rect.height()) / 2.0,
-                )
-                label.setZValue(2)
-                self.scene.addItem(label)
+                if text:
+                    label = QGraphicsTextItem(text)
+                    label.setFont(font)
+                    label.setDefaultTextColor(QColor(20, 20, 20))
+                    label_rect = label.boundingRect()
+                    label.setPos(
+                        margin_x + (block_width - label_rect.width()) / 2.0,
+                        y + (height - label_rect.height()) / 2.0,
+                    )
+                    label.setZValue(2)
+                    self.scene.addItem(label)
             current_y += height
 
 
@@ -544,6 +565,8 @@ class IntermediateLaminateWindow(QDialog):
                             ramp_text = f"{ramp_length:.2f} mm"
 
         analysis_html = "---"
+        self._analysis_requires_reduction = False
+        self._reduce_layers_needed = None
         if (
             self._distance_mm is not None
             and ramp_length_value is not None
@@ -554,14 +577,29 @@ class IntermediateLaminateWindow(QDialog):
             if self._distance_mm < ramp_length_value:
                 max_layers = int(self._distance_mm / step_length_value)
                 reduce_by = max(0, diff_layers_value - max_layers)
-                analysis_html = (
-                    "O espaço para drop off não é suficiente para o "
-                    "comprimento da rampa de drop off.<br>"
-                    f"Reduza a diferença de camadas entre células em {reduce_by} "
-                    "para que a rampa caiba no espaço disponível."
-                )
+                if reduce_by == 1:
+                    reduce_by = 2
+                self._analysis_requires_reduction = reduce_by > 0
+                self._reduce_layers_needed = reduce_by
+                if reduce_by > 0 and diff_layers_value < 2:
+                    self._analysis_requires_reduction = False
+                    analysis_html = (
+                        "O espaço para drop off não é suficiente para o "
+                        "comprimento da rampa de drop off.<br>"
+                        "A diferença entre os laminados é menor que 2 camadas, "
+                        "portanto não é possível propor a remoção mínima de duas camadas."
+                    )
+                else:
+                    analysis_html = (
+                        "O espaço para drop off não é suficiente para o "
+                        "comprimento da rampa de drop off.<br>"
+                        f"Reduza a diferença de camadas entre células em {reduce_by} "
+                        "para que a rampa caiba no espaço disponível."
+                    )
             else:
                 analysis_html = "O espaço para drop off é suficiente para a rampa de drop off."
+
+        self._update_create_button_state()
 
         summary_html = (
             "<div style='font-family:Segoe UI; font-size:11pt; color:#222;'>"
@@ -614,6 +652,8 @@ class IntermediateLaminateWindow(QDialog):
             self._min_cell_button.setText(self._min_cell_label)
         if self._max_cell_button is not None:
             self._max_cell_button.setText(self._max_cell_label)
+        if self._create_intermediate_button is not None:
+            self._create_intermediate_button.setEnabled(False)
         self._update_summary_box()
 
     def _count_oriented_layers_for_cell(self, cell_id: str) -> Optional[int]:
@@ -629,6 +669,260 @@ class IntermediateLaminateWindow(QDialog):
             return int(count_oriented_layers(laminate.camadas))
         except Exception:
             return None
+
+    def _update_create_button_state(self) -> None:
+        if self._create_intermediate_button is None:
+            return
+        enabled = (
+            self._model is not None
+            and self._selected_min_cell is not None
+            and self._selected_max_cell is not None
+            and self._distance_mm is not None
+            and self._dropoff_ratio is not None
+            and self._layer_thickness_mm is not None
+            and self._analysis_requires_reduction
+            and (self._reduce_layers_needed or 0) > 0
+        )
+        self._create_intermediate_button.setEnabled(enabled)
+
+    def _on_create_intermediate_clicked(self) -> None:
+        if self._model is None:
+            QMessageBox.information(self, "Criar Laminado Intermediário", "Nenhum projeto carregado.")
+            return
+        if not self._selected_min_cell or not self._selected_max_cell:
+            QMessageBox.information(
+                self,
+                "Criar Laminado Intermediário",
+                "Selecione as células de menor e maior espessura.",
+            )
+            return
+        if not self._analysis_requires_reduction or not self._reduce_layers_needed:
+            QMessageBox.information(
+                self,
+                "Criar Laminado Intermediário",
+                "A análise não indica necessidade de redução de camadas.",
+            )
+            return
+
+        min_laminate = self._laminate_for_cell(self._selected_min_cell)
+        max_laminate = self._laminate_for_cell(self._selected_max_cell)
+        if min_laminate is None or max_laminate is None:
+            QMessageBox.warning(
+                self,
+                "Criar Laminado Intermediário",
+                "Não foi possível localizar os laminados das células selecionadas.",
+            )
+            return
+
+        min_count = count_oriented_layers(min_laminate.camadas)
+        max_count = count_oriented_layers(max_laminate.camadas)
+        if max_count <= min_count:
+            QMessageBox.information(
+                self,
+                "Criar Laminado Intermediário",
+                "O laminado de maior espessura deve ter mais camadas orientadas do que o laminado de menor espessura.",
+            )
+            return
+
+        new_laminate, error = self._build_intermediate_laminate(
+            max_laminate,
+            min_laminate,
+            self._reduce_layers_needed,
+        )
+        if new_laminate is None:
+            QMessageBox.warning(
+                self,
+                "Criar Laminado Intermediário",
+                error or "Não foi possível gerar um laminado intermediário válido.",
+            )
+            return
+
+        dialog = IntermediateLaminatePreviewDialog(
+            min_laminate=min_laminate,
+            intermediate_laminate=new_laminate,
+            max_laminate=max_laminate,
+            min_cell_id=self._selected_min_cell,
+            max_cell_id=self._selected_max_cell,
+            parent=self,
+        )
+        dialog.exec()
+
+    def _laminate_for_cell(self, cell_id: str) -> Optional[Laminado]:
+        if self._model is None:
+            return None
+        laminate_name = self._model.cell_to_laminate.get(cell_id)
+        if not laminate_name:
+            return None
+        return self._model.laminados.get(laminate_name)
+
+    def _build_intermediate_laminate(
+        self,
+        max_laminate: Laminado,
+        min_laminate: Laminado,
+        reduce_by: int,
+    ) -> tuple[Optional[Laminado], Optional[str]]:
+        if reduce_by <= 0:
+            return None, "Nenhuma redução de camadas é necessária."
+        layers = list(getattr(max_laminate, "camadas", []) or [])
+        if not layers:
+            return None, "O laminado de maior espessura não possui camadas."
+
+        def _orientation_token(layer: Camada) -> Optional[float]:
+            try:
+                value = getattr(layer, "orientacao", None)
+            except Exception:
+                return None
+            if value is None:
+                return None
+            try:
+                return normalize_angle(value)
+            except Exception:
+                return None
+
+        def _count_tokens(layers_list: list[Camada]) -> dict[float, int]:
+            counts: dict[float, int] = {}
+            for layer in layers_list:
+                token = _orientation_token(layer)
+                if token is None:
+                    continue
+                counts[token] = counts.get(token, 0) + 1
+            return counts
+
+        max_counts = _count_tokens(list(getattr(max_laminate, "camadas", []) or []))
+        min_counts = _count_tokens(list(getattr(min_laminate, "camadas", []) or []))
+        excess_counts: dict[float, int] = {}
+        for token, count in max_counts.items():
+            excess = count - min_counts.get(token, 0)
+            if excess > 0:
+                excess_counts[token] = excess
+
+        total_excess = sum(excess_counts.values())
+        if reduce_by > total_excess:
+            return (
+                None,
+                "Não existem camadas suficientes com orientações excedentes para atender a redução necessária.",
+            )
+
+        pairs: list[tuple[int, int, float, float]] = []
+        for idx in range(len(layers) // 2):
+            jdx = len(layers) - 1 - idx
+            token_a = _orientation_token(layers[idx])
+            token_b = _orientation_token(layers[jdx])
+            if token_a is None or token_b is None:
+                continue
+            if token_a not in excess_counts or token_b not in excess_counts:
+                continue
+            pairs.append((idx, jdx, token_a, token_b))
+
+        center_idx: Optional[int] = None
+        center_token: Optional[float] = None
+        if len(layers) % 2 == 1:
+            center_idx = len(layers) // 2
+            center_token = _orientation_token(layers[center_idx])
+            if center_token not in excess_counts:
+                center_idx = None
+                center_token = None
+
+        use_center = reduce_by % 2 == 1
+        if use_center and center_idx is None:
+            return (
+                None,
+                "Não foi possível remover uma camada central para manter a simetria requerida.",
+            )
+
+        remaining_pairs = (reduce_by - (1 if use_center else 0)) // 2
+        if remaining_pairs < 0:
+            return None, "Número de camadas inválido para redução."
+
+        def _apply_removal(indices: set[int]) -> list[Camada]:
+            new_layers: list[Camada] = []
+            for idx, layer in enumerate(layers):
+                new_layer = copy.deepcopy(layer)
+                if idx in indices:
+                    new_layer.orientacao = None
+                    new_layer.material = ""
+                    new_layer.ativo = True
+                new_layers.append(new_layer)
+            for idx, layer in enumerate(new_layers):
+                layer.idx = idx
+            return new_layers
+
+        def _search(
+            pair_idx: int,
+            remaining: int,
+            available: dict[float, int],
+            selected_pairs: list[tuple[int, int, float, float]],
+        ) -> Optional[set[int]]:
+            if remaining == 0:
+                indices: set[int] = set()
+                if use_center and center_idx is not None:
+                    indices.add(center_idx)
+                for i, j, _, _ in selected_pairs:
+                    indices.update([i, j])
+                new_layers = _apply_removal(indices)
+                if not evaluate_symmetry_for_layers(new_layers).is_symmetric:
+                    return None
+                if not evaluate_laminate_balance_clt(new_layers).is_balanced:
+                    return None
+                return indices
+
+            if pair_idx >= len(pairs):
+                return None
+            if remaining > (len(pairs) - pair_idx):
+                return None
+
+            idx, jdx, token_a, token_b = pairs[pair_idx]
+            can_include = False
+            if token_a == token_b:
+                can_include = available.get(token_a, 0) >= 2
+            else:
+                can_include = available.get(token_a, 0) >= 1 and available.get(token_b, 0) >= 1
+
+            if can_include:
+                if token_a == token_b:
+                    available[token_a] -= 2
+                else:
+                    available[token_a] -= 1
+                    available[token_b] -= 1
+                selected_pairs.append((idx, jdx, token_a, token_b))
+                found = _search(pair_idx + 1, remaining - 1, available, selected_pairs)
+                if found is not None:
+                    return found
+                selected_pairs.pop()
+                if token_a == token_b:
+                    available[token_a] += 2
+                else:
+                    available[token_a] += 1
+                    available[token_b] += 1
+
+            return _search(pair_idx + 1, remaining, available, selected_pairs)
+
+        available_counts = dict(excess_counts)
+        if use_center and center_token is not None:
+            if available_counts.get(center_token, 0) < 1:
+                return None, "Não há camadas excedentes disponíveis para a redução necessária."
+            available_counts[center_token] -= 1
+
+        indices = _search(0, remaining_pairs, available_counts, [])
+        if indices is None:
+            return (
+                None,
+                "Não foi possível construir um laminado intermediário simétrico e balanceado com as restrições fornecidas.",
+            )
+
+        new_layers = _apply_removal(indices)
+        new_name = f"{str(getattr(max_laminate, 'nome', '') or '').strip()} - Intermediário"
+        new_name = new_name.strip(" -") or "Intermediário"
+        new_laminate = Laminado(
+            nome=new_name,
+            tipo=getattr(max_laminate, "tipo", ""),
+            color_index=getattr(max_laminate, "color_index", 1),
+            tag=getattr(max_laminate, "tag", ""),
+            celulas=[],
+            camadas=new_layers,
+            auto_rename_enabled=False,
+        )
+        return new_laminate, None
 
 
 class DropoffRatioDialog(QDialog):
@@ -680,3 +974,80 @@ class DropoffRatioDialog(QDialog):
 
     def selected_ratio(self) -> Optional[tuple[int, int]]:
         return (self.numerator_spin.value(), self.denominator_spin.value())
+
+
+class IntermediateLaminatePreviewDialog(QDialog):
+    """Dialog to preview min/intermediate/max laminates."""
+
+    def __init__(
+        self,
+        *,
+        min_laminate: Laminado,
+        intermediate_laminate: Laminado,
+        max_laminate: Laminado,
+        min_cell_id: str,
+        max_cell_id: str,
+        parent=None,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Laminado Intermediário")
+        self.resize(980, 640)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(10)
+
+        table = QTableWidget(self)
+        table.setColumnCount(4)
+        table.setHorizontalHeaderLabels(
+            ["Sequence", min_cell_id, "Intermediário", max_cell_id]
+        )
+
+        min_layers = list(getattr(min_laminate, "camadas", []) or [])
+        mid_layers = list(getattr(intermediate_laminate, "camadas", []) or [])
+        max_layers = list(getattr(max_laminate, "camadas", []) or [])
+        row_count = max(len(min_layers), len(mid_layers), len(max_layers))
+        table.setRowCount(row_count)
+
+        def _layer_text(layer: Optional[Camada]) -> str:
+            if layer is None:
+                return ""
+            orientation = getattr(layer, "orientacao", None)
+            if orientation is None:
+                return "Empty"
+            return format_orientation_value(orientation)
+
+        for row in range(row_count):
+            seq_item = QTableWidgetItem(f"Seq.{row + 1}")
+            seq_item.setFlags(seq_item.flags() & ~Qt.ItemIsEditable)
+            table.setItem(row, 0, seq_item)
+
+            min_item = QTableWidgetItem(_layer_text(min_layers[row] if row < len(min_layers) else None))
+            min_item.setFlags(min_item.flags() & ~Qt.ItemIsEditable)
+            table.setItem(row, 1, min_item)
+
+            mid_item = QTableWidgetItem(_layer_text(mid_layers[row] if row < len(mid_layers) else None))
+            mid_item.setFlags(mid_item.flags() & ~Qt.ItemIsEditable)
+            table.setItem(row, 2, mid_item)
+
+            max_item = QTableWidgetItem(_layer_text(max_layers[row] if row < len(max_layers) else None))
+            max_item.setFlags(max_item.flags() & ~Qt.ItemIsEditable)
+            table.setItem(row, 3, max_item)
+
+        table.verticalHeader().setVisible(False)
+        header = table.horizontalHeader()
+        header.setDefaultAlignment(Qt.AlignCenter)
+        header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(1, QHeaderView.Stretch)
+        header.setSectionResizeMode(2, QHeaderView.Stretch)
+        header.setSectionResizeMode(3, QHeaderView.Stretch)
+        header.setMinimumHeight(48)
+        table.setAlternatingRowColors(True)
+        table.setSelectionMode(QTableWidget.NoSelection)
+        table.setFocusPolicy(Qt.NoFocus)
+        layout.addWidget(table, stretch=1)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Close, parent=self)
+        buttons.rejected.connect(self.reject)
+        buttons.accepted.connect(self.accept)
+        layout.addWidget(buttons)
