@@ -1,4 +1,5 @@
 PySide6
+numpy==1.26.4
 pandas
 openpyxl
 xlrd==1.2.0
