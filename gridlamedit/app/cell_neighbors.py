@@ -524,6 +524,34 @@ class TextBoxItem(QGraphicsRectItem):
                 QRectF(point.x() - half, point.y() - half, handle, handle)
             )
 
+    def _text_child(self) -> Optional[QGraphicsTextItem]:
+        for child in self.childItems():
+            if isinstance(child, QGraphicsTextItem):
+                return child
+        return None
+
+    def adjust_rect_to_text(self, padding: float = 6.0) -> None:
+        text_item = self._text_child()
+        if text_item is None:
+            return
+        text_rect = text_item.boundingRect()
+        self.setRect(0, 0, text_rect.width() + padding * 2, text_rect.height() + padding * 2)
+        text_item.setPos(padding, padding)
+
+    def mouseDoubleClickEvent(self, event):  # noqa: N802
+        text_item = self._text_child()
+        if text_item is None:
+            return super().mouseDoubleClickEvent(event)
+        parent = None
+        if self.scene() is not None and self.scene().views():
+            parent = self.scene().views()[0]
+        current = text_item.toPlainText()
+        text, ok = QInputDialog.getText(parent, "Editar texto", "Texto:", text=current)
+        if ok:
+            text_item.setPlainText(text)
+            self.adjust_rect_to_text()
+        event.accept()
+
 
 class CellNodeItem(QGraphicsRectItem):
     """Modern rounded node with gradient, border glow and hover effect.
@@ -1232,7 +1260,7 @@ class CellNeighborsWindow(QDialog):
             )
         )
         rect_item.setBrush(QColor(255, 255, 255, 230))
-        rect_item.setPen(QPen(QColor(120, 120, 120), 1))
+        rect_item.setPen(Qt.NoPen)
         rect_item.setZValue(1)
         text_item.setParentItem(rect_item)
         text_item.setPos(padding, padding)
@@ -1379,6 +1407,8 @@ class CellNeighborsWindow(QDialog):
                             child.setFont(font)
                             changed = True
                         break
+                if isinstance(item, TextBoxItem):
+                    item.adjust_rect_to_text()
         if changed:
             self._mark_as_modified()
 
@@ -1542,7 +1572,7 @@ class CellNeighborsWindow(QDialog):
                 text_value = str(entry.get("text", "") or "")
                 rect_item = TextBoxItem(QRectF(0, 0, width, height))
                 rect_item.setBrush(QColor(255, 255, 255, 230))
-                rect_item.setPen(QPen(QColor(120, 120, 120), 1))
+                rect_item.setPen(Qt.NoPen)
                 rect_item.setZValue(1)
 
                 text_item = QGraphicsTextItem(text_value)
@@ -1566,6 +1596,7 @@ class CellNeighborsWindow(QDialog):
                 text_item.setParentItem(rect_item)
                 padding = 6
                 text_item.setPos(padding, padding)
+                rect_item.adjust_rect_to_text(padding)
 
                 rect_item.setPos(pos)
                 self.scene.addItem(rect_item)

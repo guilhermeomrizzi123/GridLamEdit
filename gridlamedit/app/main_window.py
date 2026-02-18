@@ -532,9 +532,9 @@ class MainWindow(QMainWindow):
             ),
             (
                 "intermediate_laminate_action",
-                "Sugestão de Laminado Intermediário",
+                "Novo Laminado Intermediário",
                 self.open_intermediate_laminate,
-                "Abrir a interface para sugerir laminado intermediário.",
+                "Abrir a interface para criar laminado intermediário.",
                 None,
             ),
             (

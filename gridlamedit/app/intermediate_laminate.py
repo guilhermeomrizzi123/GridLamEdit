@@ -7,8 +7,8 @@ import math
 import copy
 import re
 
-from PySide6.QtCore import Qt, QSize, QEvent, QPoint
-from PySide6.QtGui import QAction, QColor, QPainter, QPen, QBrush, QFont, QWheelEvent
+from PySide6.QtCore import Qt, QSize, QEvent, QPoint, QRectF
+from PySide6.QtGui import QAction, QColor, QPainter, QPen, QBrush, QFont, QWheelEvent, QTextDocument
 from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
     QInputDialog,
     QPushButton,
     QHBoxLayout,
+    QFormLayout,
     QSpinBox,
     QStyle,
     QToolBar,
@@ -35,6 +36,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QListWidget,
     QListWidgetItem,
+    QStyleOptionHeader,
 )
 
 from gridlamedit.io.spreadsheet import (
@@ -50,6 +52,7 @@ from gridlamedit.services.laminate_checks import (
     evaluate_symmetry_for_layers,
     evaluate_laminate_balance_clt,
 )
+from gridlamedit.services.laminate_service import auto_name_for_laminate
 
 
 class IntermediateLaminateWindow(QDialog):
@@ -57,7 +60,7 @@ class IntermediateLaminateWindow(QDialog):
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Sugestão de Laminado Intermediário")
+        self.setWindowTitle("Novo Laminado Intermediário")
         self.setWindowFlags(
             self.windowFlags() | Qt.WindowMinMaxButtonsHint | Qt.WindowSystemMenuHint
         )
@@ -81,6 +84,14 @@ class IntermediateLaminateWindow(QDialog):
         self._summary_item: Optional[QGraphicsTextItem] = None
         self._summary_rect = None
         self._summary_min_height = 180.0
+        self._interface_rects: list[QRectF] = []
+        self._intermediate_preview_button: Optional[QPushButton] = None
+        self._intermediate_preview_proxy: Optional[QGraphicsProxyWidget] = None
+        self._created_intermediate_laminate: Optional[Laminado] = None
+        self._created_min_laminate: Optional[Laminado] = None
+        self._created_max_laminate: Optional[Laminado] = None
+        self._created_min_cell_id: Optional[str] = None
+        self._created_max_cell_id: Optional[str] = None
         self._min_cell_label = "SELECIONAR LAMINADO COM MENOR ESPESSURA"
         self._max_cell_label = "SELECIONAR LAMINADO COM MAIOR ESPESSURA"
         self._distance_label = "?(mm)"
@@ -121,7 +132,7 @@ class IntermediateLaminateWindow(QDialog):
 
         self.view = QGraphicsView(self)
         self.view.setRenderHint(QPainter.Antialiasing, True)
-        self.view.setBackgroundBrush(QColor(248, 248, 248))
+        self.view.setBackgroundBrush(QColor(255, 255, 255))
         self.view.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.view.setDragMode(QGraphicsView.NoDrag)
         self.view.setInteractive(True)
@@ -153,6 +164,9 @@ class IntermediateLaminateWindow(QDialog):
     def _build_schematic_scene(self) -> None:
         self.scene.clear()
         self._cell_button_proxies.clear()
+        self._interface_rects.clear()
+        self._intermediate_preview_button = None
+        self._intermediate_preview_proxy = None
 
         width = 1800.0
         height = 920.0
@@ -200,6 +214,7 @@ class IntermediateLaminateWindow(QDialog):
                 QBrush(Qt.NoBrush),
             )
             rect.setZValue(4)
+            self._interface_rects.append(rect.rect())
             label = QGraphicsTextItem(f"INTERFACE {idx}")
             label.setDefaultTextColor(QColor(60, 60, 60))
             label.setPos(margin_x - 130.0, y - 26.0)
@@ -313,21 +328,22 @@ class IntermediateLaminateWindow(QDialog):
             summary_width,
             summary_height,
             QPen(QColor(160, 160, 160), 1.2),
-            QBrush(QColor(252, 252, 252)),
+            QBrush(QColor(255, 255, 255)),
         )
         summary_rect.setZValue(1)
         self._summary_rect = summary_rect
 
         summary_html = (
-            "<div style='font-family:Segoe UI; font-size:11pt; color:#222;'>"
-            "<div style='font-weight:600; margin-bottom:6px;'>Resumo</div>"
+            "<div style='font-family:Segoe UI; font-size:11pt; color:#1f2937;'>"
+            "<div style='font-size:12pt; font-weight:700; letter-spacing:0.4px; margin-bottom:6px;'>RESUMO</div>"
             "<table style='border-collapse:collapse;'>"
             "<tr><td>Espaço para Drop Off</td><td style='padding-left:16px;'>—</td></tr>"
             "<tr><td>Razão de Drop Off</td><td style='padding-left:16px;'>—</td></tr>"
             "<tr><td>Diferença de Camadas Entre Laminados</td><td style='padding-left:16px;'>—</td></tr>"
             "</table>"
-            "<div style='margin:8px 0; border-bottom:1px solid #cfcfcf;'></div>"
-            "<div style='color:#555;'>---</div>"
+            "<div style='margin:8px 0; border-bottom:1px solid #d1d5db;'></div>"
+            "<div style='font-weight:600; margin-bottom:4px;'>Conclusão:</div>"
+            "<div style='color:#475569;'>---</div>"
             "</div>"
         )
         summary_item = QGraphicsTextItem()
@@ -339,7 +355,79 @@ class IntermediateLaminateWindow(QDialog):
         self.scene.addItem(summary_item)
         self._summary_item = summary_item
         self._update_summary_box()
+        self._ensure_intermediate_preview_button()
         self._center_view()
+
+    def _ensure_intermediate_preview_button(self) -> None:
+        if len(self._interface_rects) < 2:
+            return
+        target_rect = self._interface_rects[1]
+        if self._intermediate_preview_button is None:
+            button = self._build_cell_select_button("")
+            button_font = button.font()
+            button_font.setPointSize(max(12, button_font.pointSize() + 2))
+            button.setFont(button_font)
+            button.clicked.connect(self._on_intermediate_preview_clicked)
+            proxy = QGraphicsProxyWidget()
+            proxy.setWidget(button)
+            proxy.setZValue(6)
+            self.scene.addItem(proxy)
+            self._intermediate_preview_button = button
+            self._intermediate_preview_proxy = proxy
+        else:
+            button = self._intermediate_preview_button
+            proxy = self._intermediate_preview_proxy
+        if button is None or proxy is None:
+            return
+        created = self._created_intermediate_laminate
+        if created is None:
+            button.hide()
+            return
+        button.setText(created.nome)
+        min_button_width = 360
+        min_button_height = 38
+        width = max(button.sizeHint().width(), min_button_width)
+        height = max(button.sizeHint().height(), min_button_height)
+        button.setFixedSize(width, height)
+        center_x = target_rect.x() + target_rect.width() / 2.0
+        center_y = target_rect.y() + target_rect.height() / 2.0
+        proxy.setPos(center_x - width / 2.0, center_y - height / 2.0)
+        button.show()
+
+    def _on_intermediate_preview_clicked(self) -> None:
+        if (
+            self._created_intermediate_laminate is None
+            or self._created_min_laminate is None
+            or self._created_max_laminate is None
+            or self._created_min_cell_id is None
+            or self._created_max_cell_id is None
+        ):
+            return
+        dialog = IntermediateLaminatePreviewDialog(
+            min_laminate=self._created_min_laminate,
+            intermediate_laminate=self._created_intermediate_laminate,
+            max_laminate=self._created_max_laminate,
+            min_cell_id=self._created_min_cell_id,
+            max_cell_id=self._created_max_cell_id,
+            model=self._model,
+            parent=self,
+        )
+        dialog.exec()
+
+    def _notify_intermediate_created(
+        self,
+        laminate: Laminado,
+        min_laminate: Laminado,
+        max_laminate: Laminado,
+        min_cell_id: str,
+        max_cell_id: str,
+    ) -> None:
+        self._created_intermediate_laminate = laminate
+        self._created_min_laminate = min_laminate
+        self._created_max_laminate = max_laminate
+        self._created_min_cell_id = min_cell_id
+        self._created_max_cell_id = max_cell_id
+        self._ensure_intermediate_preview_button()
 
     def _build_cell_select_button(self, text: str) -> QPushButton:
         button = QPushButton(text)
@@ -640,8 +728,8 @@ class IntermediateLaminateWindow(QDialog):
         self._update_create_button_state()
 
         summary_html = (
-            "<div style='font-family:Segoe UI; font-size:11pt; color:#222;'>"
-            "<div style='font-weight:600; margin-bottom:6px;'>Resumo</div>"
+            "<div style='font-family:Segoe UI; font-size:11pt; color:#1f2937;'>"
+            "<div style='font-size:12pt; font-weight:700; letter-spacing:0.4px; margin-bottom:6px;'>RESUMO</div>"
             "<table style='border-collapse:collapse;'>"
             f"<tr><td>Espaço para Drop Off</td><td style='padding-left:16px;'>{distance_text}</td></tr>"
             f"<tr><td>Razão de Drop Off</td><td style='padding-left:16px;'>{ratio_text}</td></tr>"
@@ -649,8 +737,9 @@ class IntermediateLaminateWindow(QDialog):
             f"<tr><td>Diferença de Camadas Entre Laminados</td><td style='padding-left:16px;'>{diff_text}</td></tr>"
             f"<tr><td>Comprimento da Rampa de Drop Off</td><td style='padding-left:16px;'>{ramp_text}</td></tr>"
             "</table>"
-            "<div style='margin:8px 0; border-bottom:1px solid #cfcfcf;'></div>"
-            f"<div style='color:#555;'>{analysis_html}</div>"
+            "<div style='margin:8px 0; border-bottom:1px solid #d1d5db;'></div>"
+            "<div style='font-weight:600; margin-bottom:4px;'>Conclusão:</div>"
+            f"<div style='color:#475569;'>{analysis_html}</div>"
             "</div>"
         )
         self._summary_item.setHtml(summary_html)
@@ -668,6 +757,11 @@ class IntermediateLaminateWindow(QDialog):
         self._layer_thickness_mm = None
         self._selected_min_cell = None
         self._selected_max_cell = None
+        self._created_intermediate_laminate = None
+        self._created_min_laminate = None
+        self._created_max_laminate = None
+        self._created_min_cell_id = None
+        self._created_max_cell_id = None
         if self._distance_button is not None:
             self._distance_button.setText(self._distance_label)
             self._distance_button.setFixedSize(
@@ -693,6 +787,7 @@ class IntermediateLaminateWindow(QDialog):
         if self._create_intermediate_button is not None:
             self._create_intermediate_button.setEnabled(False)
         self._update_summary_box()
+        self._ensure_intermediate_preview_button()
 
     def _count_oriented_layers_for_laminate(self, laminate_name: str) -> Optional[int]:
         if self._model is None:
@@ -793,6 +888,7 @@ class IntermediateLaminateWindow(QDialog):
             max_laminate=max_laminate,
             min_cell_id=self._selected_min_cell,
             max_cell_id=self._selected_max_cell,
+            model=self._model,
             parent=self,
         )
         dialog.exec()
@@ -1181,6 +1277,127 @@ class LaminadoSelectDialog(QDialog):
         return self._selected
 
 
+class CreateIntermediateLaminateDialog(QDialog):
+    def __init__(
+        self,
+        model: Optional[GridModel],
+        base_tag: str,
+        laminate_template: Laminado,
+        parent=None,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Criar Laminado")
+        self.resize(420, 200)
+        self._model = model
+        self._laminate_template = laminate_template
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(10)
+
+        form = QFormLayout()
+        form.setLabelAlignment(Qt.AlignRight)
+
+        self.name_edit = QLineEdit(self)
+        self.name_edit.setReadOnly(True)
+        self.name_edit.setPlaceholderText("Nome automático")
+
+        self.tag_edit = QLineEdit(self)
+        self.tag_edit.setPlaceholderText("Tag do novo laminado")
+
+        form.addRow("Nome:", self.name_edit)
+        form.addRow("Tag:", self.tag_edit)
+
+        layout.addLayout(form)
+
+        buttons = QDialogButtonBox(parent=self)
+        self.create_button = QPushButton("Criar", self)
+        buttons.addButton(self.create_button, QDialogButtonBox.AcceptRole)
+        buttons.addButton(QDialogButtonBox.Cancel)
+        buttons.rejected.connect(self.reject)
+        self.create_button.clicked.connect(self.accept)
+        layout.addWidget(buttons)
+
+        suggestion = self._suggest_tag(base_tag)
+        if suggestion:
+            self.tag_edit.setText(suggestion)
+        self.tag_edit.textChanged.connect(self._update_name_preview)
+        self._update_name_preview()
+
+    def _suggest_tag(self, base_tag: str) -> str:
+        base = str(base_tag or "").strip()
+        if not base:
+            return ""
+        existing = set()
+        if self._model is not None:
+            for lam in self._model.laminados.values():
+                tag = str(getattr(lam, "tag", "") or "").strip()
+                if tag:
+                    existing.add(tag)
+        idx = 1
+        while True:
+            candidate = f"{base}.{idx}"
+            if candidate not in existing:
+                return candidate
+            idx += 1
+
+    def _update_name_preview(self) -> None:
+        temp = copy.deepcopy(self._laminate_template)
+        temp.tag = self.tag_edit.text().strip()
+        name = auto_name_for_laminate(self._model, temp)
+        display_name = re.sub(r"\s*\([^)]*\)\s*$", "", name or "").strip()
+        self.name_edit.setText(display_name)
+
+    def selected_tag(self) -> str:
+        return self.tag_edit.text().strip()
+
+    def selected_name(self) -> str:
+        return self.name_edit.text().strip()
+
+
+class RichTextHeaderView(QHeaderView):
+    """HeaderView que suporta HTML/Rich Text por seção."""
+
+    def __init__(self, orientation: Qt.Orientation, parent=None) -> None:
+        super().__init__(orientation, parent)
+        self._section_html: dict[int, str] = {}
+        self.setDefaultAlignment(Qt.AlignCenter)
+
+    def set_section_html(self, logical_index: int, html: str) -> None:
+        self._section_html[logical_index] = html
+        self.updateSection(logical_index)
+
+    def paintSection(self, painter: QPainter, rect, logicalIndex: int) -> None:
+        if not rect.isValid():
+            return
+        painter.save()
+        html = self._section_html.get(logicalIndex)
+        option = QStyleOptionHeader()
+        self.initStyleOption(option)
+        option.rect = rect
+        option.section = logicalIndex
+        if html:
+            option.text = ""
+        else:
+            option.text = str(
+                self.model().headerData(logicalIndex, self.orientation(), Qt.DisplayRole)
+                or ""
+            )
+        self.style().drawControl(QStyle.CE_Header, option, painter, self)
+
+        if html:
+            doc = QTextDocument()
+            doc.setDefaultFont(self.font())
+            doc.setHtml(html)
+            doc.setTextWidth(rect.width() - 8.0)
+            text_height = doc.size().height()
+            y = rect.y() + max(0.0, (rect.height() - text_height) / 2.0)
+            painter.translate(rect.x() + 4.0, y)
+            doc.drawContents(painter)
+
+        painter.restore()
+
+
 class IntermediateLaminatePreviewDialog(QDialog):
     """Dialog to preview min/intermediate/max laminates."""
 
@@ -1192,11 +1409,18 @@ class IntermediateLaminatePreviewDialog(QDialog):
         max_laminate: Laminado,
         min_cell_id: str,
         max_cell_id: str,
+        model: Optional[GridModel] = None,
         parent=None,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Laminado Intermediário")
         self.resize(980, 640)
+        self._model = model
+        self._min_laminate = min_laminate
+        self._max_laminate = max_laminate
+        self._min_cell_id = min_cell_id
+        self._max_cell_id = max_cell_id
+        self._template_laminate = intermediate_laminate
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(16, 16, 16, 16)
@@ -1204,10 +1428,16 @@ class IntermediateLaminatePreviewDialog(QDialog):
 
         table = QTableWidget(self)
         table.setColumnCount(4)
+        header = RichTextHeaderView(Qt.Horizontal, table)
+        header_font = QFont("Segoe UI", 9)
+        header_font.setBold(False)
+        header.setFont(header_font)
+        table.setHorizontalHeader(header)
 
         min_layers = list(getattr(min_laminate, "camadas", []) or [])
         mid_layers = list(getattr(intermediate_laminate, "camadas", []) or [])
         max_layers = list(getattr(max_laminate, "camadas", []) or [])
+        self._mid_layers = mid_layers
         row_count = max(len(min_layers), len(mid_layers), len(max_layers))
         table.setRowCount(row_count)
 
@@ -1249,29 +1479,47 @@ class IntermediateLaminatePreviewDialog(QDialog):
             dominant_pct = max(pct_zero, pct_45, pct_90)
             return "Quasi-isotropic", dominant_pct
 
-        def _header_label(laminate: Laminado, cell_id: str, layers: Optional[list[Camada]] = None) -> str:
+        def _header_label_html(
+            laminate: Laminado,
+            cell_id: str,
+            layers: Optional[list[Camada]] = None,
+        ) -> str:
             layers = list(layers if layers is not None else getattr(laminate, "camadas", []) or [])
             counts, total = _orientation_counts(layers)
             lam_type, pct = _classify_laminate_type(counts, total)
             pct_text = f"({pct * 100:.0f}%)" if pct > 0 else ""
             balance = evaluate_laminate_balance_clt(layers).is_balanced
             symmetry = evaluate_symmetry_for_layers(layers).is_symmetric
+            balance_text = "Sim" if balance else "Não"
+            symmetry_text = "Sim" if symmetry else "Não"
+            balance_color = "#2563eb" if balance else "#dc2626"
+            symmetry_color = "#2563eb" if symmetry else "#dc2626"
             return (
-                f"{cell_id}\n"
-                f"Tipo: {lam_type}{pct_text}\n"
-                f"Balanceado: {'Sim' if balance else 'Não'}\n"
-                f"Simétrico: {'Sim' if symmetry else 'Não'}"
+                "<div style='text-align:center; font-weight:400;'>"
+                f"<div>{cell_id}</div>"
+                f"<div>Tipo: {lam_type}{pct_text}</div>"
+                f"<div>Balanceado: <span style='color:{balance_color};'>{balance_text}</span></div>"
+                f"<div>Simétrico: <span style='color:{symmetry_color};'>{symmetry_text}</span></div>"
+                "</div>"
             )
 
         def _apply_header_labels() -> None:
-            table.setHorizontalHeaderLabels(
-                [
-                    "Sequence",
-                    _header_label(min_laminate, min_cell_id),
-                    _header_label(intermediate_laminate, "Novo Laminado Intermediario", mid_layers),
-                    _header_label(max_laminate, max_cell_id),
-                ]
+            table.setHorizontalHeaderLabels([
+                "Sequence",
+                "",
+                "",
+                "",
+            ])
+            header.set_section_html(1, _header_label_html(min_laminate, min_cell_id))
+            header.set_section_html(
+                2,
+                _header_label_html(
+                    intermediate_laminate,
+                    "Novo Laminado Intermediário",
+                    mid_layers,
+                ),
             )
+            header.set_section_html(3, _header_label_html(max_laminate, max_cell_id))
 
         _apply_header_labels()
 
@@ -1434,10 +1682,95 @@ class IntermediateLaminatePreviewDialog(QDialog):
         table.itemChanged.connect(_on_item_changed)
         layout.addWidget(table, stretch=1)
 
-        buttons = QDialogButtonBox(QDialogButtonBox.Close, parent=self)
+        buttons = QDialogButtonBox(parent=self)
+        create_button = QPushButton("Criar Laminado", self)
+        buttons.addButton(create_button, QDialogButtonBox.ActionRole)
+        buttons.addButton(QDialogButtonBox.Close)
         buttons.rejected.connect(self.reject)
         buttons.accepted.connect(self.accept)
+        create_button.clicked.connect(self._on_create_laminate_clicked)
         layout.addWidget(buttons)
+
+    def _find_main_window(self):
+        widget = self.parent()
+        while widget is not None:
+            if hasattr(widget, "_refresh_after_new_laminate"):
+                return widget
+            widget = widget.parent()
+        return None
+
+    def _on_create_laminate_clicked(self) -> None:
+        if self._model is None:
+            QMessageBox.information(self, "Criar Laminado", "Nenhum projeto carregado.")
+            return
+        base_tag = str(getattr(self._max_laminate, "tag", "") or "").strip()
+        dialog = CreateIntermediateLaminateDialog(
+            self._model,
+            base_tag,
+            self._template_laminate,
+            parent=self,
+        )
+        if dialog.exec() != QDialog.Accepted:
+            return
+        new_tag = dialog.selected_tag()
+
+        new_layers = copy.deepcopy(self._mid_layers)
+        for idx, layer in enumerate(new_layers):
+            layer.idx = idx
+
+        new_laminate = Laminado(
+            nome="",
+            tipo=str(getattr(self._max_laminate, "tipo", "") or ""),
+            color_index=getattr(self._max_laminate, "color_index", 1),
+            tag=new_tag,
+            celulas=[],
+            camadas=new_layers,
+            auto_rename_enabled=True,
+        )
+        new_name = auto_name_for_laminate(self._model, new_laminate)
+        if not new_name:
+            QMessageBox.warning(self, "Criar Laminado", "Falha ao gerar nome automático.")
+            return
+        new_laminate.nome = new_name
+        self._model.laminados[new_name] = new_laminate
+
+        if isinstance(self.parent(), IntermediateLaminateWindow):
+            try:
+                self.parent()._notify_intermediate_created(
+                    new_laminate,
+                    self._min_laminate,
+                    self._max_laminate,
+                    self._min_cell_id,
+                    self._max_cell_id,
+                )
+            except Exception:
+                pass
+
+        main_window = self._find_main_window()
+        if main_window is not None:
+            try:
+                main_window._refresh_after_new_laminate(new_name)
+            except Exception:
+                pass
+            if hasattr(main_window, "_mark_dirty"):
+                try:
+                    main_window._mark_dirty()
+                except Exception:
+                    pass
+
+        QMessageBox.information(
+            self,
+            "Criar Laminado",
+            f"Laminado '{new_name}' criado e disponível na lista de seleção.",
+        )
+        self.close()
+        if isinstance(self.parent(), QDialog):
+            try:
+                self.parent().show()
+                self.parent().raise_()
+                self.parent().activateWindow()
+            except Exception:
+                pass
 
 
 class _IntermediateOrientationDelegate(QStyledItemDelegate):
