@@ -1173,12 +1173,12 @@ class CellNeighborsWindow(QDialog):
         self.export_neighbors_button = QPushButton("Exportar vizinhanças", self)
         self.export_neighbors_button.setToolTip("Exportar vizinhanças e desenhos para um arquivo JSON")
         self.export_neighbors_button.clicked.connect(self._export_neighbors_to_file)
-        toolbar.addWidget(self.export_neighbors_button)
+        self.export_neighbors_button.hide()
 
         self.import_neighbors_button = QPushButton("Importar vizinhanças", self)
         self.import_neighbors_button.setToolTip("Importar vizinhanças e desenhos de um arquivo JSON")
         self.import_neighbors_button.clicked.connect(self._import_neighbors_from_file)
-        toolbar.addWidget(self.import_neighbors_button)
+        self.import_neighbors_button.hide()
 
         # PDF print selection
         self.print_pdf_button = QPushButton("Imprimir PDF", self)
