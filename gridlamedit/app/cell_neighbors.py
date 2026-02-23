@@ -284,11 +284,21 @@ class DeleteCellCommand(QUndoCommand):
             self.window._delete_cell(record)
         def on_change_orientation():
             self.window._change_cell_orientation(record)
+        def on_delete_col():
+            self.window._delete_col(record.grid_pos[0])
+        def on_delete_row():
+            self.window._delete_row(record.grid_pos[1])
         
         item.on_select_cell = on_select_cell
         item.on_add_neighbor = on_add_neighbor
         item.on_delete_cell = on_delete_cell
         item.on_change_orientation = on_change_orientation
+        item.on_delete_col = on_delete_col
+        item.on_delete_row = on_delete_row
+        item.on_insert_col_right = lambda: self.window._insert_col_right(record.grid_pos[0])
+        item.on_insert_col_left = lambda: self.window._insert_col_left(record.grid_pos[0])
+        item.on_insert_row_above = lambda: self.window._insert_row_above(record.grid_pos[1])
+        item.on_insert_row_below = lambda: self.window._insert_row_below(record.grid_pos[1])
         
         # Restore neighbors
         self.window._neighbors[self.cell_id] = {
@@ -679,6 +689,8 @@ class CellNodeItem(QGraphicsRectItem):
         self.on_insert_col_left = None
         self.on_insert_row_above = None
         self.on_insert_row_below = None
+        self.on_delete_col = None
+        self.on_delete_row = None
         self.plus_items: dict[str, PlusButtonItem] = {}
         self.plus_lines: dict[str, QGraphicsLineItem] = {}
         self._neighbors: dict[str, Optional[str]] = {"up": None, "down": None, "left": None, "right": None}
@@ -986,6 +998,16 @@ class CellNodeItem(QGraphicsRectItem):
 
         menu.addSeparator()
 
+        delete_col_action = QAction("Deletar coluna", menu)
+        delete_col_action.triggered.connect(self._handle_delete_col)
+        menu.addAction(delete_col_action)
+
+        delete_row_action = QAction("Deletar linha", menu)
+        delete_row_action.triggered.connect(self._handle_delete_row)
+        menu.addAction(delete_row_action)
+
+        menu.addSeparator()
+
         delete_action = QAction("Deletar C\u00e9lula", menu)
         delete_action.triggered.connect(self._handle_delete)
         menu.addAction(delete_action)
@@ -1025,6 +1047,16 @@ class CellNodeItem(QGraphicsRectItem):
         """Handle insert row below from context menu."""
         if callable(self.on_insert_row_below):
             self.on_insert_row_below()
+
+    def _handle_delete_col(self) -> None:
+        """Handle delete column from context menu."""
+        if callable(self.on_delete_col):
+            self.on_delete_col()
+
+    def _handle_delete_row(self) -> None:
+        """Handle delete row from context menu."""
+        if callable(self.on_delete_row):
+            self.on_delete_row()
 
 
 @dataclass
@@ -4460,6 +4492,8 @@ class CellNeighborsWindow(QDialog):
         item.on_insert_col_left = lambda: self._insert_col_left(record.grid_pos[0])
         item.on_insert_row_above = lambda: self._insert_row_above(record.grid_pos[1])
         item.on_insert_row_below = lambda: self._insert_row_below(record.grid_pos[1])
+        item.on_delete_col = lambda: self._delete_col(record.grid_pos[0])
+        item.on_delete_row = lambda: self._delete_row(record.grid_pos[1])
 
         # Expand scene to accommodate new node
         self._expand_scene_rect()
@@ -4797,14 +4831,20 @@ class CellNeighborsWindow(QDialog):
             self._expand_scene_rect()
             return
 
-        # Create the node at aligned position
-        origin_node = self._nodes_by_grid.get((0, 0))
-        if not origin_node:
-            return  # Cannot create node without origin reference
-        base = origin_node.item.rect().topLeft()
+        # Create the node at aligned position.
+        # Use any existing node as geometric reference so creation keeps working
+        # even if there is no node at (0, 0) after row/column deletions.
+        if not self._nodes_by_grid:
+            return
+        step = CELL_SIZE + GAP + PLUS_SIZE
+        ref_gp, ref_rec = next(iter(self._nodes_by_grid.items()))
+        base = QPointF(
+            ref_rec.item.rect().x() - step * ref_gp[0],
+            ref_rec.item.rect().y() - step * ref_gp[1],
+        )
         top_left = QPointF(
-            base.x() + (CELL_SIZE + GAP + PLUS_SIZE) * target_grid[0],
-            base.y() + (CELL_SIZE + GAP + PLUS_SIZE) * target_grid[1],
+            base.x() + step * target_grid[0],
+            base.y() + step * target_grid[1],
         )
         neighbor = self._create_node(target_grid, top_left)
         self._prompt_select_cell(
@@ -4985,6 +5025,157 @@ class CellNeighborsWindow(QDialog):
     def _insert_row_above(self, row: int) -> None:
         """Insert a new row that replicates *row*, placed above it."""
         self._insert_grid_slice(axis="row", source_index=row, insert_after=False)
+
+    def _delete_col(self, col: int) -> None:
+        """Delete a full column and reconnect adjacent cells."""
+        self._delete_grid_slice(axis="col", source_index=col)
+
+    def _delete_row(self, row: int) -> None:
+        """Delete a full row and reconnect adjacent cells."""
+        self._delete_grid_slice(axis="row", source_index=row)
+
+    def _delete_grid_slice(self, axis: str, source_index: int) -> None:
+        """Delete a full column (axis='col') or row (axis='row').
+
+        Remaining nodes are shifted to close gaps and adjacent nodes are
+        connected across the removed slice to keep the grid contiguous.
+        """
+        if self._reorder_edit_lock or self._review_ui_lock:
+            return
+        if not self._nodes_by_grid:
+            return
+
+        step = CELL_SIZE + GAP + PLUS_SIZE
+
+        ref_gp, ref_rec = next(iter(self._nodes_by_grid.items()))
+        base = QPointF(
+            ref_rec.item.rect().x() - step * ref_gp[0],
+            ref_rec.item.rect().y() - step * ref_gp[1],
+        )
+
+        if axis == "col":
+            slice_positions = {
+                gp for gp in self._nodes_by_grid.keys() if gp[0] == source_index
+            }
+
+            def _needs_shift(gp: tuple[int, int]) -> bool:
+                return gp[0] > source_index
+
+            def _shifted(gp: tuple[int, int]) -> tuple[int, int]:
+                return (gp[0] - 1, gp[1])
+
+            def _translate(gp: tuple[int, int]) -> tuple[int, int]:
+                return _shifted(gp) if _needs_shift(gp) else gp
+
+            def _bridge_pairs() -> list[tuple[tuple[int, int], tuple[int, int]]]:
+                rows = {
+                    gp[1] for gp in self._nodes_by_grid.keys() if gp not in slice_positions
+                }
+                return [
+                    ((source_index - 1, row), (source_index, row))
+                    for row in rows
+                    if (source_index - 1, row) in self._nodes_by_grid
+                    and (source_index, row) in self._nodes_by_grid
+                ]
+        else:  # axis == "row"
+            slice_positions = {
+                gp for gp in self._nodes_by_grid.keys() if gp[1] == source_index
+            }
+
+            def _needs_shift(gp: tuple[int, int]) -> bool:  # type: ignore[misc]
+                return gp[1] > source_index
+
+            def _shifted(gp: tuple[int, int]) -> tuple[int, int]:  # type: ignore[misc]
+                return (gp[0], gp[1] - 1)
+
+            def _translate(gp: tuple[int, int]) -> tuple[int, int]:  # type: ignore[misc]
+                return _shifted(gp) if _needs_shift(gp) else gp
+
+            def _bridge_pairs() -> list[tuple[tuple[int, int], tuple[int, int]]]:  # type: ignore[misc]
+                cols = {
+                    gp[0] for gp in self._nodes_by_grid.keys() if gp not in slice_positions
+                }
+                return [
+                    ((col, source_index - 1), (col, source_index))
+                    for col in cols
+                    if (col, source_index - 1) in self._nodes_by_grid
+                    and (col, source_index) in self._nodes_by_grid
+                ]
+
+        if not slice_positions:
+            return
+
+        old_line_keys = list(self._lines_between_nodes.keys())
+
+        for line in self._lines_between_nodes.values():
+            self.scene.removeItem(line)
+        self._lines_between_nodes.clear()
+
+        for bridge in list(self._merge_bridge_items.values()):
+            self.scene.removeItem(bridge)
+        self._merge_bridge_items.clear()
+
+        for gp in sorted(slice_positions):
+            record = self._nodes_by_grid.get(gp)
+            if record is None:
+                continue
+            self.scene.removeItem(record.item)
+            del self._nodes_by_grid[gp]
+
+        if not self._nodes_by_grid:
+            self._create_node((0, 0), QPointF(base.x(), base.y()))
+            self._recalculate_cell_neighbors_from_scene()
+            self._update_all_plus_buttons_visibility()
+            self._expand_scene_rect()
+            self._mark_as_modified()
+            return
+
+        nodes_to_shift = [
+            (gp, rec)
+            for gp, rec in list(self._nodes_by_grid.items())
+            if _needs_shift(gp)
+        ]
+        saved_ids: dict[tuple[int, int], Optional[str]] = {
+            gp: rec.cell_id for gp, rec in nodes_to_shift
+        }
+        for gp, rec in nodes_to_shift:
+            self.scene.removeItem(rec.item)
+            del self._nodes_by_grid[gp]
+
+        for old_gp, cell_id in saved_ids.items():
+            new_gp = _shifted(old_gp)
+            tl = QPointF(base.x() + step * new_gp[0], base.y() + step * new_gp[1])
+            new_rec = self._create_node(new_gp, tl)
+            new_rec.cell_id = cell_id
+            self._update_node_cell_display(new_rec)
+
+        seen_keys: set[tuple[tuple[int, int], tuple[int, int]]] = set()
+        for a, b in old_line_keys:
+            if a in slice_positions or b in slice_positions:
+                continue
+            new_a = _translate(a)
+            new_b = _translate(b)
+            if new_a == new_b:
+                continue
+            if new_a not in self._nodes_by_grid or new_b not in self._nodes_by_grid:
+                continue
+            key = (new_a, new_b) if new_a <= new_b else (new_b, new_a)
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            self._draw_connection_between(new_a, new_b)
+
+        for a, b in _bridge_pairs():
+            self._draw_connection_between(a, b)
+
+        for rec in self._nodes_by_grid.values():
+            self._update_node_neighbors(rec)
+        self._update_all_plus_buttons_visibility()
+        self._expand_scene_rect()
+        self._recalculate_cell_neighbors_from_scene()
+        if self._current_sequence_index is not None:
+            self.update_cell_colors_for_sequence(self._current_sequence_index)
+        self._mark_as_modified()
 
     def _insert_grid_slice(
         self,
