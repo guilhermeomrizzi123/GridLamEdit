@@ -2703,40 +2703,59 @@ class VirtualStackingWindow(QtWidgets.QDialog):
         """Converte o mapeamento de vizinhos do projeto em um grafo não direcionado."""
         cell_ids = [cell.cell_id for cell in self._cells]
         adjacency: dict[str, set[str]] = {cid: set() for cid in cell_ids}
+        normalized_ids: dict[str, str] = {
+            str(cid).strip(): cid
+            for cid in cell_ids
+            if str(cid).strip()
+        }
+
+        def _resolve_cell_id(raw: object) -> Optional[str]:
+            text = str(raw or "").strip()
+            if not text:
+                return None
+            if text in adjacency:
+                return text
+            return normalized_ids.get(text)
+
+        def _add_edge(raw_src: object, raw_dst: object) -> None:
+            src = _resolve_cell_id(raw_src)
+            dst = _resolve_cell_id(raw_dst)
+            if not src or not dst or src == dst:
+                return
+            adjacency[src].add(dst)
+            adjacency.setdefault(dst, set()).add(src)
+
         project = self._project
         node_payload = list(getattr(project, "cell_neighbor_nodes", []) or []) if project is not None else []
         if node_payload:
             for entry in node_payload:
-                src_cell = str(entry.get("cell", "")).strip()
-                if not src_cell or src_cell not in adjacency:
+                src_cell = entry.get("cell", "")
+                if not _resolve_cell_id(src_cell):
                     continue
                 neighbors = entry.get("neighbors", {}) or {}
                 if not isinstance(neighbors, dict):
                     continue
                 for data in neighbors.values():
                     if isinstance(data, dict):
-                        dst_cell = str(data.get("cell", "") or "").strip()
+                        dst_cell = data.get("cell", "")
                     else:
-                        dst_cell = str(data or "").strip()
-                    if not dst_cell or dst_cell not in adjacency:
-                        continue
-                    adjacency[src_cell].add(dst_cell)
-                    adjacency.setdefault(dst_cell, set()).add(src_cell)
-        else:
-            mapping = getattr(project, "cell_neighbors", {}) if project is not None else {}
-            for src, neighbors in mapping.items():
-                if src not in adjacency or not isinstance(neighbors, dict):
-                    continue
-                for raw in (neighbors or {}).values():
-                    values: list[str] = []
-                    if isinstance(raw, (list, tuple, set)):
-                        values = [str(v) for v in raw if v]
-                    elif raw:
-                        values = [str(raw)]
-                    for dst in values:
-                        if dst and dst in adjacency:
-                            adjacency[src].add(dst)
-                            adjacency.setdefault(dst, set()).add(src)
+                        dst_cell = data
+                    _add_edge(src_cell, dst_cell)
+
+        mapping = getattr(project, "cell_neighbors", {}) if project is not None else {}
+        for src, neighbors in mapping.items():
+            if not isinstance(neighbors, dict):
+                continue
+            for raw in (neighbors or {}).values():
+                values: list[object] = []
+                if isinstance(raw, dict):
+                    values = [raw.get("cell", "")]
+                elif isinstance(raw, (list, tuple, set)):
+                    values = [v for v in raw if v]
+                elif raw:
+                    values = [raw]
+                for dst in values:
+                    _add_edge(src, dst)
         return adjacency
 
     def _normalize_orientation_value(self, value: object) -> object:
