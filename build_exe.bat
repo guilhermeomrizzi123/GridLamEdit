@@ -11,7 +11,7 @@ REM        pip install -r requirements.txt
 REM 3. Execute este script sempre que precisar gerar um novo build.
 REM ============================================================
 
-echo Limpando e gerando executavel GridLamEdit V16...
+echo Limpando e gerando executavel GridLamEdit_V18...
 
 REM Evita erro de isolamento do PyInstaller em alguns ambientes
 set PYINSTALLER_NO_ISOLATED=1
@@ -30,5 +30,5 @@ if errorlevel 1 (
 )
 
 echo.
-echo Build concluido. O executavel unico esta em dist\GridLamEdit V16.exe
+echo Build concluido. O executavel unico esta em dist\GridLamEdit_V18.exe
 exit /b 0

@@ -1,0 +1,18 @@
+253 INFO: PyInstaller: 6.3.0
+300 INFO: Python: 3.11.5
+312 INFO: Platform: Windows-10-10.0.26200-SP0
+319 INFO: Removing temporary files and cleaning cache in C:\Users\pribe\AppData\Local\pyinstaller
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "C:\Users\pribe\OneDrive\Documents\GitHub\GridLamEdit\.venv\Lib\site-packages\PyInstaller\__main__.py", line 218, in <module>
+    run()
+  File "C:\Users\pribe\OneDrive\Documents\GitHub\GridLamEdit\.venv\Lib\site-packages\PyInstaller\__main__.py", line 198, in run
+    run_build(pyi_config, spec_file, **vars(args))
+  File "C:\Users\pribe\OneDrive\Documents\GitHub\GridLamEdit\.venv\Lib\site-packages\PyInstaller\__main__.py", line 69, in run_build
+    PyInstaller.building.build_main.main(pyi_config, spec_file, **kwargs)
+  File "C:\Users\pribe\OneDrive\Documents\GitHub\GridLamEdit\.venv\Lib\site-packages\PyInstaller\building\build_main.py", line 1071, in main
+    build(specfile, distpath, workpath, clean_build)
+  File "C:\Users\pribe\OneDrive\Documents\GitHub\GridLamEdit\.venv\Lib\site-packages\PyInstaller\building\build_main.py", line 968, in build
+    os.remove(f)
+PermissionError: [WinError 32] O arquivo já está sendo usado por outro processo: 'c:\\Users\\pribe\\OneDrive\\Documents\\GitHub\\GridLamEdit\\build_v18\\GridLamEdit\\GridLamEdit_V18.pkg'

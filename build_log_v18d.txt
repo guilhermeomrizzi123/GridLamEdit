@@ -1,0 +1,40 @@
+229 INFO: PyInstaller: 6.3.0
+229 INFO: Python: 3.11.5
+235 INFO: Platform: Windows-10-10.0.26200-SP0
+C:\Users\pribe\OneDrive\Documents\GitHub\GridLamEdit\.venv\Lib\site-packages\PyInstaller\building\build_main.py:194: UserWarning: The numpy.array_api submodule is still experimental. See NEP 47.
+  __import__(package)
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "C:\Users\pribe\OneDrive\Documents\GitHub\GridLamEdit\.venv\Lib\site-packages\PyInstaller\__main__.py", line 218, in <module>
+    run()
+  File "C:\Users\pribe\OneDrive\Documents\GitHub\GridLamEdit\.venv\Lib\site-packages\PyInstaller\__main__.py", line 198, in run
+    run_build(pyi_config, spec_file, **vars(args))
+  File "C:\Users\pribe\OneDrive\Documents\GitHub\GridLamEdit\.venv\Lib\site-packages\PyInstaller\__main__.py", line 69, in run_build
+    PyInstaller.building.build_main.main(pyi_config, spec_file, **kwargs)
+  File "C:\Users\pribe\OneDrive\Documents\GitHub\GridLamEdit\.venv\Lib\site-packages\PyInstaller\building\build_main.py", line 1071, in main
+    build(specfile, distpath, workpath, clean_build)
+  File "C:\Users\pribe\OneDrive\Documents\GitHub\GridLamEdit\.venv\Lib\site-packages\PyInstaller\building\build_main.py", line 1011, in build
+    exec(code, spec_namespace)
+  File "GridLamEdit.spec", line 42, in <module>
+    exe = EXE(
+          ^^^^
+  File "C:\Users\pribe\OneDrive\Documents\GitHub\GridLamEdit\.venv\Lib\site-packages\PyInstaller\building\api.py", line 609, in __init__
+    self.pkg = PKG(
+               ^^^^
+  File "C:\Users\pribe\OneDrive\Documents\GitHub\GridLamEdit\.venv\Lib\site-packages\PyInstaller\building\api.py", line 238, in __init__
+    self.__postinit__()
+  File "C:\Users\pribe\OneDrive\Documents\GitHub\GridLamEdit\.venv\Lib\site-packages\PyInstaller\building\datastruct.py", line 184, in __postinit__
+    self.assemble()
+  File "C:\Users\pribe\OneDrive\Documents\GitHub\GridLamEdit\.venv\Lib\site-packages\PyInstaller\building\api.py", line 329, in assemble
+    CArchiveWriter(self.name, bootstrap_toc + archive_toc, pylib_name=self.python_lib_name)
+  File "C:\Users\pribe\OneDrive\Documents\GitHub\GridLamEdit\.venv\Lib\site-packages\PyInstaller\archive\writers.py", line 141, in __init__
+    toc_entry = self._write_entry(fp, entry)
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\pribe\OneDrive\Documents\GitHub\GridLamEdit\.venv\Lib\site-packages\PyInstaller\archive\writers.py", line 226, in _write_entry
+    return self._write_file(fp, src_name, dest_name, typecode, compress=compress)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\pribe\OneDrive\Documents\GitHub\GridLamEdit\.venv\Lib\site-packages\PyInstaller\archive\writers.py", line 246, in _write_file
+    data_length = os.stat(src_name).st_size
+                  ^^^^^^^^^^^^^^^^^
+FileNotFoundError: [WinError 2] O sistema não pode encontrar o arquivo especificado: 'C:\\Users\\pribe\\OneDrive\\Documents\\GitHub\\GridLamEdit\\build\\GridLamEdit\\PYZ-00.pyz'
