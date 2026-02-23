@@ -3926,6 +3926,16 @@ class MainWindow(QMainWindow):
 
     def _load_spreadsheet(self, checked: bool = False) -> None:  # noqa: ARG002
         """Open an Excel file and populate the UI."""
+        if self._grid_model is not None:
+            QMessageBox.information(
+                self,
+                "Importacao bloqueada",
+                "Este projeto ja teve um grid importado.\n\n"
+                "Para novas reassociacoes e alteracoes no grid, use o comando "
+                "'Reassociar Laminados por Contorno' no menu Tools.",
+            )
+            return
+
         if not self._confirm_discard_changes():
             return
 
