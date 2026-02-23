@@ -675,6 +675,10 @@ class CellNodeItem(QGraphicsRectItem):
         self.on_delete_cell = None
         self.on_change_orientation = None
         self.on_apply_laminate = None
+        self.on_insert_col_right = None
+        self.on_insert_col_left = None
+        self.on_insert_row_above = None
+        self.on_insert_row_below = None
         self.plus_items: dict[str, PlusButtonItem] = {}
         self.plus_lines: dict[str, QGraphicsLineItem] = {}
         self._neighbors: dict[str, Optional[str]] = {"up": None, "down": None, "left": None, "right": None}
@@ -963,7 +967,25 @@ class CellNodeItem(QGraphicsRectItem):
         menu.addAction(change_orientation_action)
         
         menu.addSeparator()
-        
+
+        insert_col_right_action = QAction("Criar nova coluna \u00e0 direita", menu)
+        insert_col_right_action.triggered.connect(self._handle_insert_col_right)
+        menu.addAction(insert_col_right_action)
+
+        insert_col_left_action = QAction("Criar nova coluna \u00e0 esquerda", menu)
+        insert_col_left_action.triggered.connect(self._handle_insert_col_left)
+        menu.addAction(insert_col_left_action)
+
+        insert_row_above_action = QAction("Criar nova linha acima", menu)
+        insert_row_above_action.triggered.connect(self._handle_insert_row_above)
+        menu.addAction(insert_row_above_action)
+
+        insert_row_below_action = QAction("Criar nova linha abaixo", menu)
+        insert_row_below_action.triggered.connect(self._handle_insert_row_below)
+        menu.addAction(insert_row_below_action)
+
+        menu.addSeparator()
+
         delete_action = QAction("Deletar C\u00e9lula", menu)
         delete_action.triggered.connect(self._handle_delete)
         menu.addAction(delete_action)
@@ -983,6 +1005,26 @@ class CellNodeItem(QGraphicsRectItem):
         """Handle apply/change laminate action from context menu."""
         if callable(self.on_apply_laminate):
             self.on_apply_laminate()
+
+    def _handle_insert_col_right(self) -> None:
+        """Handle insert column to the right from context menu."""
+        if callable(self.on_insert_col_right):
+            self.on_insert_col_right()
+
+    def _handle_insert_col_left(self) -> None:
+        """Handle insert column to the left from context menu."""
+        if callable(self.on_insert_col_left):
+            self.on_insert_col_left()
+
+    def _handle_insert_row_above(self) -> None:
+        """Handle insert row above from context menu."""
+        if callable(self.on_insert_row_above):
+            self.on_insert_row_above()
+
+    def _handle_insert_row_below(self) -> None:
+        """Handle insert row below from context menu."""
+        if callable(self.on_insert_row_below):
+            self.on_insert_row_below()
 
 
 @dataclass
@@ -4413,7 +4455,12 @@ class CellNeighborsWindow(QDialog):
         item.on_delete_cell = on_delete_cell
         item.on_change_orientation = on_change_orientation
         item.on_apply_laminate = on_apply_laminate
-        
+
+        item.on_insert_col_right = lambda: self._insert_col_right(record.grid_pos[0])
+        item.on_insert_col_left = lambda: self._insert_col_left(record.grid_pos[0])
+        item.on_insert_row_above = lambda: self._insert_row_above(record.grid_pos[1])
+        item.on_insert_row_below = lambda: self._insert_row_below(record.grid_pos[1])
+
         # Expand scene to accommodate new node
         self._expand_scene_rect()
         
@@ -4918,6 +4965,227 @@ class CellNeighborsWindow(QDialog):
             if (dx, dy) == (ox, oy):
                 return name
         return None
+
+    # ------------------------------------------------------------------
+    # Column / Row insertion helpers
+    # ------------------------------------------------------------------
+
+    def _insert_col_right(self, col: int) -> None:
+        """Insert a new column that replicates *col*, placed to its right."""
+        self._insert_grid_slice(axis="col", source_index=col, insert_after=True)
+
+    def _insert_col_left(self, col: int) -> None:
+        """Insert a new column that replicates *col*, placed to its left."""
+        self._insert_grid_slice(axis="col", source_index=col, insert_after=False)
+
+    def _insert_row_below(self, row: int) -> None:
+        """Insert a new row that replicates *row*, placed below it."""
+        self._insert_grid_slice(axis="row", source_index=row, insert_after=True)
+
+    def _insert_row_above(self, row: int) -> None:
+        """Insert a new row that replicates *row*, placed above it."""
+        self._insert_grid_slice(axis="row", source_index=row, insert_after=False)
+
+    def _insert_grid_slice(
+        self,
+        axis: str,
+        source_index: int,
+        insert_after: bool,
+    ) -> None:
+        """Insert a new column (axis='col') or row (axis='row') in the grid.
+
+        If *insert_after* is True the new slice is placed to the right of /
+        below *source_index*; otherwise it is placed to the left of / above it.
+        The new cells replicate the cell IDs of the source column/row.
+        """
+        if not self._nodes_by_grid:
+            return
+
+        STEP = CELL_SIZE + GAP + PLUS_SIZE
+
+        # -- 1. Derive scene base (top-left of grid position (0,0)) ----
+        ref_gp, ref_rec = next(iter(self._nodes_by_grid.items()))
+        base = QPointF(
+            ref_rec.item.rect().x() - STEP * ref_gp[0],
+            ref_rec.item.rect().y() - STEP * ref_gp[1],
+        )
+
+        # -- 2. Capture source slice cell IDs before touching anything -
+        if axis == "col":
+            source_cells: dict[int, Optional[str]] = {
+                gp[1]: rec.cell_id
+                for gp, rec in self._nodes_by_grid.items()
+                if gp[0] == source_index
+            }
+            insert_index = source_index + 1 if insert_after else source_index
+
+            def _needs_shift(gp: tuple[int, int]) -> bool:
+                return gp[0] >= insert_index
+
+            def _shifted(gp: tuple[int, int]) -> tuple[int, int]:
+                return (gp[0] + 1, gp[1])
+
+            def _new_positions() -> list[tuple[int, int]]:
+                return [(insert_index, r) for r in source_cells]
+
+            def _source_cell(new_gp: tuple[int, int]) -> Optional[str]:
+                return source_cells.get(new_gp[1])
+
+            def _translate(gp: tuple[int, int]) -> tuple[int, int]:
+                return _shifted(gp) if _needs_shift(gp) else gp
+
+        else:  # axis == "row"
+            source_cells = {
+                gp[0]: rec.cell_id
+                for gp, rec in self._nodes_by_grid.items()
+                if gp[1] == source_index
+            }
+            insert_index = source_index + 1 if insert_after else source_index
+
+            def _needs_shift(gp: tuple[int, int]) -> bool:  # type: ignore[misc]
+                return gp[1] >= insert_index
+
+            def _shifted(gp: tuple[int, int]) -> tuple[int, int]:  # type: ignore[misc]
+                return (gp[0], gp[1] + 1)
+
+            def _new_positions() -> list[tuple[int, int]]:  # type: ignore[misc]
+                return [(c, insert_index) for c in source_cells]
+
+            def _source_cell(new_gp: tuple[int, int]) -> Optional[str]:  # type: ignore[misc]
+                return source_cells.get(new_gp[0])
+
+            def _translate(gp: tuple[int, int]) -> tuple[int, int]:  # type: ignore[misc]
+                return _shifted(gp) if _needs_shift(gp) else gp
+
+        # -- 3. Keep old line endpoints before clearing ----------------
+        old_line_keys: list[tuple[tuple[int, int], tuple[int, int]]] = list(
+            self._lines_between_nodes.keys()
+        )
+
+        # Capture internal connections within the source slice so they can be
+        # replicated in the new slice later.
+        if axis == "col":
+            # Pairs of rows that are vertically connected inside the source column
+            source_internal: set[tuple[int, int]] = set()
+            for a, b in old_line_keys:
+                if (
+                    a[0] == source_index
+                    and b[0] == source_index
+                    and abs(a[1] - b[1]) == 1
+                ):
+                    source_internal.add((min(a[1], b[1]), max(a[1], b[1])))
+        else:
+            # Pairs of columns that are horizontally connected inside the source row
+            source_internal = set()
+            for a, b in old_line_keys:
+                if (
+                    a[1] == source_index
+                    and b[1] == source_index
+                    and abs(a[0] - b[0]) == 1
+                ):
+                    source_internal.add((min(a[0], b[0]), max(a[0], b[0])))
+
+        # -- 4. Remove all connection lines from scene -----------------
+        for line in self._lines_between_nodes.values():
+            self.scene.removeItem(line)
+        self._lines_between_nodes.clear()
+
+        for bridge in list(self._merge_bridge_items.values()):
+            self.scene.removeItem(bridge)
+        self._merge_bridge_items.clear()
+
+        # -- 5. Remove nodes that need to shift ------------------------
+        nodes_to_shift = [
+            (gp, rec)
+            for gp, rec in list(self._nodes_by_grid.items())
+            if _needs_shift(gp)
+        ]
+        saved_ids: dict[tuple[int, int], Optional[str]] = {
+            gp: rec.cell_id for gp, rec in nodes_to_shift
+        }
+        for gp, rec in nodes_to_shift:
+            self.scene.removeItem(rec.item)
+            del self._nodes_by_grid[gp]
+
+        # -- 6. Recreate shifted nodes at new positions ----------------
+        for old_gp, cell_id in saved_ids.items():
+            new_gp = _shifted(old_gp)
+            tl = QPointF(base.x() + STEP * new_gp[0], base.y() + STEP * new_gp[1])
+            new_rec = self._create_node(new_gp, tl)
+            new_rec.cell_id = cell_id
+            self._update_node_cell_display(new_rec)
+
+        # -- 7. Create new nodes for the inserted slice ----------------
+        for new_gp in _new_positions():
+            if new_gp in self._nodes_by_grid:
+                continue
+            tl = QPointF(base.x() + STEP * new_gp[0], base.y() + STEP * new_gp[1])
+            new_rec = self._create_node(new_gp, tl)
+            cell_id = _source_cell(new_gp)
+            if cell_id:
+                new_rec.cell_id = cell_id
+                self._update_node_cell_display(new_rec)
+
+        # -- 8. Redraw lines for existing connections (translated) -----
+        seen_keys: set[tuple[tuple[int, int], tuple[int, int]]] = set()
+        for a, b in old_line_keys:
+            new_a = _translate(a)
+            new_b = _translate(b)
+            if new_a == new_b:
+                continue
+            key = (new_a, new_b) if new_a <= new_b else (new_b, new_a)
+            if key not in seen_keys:
+                seen_keys.add(key)
+                self._draw_connection_between(new_a, new_b)
+
+        # -- 9. Auto-connect new slice nodes to adjacent nodes ---------
+        # For each new node:
+        #   a) Connect to the source-side neighbor (the column/row that was copied)
+        #   b) Connect to the opposite-side neighbor if it already exists
+        #   c) Replicate internal connections that existed inside the source slice
+        opp_side = insert_index + 1 if insert_after else insert_index - 1
+        for new_gp in _new_positions():
+            if new_gp not in self._nodes_by_grid:
+                continue
+
+            if axis == "col":
+                row = new_gp[1]
+                # Source neighbor (already translated to its final position)
+                src_gp = _translate((source_index, row))
+                if src_gp in self._nodes_by_grid:
+                    self._draw_connection_between(new_gp, src_gp)
+                # Opposite-side neighbor
+                opp_gp = (opp_side, row)
+                if opp_gp in self._nodes_by_grid:
+                    self._draw_connection_between(new_gp, opp_gp)
+                # Internal vertical connections replicated from source column
+                above_gp = (insert_index, row - 1)
+                if (row - 1, row) in source_internal and above_gp in self._nodes_by_grid:
+                    self._draw_connection_between(new_gp, above_gp)
+            else:  # axis == "row"
+                col = new_gp[0]
+                # Source neighbor
+                src_gp = _translate((col, source_index))
+                if src_gp in self._nodes_by_grid:
+                    self._draw_connection_between(new_gp, src_gp)
+                # Opposite-side neighbor
+                opp_gp = (col, opp_side)
+                if opp_gp in self._nodes_by_grid:
+                    self._draw_connection_between(new_gp, opp_gp)
+                # Internal horizontal connections replicated from source row
+                left_gp = (col - 1, insert_index)
+                if (col - 1, col) in source_internal and left_gp in self._nodes_by_grid:
+                    self._draw_connection_between(new_gp, left_gp)
+
+        # -- 10. Refresh all visuals -----------------------------------
+        for rec in self._nodes_by_grid.values():
+            self._update_node_neighbors(rec)
+        self._update_all_plus_buttons_visibility()
+        self._expand_scene_rect()
+        self._recalculate_cell_neighbors_from_scene()
+        if self._current_sequence_index is not None:
+            self.update_cell_colors_for_sequence(self._current_sequence_index)
+        self._has_unsaved_changes = True
 
     def _recalculate_cell_neighbors_from_scene(self) -> None:
         """Rebuild aggregated neighbors from the currently drawn lines."""
