@@ -5548,7 +5548,15 @@ class SelectCellDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Selecionar Celula")
         self.resize(320, 400)
+        self._filter_text = ""
+        self._filter_norm = ""
         layout = QVBoxLayout(self)
+
+        self.filter_input = QLineEdit(self)
+        self.filter_input.setPlaceholderText("Filtrar células...")
+        self.filter_input.textChanged.connect(self._apply_filter)
+        layout.addWidget(self.filter_input)
+
         self.list = QListWidget(self)
         preferred = preferred or []
         filtered_preferred = [cell for cell in preferred if cell in cells]
@@ -5566,11 +5574,11 @@ class SelectCellDialog(QDialog):
                 self.list.addItem(item)
                 if current and cell == current:
                     self.list.setCurrentItem(item)
-            separator = QListWidgetItem("---")
-            separator.setFlags(Qt.NoItemFlags)
-            separator.setTextAlignment(Qt.AlignCenter)
-            separator.setForeground(QColor(140, 140, 140))
-            self.list.addItem(separator)
+            self._separator_item = QListWidgetItem("---")
+            self._separator_item.setFlags(Qt.NoItemFlags)
+            self._separator_item.setTextAlignment(Qt.AlignCenter)
+            self._separator_item.setForeground(QColor(140, 140, 140))
+            self.list.addItem(self._separator_item)
             for cell in cells:
                 if cell not in preferred_set:
                     item = QListWidgetItem(cell)
@@ -5578,6 +5586,7 @@ class SelectCellDialog(QDialog):
                     if current and cell == current:
                         self.list.setCurrentItem(item)
         else:
+            self._separator_item = None
             for cell in ordered_cells:
                 item = QListWidgetItem(cell)
                 self.list.addItem(item)
@@ -5588,7 +5597,58 @@ class SelectCellDialog(QDialog):
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
+
+        self._ok_button = buttons.button(QDialogButtonBox.Ok)
+        if self._ok_button is not None:
+            self._ok_button.setEnabled(self.list.currentItem() is not None)
+
+        self.list.itemSelectionChanged.connect(self._update_ok_state)
         self.list.itemDoubleClicked.connect(lambda _i: self.accept())
+
+    @staticmethod
+    def _normalize(text: str) -> str:
+        base = unicodedata.normalize("NFKD", text)
+        stripped = "".join(ch for ch in base if not unicodedata.combining(ch))
+        return re.sub(r"[^0-9A-Za-z]+", "", stripped).lower()
+
+    def _apply_filter(self, text: str) -> None:
+        self._filter_text = text.strip()
+        self._filter_norm = self._normalize(self._filter_text) if self._filter_text else ""
+        has_visible_preferred = False
+        has_visible_regular = False
+        separator_index = self.list.row(self._separator_item) if self._separator_item is not None else -1
+
+        for idx in range(self.list.count()):
+            item = self.list.item(idx)
+            if item is self._separator_item:
+                continue
+
+            raw = item.text()
+            if not self._filter_text:
+                item.setHidden(False)
+            elif self._filter_text.lower() in raw.lower():
+                item.setHidden(False)
+            elif self._filter_norm:
+                norm_text = self._normalize(raw)
+                item.setHidden(self._filter_norm not in norm_text)
+            else:
+                item.setHidden(True)
+
+            if not item.isHidden():
+                if separator_index >= 0 and idx < separator_index:
+                    has_visible_preferred = True
+                else:
+                    has_visible_regular = True
+
+        if self._separator_item is not None:
+            self._separator_item.setHidden(not (has_visible_preferred and has_visible_regular and not self._filter_text))
+
+        self._update_ok_state()
+
+    def _update_ok_state(self) -> None:
+        if self._ok_button is not None:
+            item = self.list.currentItem()
+            self._ok_button.setEnabled(item is not None and not item.isHidden())
 
     def selected_cell(self) -> Optional[str]:
         item = self.list.currentItem()
