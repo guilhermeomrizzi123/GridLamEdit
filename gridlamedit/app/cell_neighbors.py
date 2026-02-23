@@ -553,6 +553,53 @@ class TextBoxItem(QGraphicsRectItem):
         event.accept()
 
 
+class MergeBridgeItem(QGraphicsRectItem):
+    """Connector fill between merged cells, with outer border continuity."""
+
+    def __init__(self, orientation: str, parent: Optional[QGraphicsItem] = None) -> None:
+        super().__init__(parent)
+        self._orientation = orientation
+
+    def set_orientation(self, orientation: str) -> None:
+        self._orientation = orientation
+        self.update()
+
+    def paint(self, painter: QPainter, option, widget=None) -> None:
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+        rect = self.rect()
+
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(self.brush())
+        painter.drawRect(rect)
+
+        pen = QPen(self.pen())
+        if pen.style() == Qt.NoPen or pen.widthF() <= 0:
+            return
+        pen.setCapStyle(Qt.FlatCap)
+        painter.setBrush(Qt.NoBrush)
+        painter.setPen(pen)
+
+        half = max(0.0, pen.widthF() / 2.0)
+        overlap = 1.0  # Extend slightly to ensure perfect connection without gaps
+        x1 = rect.left() - overlap
+        x2 = rect.right() + overlap
+        y1 = rect.top() + half
+        y2 = rect.bottom() - half
+
+        if self._orientation == "horizontal":
+            if x2 > x1:
+                painter.drawLine(QPointF(x1, y1), QPointF(x2, y1))
+                painter.drawLine(QPointF(x1, y2), QPointF(x2, y2))
+        else:
+            x1 = rect.left() + half
+            x2 = rect.right() - half
+            y1 = rect.top() - overlap
+            y2 = rect.bottom() + overlap
+            if y2 > y1:
+                painter.drawLine(QPointF(x1, y1), QPointF(x1, y2))
+                painter.drawLine(QPointF(x2, y1), QPointF(x2, y2))
+
+
 class CellNodeItem(QGraphicsRectItem):
     """Modern rounded node with gradient, border glow and hover effect.
     Only shows '+' buttons on sides without neighbors. Lines are drawn behind the block.
@@ -620,6 +667,8 @@ class CellNodeItem(QGraphicsRectItem):
             "left": "",
         }
         self._contour_suppressed: set[str] = set()
+        self._merged_border_sides: set[str] = set()
+        self._identity_visible = True
         self._recenter_label()
         self.on_select_cell = None
         self.on_add_neighbor = None
@@ -663,13 +712,42 @@ class CellNodeItem(QGraphicsRectItem):
             label.setVisible(bool(text) and key not in self._contour_suppressed)
         self._recenter_label()
 
+    def set_merged_sides(self, directions: set[str]) -> None:
+        self._merged_border_sides = set(directions or set())
+        self.update()
+
+    def set_identity_visible(self, visible: bool) -> None:
+        self._identity_visible = bool(visible)
+        self._recenter_label()
+
     def paint(self, painter, option, widget=None):
         """Custom paint for rounded corners."""
         painter.setRenderHint(painter.RenderHint.Antialiasing)
+        painter.setPen(Qt.NoPen)
         painter.setBrush(self.brush())
-        painter.setPen(self.pen())
-        # Draw rounded rectangle
         painter.drawRoundedRect(self.rect(), 8, 8)
+
+        border_pen = QPen(self.pen())
+        painter.setBrush(Qt.NoBrush)
+        painter.setPen(border_pen)
+        half_width = max(0.0, border_pen.widthF() / 2.0)
+        border_rect = self.rect().adjusted(half_width, half_width, -half_width, -half_width)
+        border_radius = max(0.0, 8.0 - half_width)
+        painter.drawRoundedRect(border_rect, border_radius, border_radius)
+
+        if self._merged_border_sides:
+            erase_pen = QPen(QBrush(self.brush()), border_pen.widthF() + 2.0)
+            erase_pen.setCapStyle(Qt.FlatCap)
+            painter.setPen(erase_pen)
+            if "up" in self._merged_border_sides:
+                painter.drawLine(border_rect.topLeft(), border_rect.topRight())
+            if "down" in self._merged_border_sides:
+                painter.drawLine(border_rect.bottomLeft(), border_rect.bottomRight())
+            if "left" in self._merged_border_sides:
+                painter.drawLine(border_rect.topLeft(), border_rect.bottomLeft())
+            if "right" in self._merged_border_sides:
+                painter.drawLine(border_rect.topRight(), border_rect.bottomRight())
+
         # Adjust text contrast according to current fill
         br = self.brush()
         color = br.color() if isinstance(br, QBrush) else COLOR_CELL
@@ -698,11 +776,16 @@ class CellNodeItem(QGraphicsRectItem):
 
     def _recenter_label(self) -> None:
         rect = self.rect()
+        if not self._identity_visible:
+            self._label.setVisible(False)
+            self._laminate_label.setVisible(False)
+        else:
+            self._label.setVisible(True)
         self._label.setTextWidth(rect.width())
         tb = self._label.boundingRect()
         lam_text = self._laminate_label.text()
         spacing = 2.0
-        if lam_text:
+        if self._identity_visible and lam_text:
             self._laminate_label.setVisible(True)
             lb = self._laminate_label.boundingRect()
             total_h = tb.height() + spacing + lb.height()
@@ -1136,6 +1219,7 @@ class CellNeighborsWindow(QDialog):
         # Maintain nodes by grid position and by cell id
         self._nodes_by_grid: Dict[tuple[int, int], _NodeRecord] = {}
         self._lines_between_nodes: dict[tuple[tuple[int, int], tuple[int, int]], QGraphicsLineItem] = {}
+        self._merge_bridge_items: dict[tuple[tuple[int, int], tuple[int, int]], MergeBridgeItem] = {}
 
         # neighbors mapping aggregated por célula (cada direção guarda um set de IDs vizinhos)
         self._neighbors: Dict[str, dict[str, set[str]]] = {}
@@ -2959,6 +3043,7 @@ class CellNeighborsWindow(QDialog):
             self._apply_border_highlight(item, is_center_sequence)
             self._apply_missing_laminate_border_if_needed(record, item)
             self._apply_review_border_if_needed(record, item)
+        self._refresh_merged_cell_visuals()
 
     @staticmethod
     def _interpolate_color(start: QColor, end: QColor, t: float) -> QColor:
@@ -3042,6 +3127,7 @@ class CellNeighborsWindow(QDialog):
             item._recenter_label()
             self._apply_missing_laminate_border_if_needed(record, item)
             self._apply_review_border_if_needed(record, item)
+        self._refresh_merged_cell_visuals()
 
     def _clear_layer_count_legend(self) -> None:
         if self._layer_count_legend_group is None:
@@ -3180,6 +3266,7 @@ class CellNeighborsWindow(QDialog):
             item._recenter_label()
             self._apply_missing_laminate_border_if_needed(record, item)
             self._apply_review_border_if_needed(record, item)
+        self._refresh_merged_cell_visuals()
 
     def _save_to_project(self) -> None:
         """Save current neighbors mapping to the project."""
@@ -3630,6 +3717,127 @@ class CellNeighborsWindow(QDialog):
         if line:
             self.scene.removeItem(line)
             del self._lines_between_nodes[key]
+        bridge = self._merge_bridge_items.pop(key, None)
+        if bridge is not None:
+            self.scene.removeItem(bridge)
+
+    def _refresh_merged_cell_visuals(self) -> None:
+        """Visually merge adjacent connected nodes that share the same cell ID."""
+        active_merge_keys: set[tuple[tuple[int, int], tuple[int, int]]] = set()
+        same_cell_adjacency: dict[tuple[int, int], set[tuple[int, int]]] = {
+            pos: set() for pos, rec in self._nodes_by_grid.items() if rec.cell_id
+        }
+
+        for rec in self._nodes_by_grid.values():
+            rec.item.set_identity_visible(True)
+
+        for key, line in list(self._lines_between_nodes.items()):
+            pos_a, pos_b = key
+            rec_a = self._nodes_by_grid.get(pos_a)
+            rec_b = self._nodes_by_grid.get(pos_b)
+            if not rec_a or not rec_b or not rec_a.cell_id or not rec_b.cell_id:
+                line.setVisible(True)
+                continue
+
+            is_same_cell = rec_a.cell_id == rec_b.cell_id
+            line.setVisible(not is_same_cell)
+            if not is_same_cell:
+                bridge = self._merge_bridge_items.pop(key, None)
+                if bridge is not None:
+                    self.scene.removeItem(bridge)
+                continue
+
+            a_rect = rec_a.item.rect()
+            b_rect = rec_b.item.rect()
+            dx = pos_b[0] - pos_a[0]
+            dy = pos_b[1] - pos_a[1]
+            orientation = "horizontal" if dy == 0 else "vertical"
+            corner_radius = 8.0
+            overlap = max(rec_a.item.pen().widthF() + 1.0, corner_radius + 0.5)
+            bridge_rect: Optional[QRectF] = None
+
+            same_cell_adjacency.setdefault(pos_a, set()).add(pos_b)
+            same_cell_adjacency.setdefault(pos_b, set()).add(pos_a)
+
+            if dy == 0 and abs(dx) == 1:
+                left = min(a_rect.right(), b_rect.right()) - overlap
+                right = max(a_rect.left(), b_rect.left()) + overlap
+                top = max(a_rect.top(), b_rect.top())
+                bottom = min(a_rect.bottom(), b_rect.bottom())
+                if right > left and bottom > top:
+                    bridge_rect = QRectF(left, top, right - left, bottom - top)
+            elif dx == 0 and abs(dy) == 1:
+                left = max(a_rect.left(), b_rect.left())
+                right = min(a_rect.right(), b_rect.right())
+                top = min(a_rect.bottom(), b_rect.bottom()) - overlap
+                bottom = max(a_rect.top(), b_rect.top()) + overlap
+                if right > left and bottom > top:
+                    bridge_rect = QRectF(left, top, right - left, bottom - top)
+
+            if bridge_rect is None:
+                continue
+
+            active_merge_keys.add(key)
+            bridge = self._merge_bridge_items.get(key)
+            if bridge is None:
+                bridge = MergeBridgeItem(orientation)
+                bridge.setZValue(0.1)
+                self.scene.addItem(bridge)
+                self._merge_bridge_items[key] = bridge
+            else:
+                bridge.set_orientation(orientation)
+
+            source_brush = rec_a.item.brush()
+            if source_brush.gradient() is not None:
+                gradient = QLinearGradient(bridge_rect.topLeft(), bridge_rect.bottomRight())
+                gradient.setColorAt(0, COLOR_CELL_GRADIENT_START)
+                gradient.setColorAt(1, COLOR_CELL_GRADIENT_END)
+                bridge.setBrush(QBrush(gradient))
+            else:
+                bridge.setBrush(QBrush(source_brush.color()))
+            bridge_pen = QPen(rec_a.item.pen())
+            bridge_pen.setColor(COLOR_CELL_BORDER)
+            bridge.setPen(bridge_pen)
+            bridge.setRect(bridge_rect)
+
+        for key in list(self._merge_bridge_items.keys()):
+            if key in active_merge_keys:
+                continue
+            item = self._merge_bridge_items.pop(key)
+            self.scene.removeItem(item)
+
+        visited: set[tuple[int, int]] = set()
+        for start in sorted(same_cell_adjacency.keys(), key=lambda p: (p[1], p[0])):
+            if start in visited:
+                continue
+            start_rec = self._nodes_by_grid.get(start)
+            if not start_rec or not start_rec.cell_id:
+                continue
+            queue = [start]
+            component: list[tuple[int, int]] = []
+            while queue:
+                current = queue.pop(0)
+                if current in visited:
+                    continue
+                visited.add(current)
+                current_rec = self._nodes_by_grid.get(current)
+                if not current_rec or current_rec.cell_id != start_rec.cell_id:
+                    continue
+                component.append(current)
+                for neighbor in same_cell_adjacency.get(current, set()):
+                    if neighbor not in visited:
+                        queue.append(neighbor)
+
+            if len(component) <= 1:
+                continue
+
+            anchor = min(component, key=lambda p: (p[1], p[0]))
+            for pos in component:
+                if pos == anchor:
+                    continue
+                rec = self._nodes_by_grid.get(pos)
+                if rec is not None:
+                    rec.item.set_identity_visible(False)
 
     def _remove_node_and_connections(
         self,
@@ -4728,6 +4936,9 @@ class CellNeighborsWindow(QDialog):
                 self._add_neighbor_relation(rec_a.cell_id, dir_ab, rec_b.cell_id)
             if dir_ba:
                 self._add_neighbor_relation(rec_b.cell_id, dir_ba, rec_a.cell_id)
+        for record in self._nodes_by_grid.values():
+            self._update_node_neighbors(record)
+        self._refresh_merged_cell_visuals()
 
     def _build_cell_adjacency_from_lines(self) -> dict[str, set[str]]:
         """Graph of cell IDs based on the drawn connections between nodes."""
@@ -4916,8 +5127,10 @@ class CellNeighborsWindow(QDialog):
             for dir_name in DIR_OFFSETS.keys():
                 record.item.set_neighbor(dir_name, None)
             record.item.set_contour_suppressed(set())
+            record.item.set_merged_sides(set())
             return
         
+        merged_sides: set[str] = set()
         suppressed: set[str] = set()
         dir_to_contour = {
             "up": "top",
@@ -4932,9 +5145,11 @@ class CellNeighborsWindow(QDialog):
             neighbor_id = neighbor_rec.cell_id if (has_connection and neighbor_rec and neighbor_rec.cell_id) else None
             record.item.set_neighbor(dir_name, neighbor_id)
             if neighbor_id and neighbor_id == record.cell_id:
+                merged_sides.add(dir_name)
                 contour_side = dir_to_contour.get(dir_name)
                 if contour_side:
                     suppressed.add(contour_side)
+        record.item.set_merged_sides(merged_sides)
         record.item.set_contour_suppressed(suppressed)
 
 
