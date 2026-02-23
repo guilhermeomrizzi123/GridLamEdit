@@ -3051,19 +3051,6 @@ class VirtualStackingWindow(QtWidgets.QDialog):
             return False
 
         adjacency = self._neighbors_adjacency()
-        missing_cells = [cid for cid, neighbors in adjacency.items() if not neighbors]
-        if missing_cells:
-            formatted = "\n".join(f"- {cid}" for cid in missing_cells)
-            QtWidgets.QMessageBox.warning(
-                self,
-                "Vizinhanças não definidas",
-                (
-                    "As seguintes células do Virtual Stacking não possuem vizinhança definida:\n"
-                    f"{formatted}\n\n"
-                    "Defina as vizinhanças dessas células antes de reordenar por vizinhança."
-                ),
-            )
-            return False
         has_neighbors = any(neighbors for neighbors in adjacency.values())
         if not has_neighbors:
             QtWidgets.QMessageBox.information(
