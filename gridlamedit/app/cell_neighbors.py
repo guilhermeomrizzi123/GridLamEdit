@@ -3446,7 +3446,8 @@ class CellNeighborsWindow(QDialog):
 
         nodes_payload = data.get("nodes", [])
         neighbors_payload = data.get("neighbors", {})
-        drawings_payload = data.get("drawings", [])
+        drawings_payload = data.get("drawings")
+        has_drawings_field = "drawings" in data
 
         # Expand known cells list with imported ones
         imported_cells: list[str] = []
@@ -3478,10 +3479,16 @@ class CellNeighborsWindow(QDialog):
             )
             return
 
-        if isinstance(drawings_payload, list):
-            self._restore_drawings_from_payload(drawings_payload)
-        else:
-            self._clear_drawing_items()
+        if has_drawings_field:
+            if isinstance(drawings_payload, list):
+                self._restore_drawings_from_payload(drawings_payload)
+            else:
+                QMessageBox.warning(
+                    self,
+                    "Campo 'drawings' inválido",
+                    "O arquivo possui 'drawings' em formato inválido. "
+                    "Os desenhos atuais foram mantidos.",
+                )
 
         self._recalculate_cell_neighbors_from_scene()
         self._update_all_plus_buttons_visibility()

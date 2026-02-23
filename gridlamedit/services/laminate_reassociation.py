@@ -163,6 +163,96 @@ def reassociate_laminates_by_contours(
     return report
 
 
+def transfer_neighbor_metadata_after_reassociation(
+    previous_model: GridModel,
+    new_model: GridModel,
+    reassociated_entries: Iterable[ReassociationEntry],
+) -> None:
+    """Transfer and remap Cell Neighbors metadata from previous to new model.
+
+    Neighbor drawings are intentionally preserved independently of cell IDs.
+    """
+    reassociation_map = {
+        entry.old_cell: entry.new_cell for entry in reassociated_entries
+    }
+    prev_nodes = list(getattr(previous_model, "cell_neighbor_nodes", []) or [])
+    prev_neighbors = dict(getattr(previous_model, "cell_neighbors", {}) or {})
+    prev_drawings = list(getattr(previous_model, "cell_neighbor_drawings", []) or [])
+
+    if prev_nodes or prev_neighbors:
+        if reassociation_map:
+            if prev_nodes:
+                new_model.cell_neighbor_nodes = _remap_neighbors_payload(
+                    prev_nodes, reassociation_map
+                )
+            if prev_neighbors:
+                new_model.cell_neighbors = _remap_neighbors_mapping(
+                    prev_neighbors, reassociation_map
+                )
+        else:
+            new_model.cell_neighbor_nodes = prev_nodes
+            new_model.cell_neighbors = prev_neighbors
+
+    if prev_drawings:
+        new_model.cell_neighbor_drawings = prev_drawings
+
+
+def _remap_cell_id(cell_id: object, mapping: dict[str, str]) -> str:
+    text = str(cell_id or "").strip()
+    if not text:
+        return ""
+    return mapping.get(text, text)
+
+
+def _remap_neighbors_payload(
+    payload: list[dict[str, object]], mapping: dict[str, str]
+) -> list[dict[str, object]]:
+    updated: list[dict[str, object]] = []
+    for entry in payload:
+        if not isinstance(entry, dict):
+            continue
+        new_entry = dict(entry)
+        new_entry["cell"] = _remap_cell_id(entry.get("cell"), mapping)
+        neighbors = entry.get("neighbors", {})
+        if isinstance(neighbors, dict):
+            remapped_neighbors: dict[str, object] = {}
+            for direction, data in neighbors.items():
+                if isinstance(data, dict):
+                    remapped = dict(data)
+                    remapped["cell"] = _remap_cell_id(data.get("cell"), mapping)
+                    remapped_neighbors[direction] = remapped
+                else:
+                    remapped_neighbors[direction] = data
+            new_entry["neighbors"] = remapped_neighbors
+        updated.append(new_entry)
+    return updated
+
+
+def _remap_neighbors_mapping(
+    mapping: dict[str, dict[str, list[str]]], cell_map: dict[str, str]
+) -> dict[str, dict[str, list[str]]]:
+    updated: dict[str, dict[str, list[str]]] = {}
+    for cell_id, directions in (mapping or {}).items():
+        new_cell = _remap_cell_id(cell_id, cell_map)
+        if not isinstance(directions, dict):
+            updated[new_cell] = {}
+            continue
+        bucket: dict[str, list[str]] = {}
+        for direction, values in directions.items():
+            if isinstance(values, (list, tuple, set)):
+                bucket[direction] = [
+                    _remap_cell_id(value, cell_map)
+                    for value in values
+                    if _remap_cell_id(value, cell_map)
+                ]
+            elif values:
+                bucket[direction] = [_remap_cell_id(values, cell_map)]
+            else:
+                bucket[direction] = []
+        updated[new_cell] = bucket
+    return updated
+
+
 def _rebuild_laminate_cells(model: GridModel) -> None:
     for laminate in model.laminados.values():
         laminate.celulas = []
