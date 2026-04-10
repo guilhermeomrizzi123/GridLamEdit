@@ -833,6 +833,7 @@ class VirtualStackingWindow(QtWidgets.QDialog):
         self._warning_banner_icon = QtGui.QIcon()
         self.undo_stack = undo_stack or QtGui.QUndoStack(self)
         self._neighbors_reorder_snapshot: Optional[dict] = None
+        self._simple_reorder_snapshot: Optional[dict] = None
 
         self._build_ui()
 
@@ -1272,6 +1273,15 @@ class VirtualStackingWindow(QtWidgets.QDialog):
         self.btn_reorganize_neighbors.toggled.connect(self._toggle_reorganizar_por_vizinhanca)
         toolbar.addWidget(self.btn_reorganize_neighbors)
 
+        self.btn_reorganize_simple = QtWidgets.QToolButton(self)
+        self.btn_reorganize_simple.setText("Simple Reorder")
+        self.btn_reorganize_simple.setToolTip(
+            "Splits mixed-orientation sequences into exclusive orientation rows with symmetry handling outside center sequences"
+        )
+        self.btn_reorganize_simple.setCheckable(True)
+        self.btn_reorganize_simple.toggled.connect(self._toggle_reorganizar_simples)
+        toolbar.addWidget(self.btn_reorganize_simple)
+
         # Novo botão: analisar simetria
         self.btn_analyze_symmetry = QtWidgets.QToolButton(self)
         self.btn_analyze_symmetry.setText("Analyze Symmetry")
@@ -1310,12 +1320,18 @@ class VirtualStackingWindow(QtWidgets.QDialog):
         return str(Path.home())
 
     def _export_virtual_stacking(self) -> None:
-        # Verificar se reordenação por vizinhança foi feita e mostrar aviso se não foi
-        if hasattr(self, "btn_reorganize_neighbors") and not self.btn_reorganize_neighbors.isChecked():
+        # Verificar se alguma reordenação está ativa e mostrar aviso se não estiver
+        neighbors_checked = bool(
+            hasattr(self, "btn_reorganize_neighbors") and self.btn_reorganize_neighbors.isChecked()
+        )
+        simple_checked = bool(
+            hasattr(self, "btn_reorganize_simple") and self.btn_reorganize_simple.isChecked()
+        )
+        if not neighbors_checked and not simple_checked:
             result = QtWidgets.QMessageBox.warning(
                 self,
-                "Aviso: Reordenação por Vizinhança não foi feita",
-                "A reordenação por vizinhança não foi realizada.\n\nVocê pode continuar com a exportação, mas tenha em mente que a ordem das células pode não estar otimizada segundo as regras de vizinhança.",
+                "Aviso: Reordenação não está ativa",
+                "Nenhuma reordenação está ativa no momento.\n\nVocê pode continuar com a exportação, mas a ordem das células/sequências pode não estar otimizada.",
                 QtWidgets.QMessageBox.Ok | QtWidgets.QMessageBox.Cancel,
                 QtWidgets.QMessageBox.Cancel,
             )
@@ -1782,6 +1798,65 @@ class VirtualStackingWindow(QtWidgets.QDialog):
         if not new_name or new_name == laminate.nome:
             return
         self._rename_laminate(laminate, new_name)
+
+    @staticmethod
+    def _build_auto_name_fast(base: str, suffix_index: int, tag: str) -> str:
+        suffix = f".{suffix_index}" if suffix_index > 0 else ""
+        tag_text = str(tag or "").strip()
+        tag_suffix = f"({tag_text})" if tag_text else ""
+        return f"{base}{suffix}{tag_suffix}"
+
+    def _auto_rename_laminates_batch(self, laminates: Iterable[Laminado]) -> None:
+        if self._project is None:
+            return
+        target_ids = {
+            id(lam)
+            for lam in laminates
+            if getattr(lam, "auto_rename_enabled", True)
+        }
+        if not target_ids:
+            return
+
+        ordered_laminates = list(getattr(self._project, "laminados", {}).values())
+        oriented_count_by_id = {
+            id(lam): count_oriented_layers(getattr(lam, "camadas", []))
+            for lam in ordered_laminates
+        }
+
+        suffix_index_by_count: dict[int, int] = {}
+        used_names: set[str] = set()
+        desired_names: dict[int, str] = {}
+
+        for laminate in ordered_laminates:
+            lam_id = id(laminate)
+            if lam_id not in target_ids:
+                used_names.add(laminate.nome)
+                continue
+
+            layer_count = oriented_count_by_id.get(lam_id, 0)
+            base = f"L{layer_count}"
+            suffix_idx = suffix_index_by_count.get(layer_count, 0)
+            candidate = self._build_auto_name_fast(
+                base,
+                suffix_idx,
+                getattr(laminate, "tag", ""),
+            )
+            while candidate in used_names:
+                suffix_idx += 1
+                candidate = self._build_auto_name_fast(
+                    base,
+                    suffix_idx,
+                    getattr(laminate, "tag", ""),
+                )
+            suffix_index_by_count[layer_count] = suffix_idx + 1
+            desired_names[lam_id] = candidate
+            used_names.add(candidate)
+
+        for laminate in ordered_laminates:
+            lam_id = id(laminate)
+            new_name = desired_names.get(lam_id)
+            if new_name and new_name != laminate.nome:
+                self._rename_laminate(laminate, new_name)
 
     def _rename_laminate(self, laminate: Laminado, new_name: str) -> None:
         if self._project is None:
@@ -2678,6 +2753,8 @@ class VirtualStackingWindow(QtWidgets.QDialog):
 
     def _toggle_reorganizar_por_vizinhanca(self, checked: bool) -> None:
         if checked:
+            if hasattr(self, "btn_reorganize_simple") and self.btn_reorganize_simple.isChecked():
+                self.btn_reorganize_simple.setChecked(False)
             self._neighbors_reorder_snapshot = self._capture_virtual_snapshot()
             applied = self.reorganizar_por_vizinhanca()
             if not applied:
@@ -2694,6 +2771,212 @@ class VirtualStackingWindow(QtWidgets.QDialog):
 
         snapshot = self._neighbors_reorder_snapshot
         self._neighbors_reorder_snapshot = None
+        if snapshot is not None:
+            self._restore_virtual_snapshot(snapshot, keep_project_ref=True)
+            laminate_names = [cell.laminate.nome for cell in self._cells]
+            self._notify_changes(laminate_names, mark_dirty=False)
+
+    def _row_orientation_groups_simple(
+        self,
+        row_idx: int,
+        cell_layers: dict[str, list[Camada]],
+        cell_order: list[str],
+    ) -> list[dict[str, object]]:
+        groups_by_orientation: OrderedDict[object, set[str]] = OrderedDict()
+        for cid in cell_order:
+            layer = self._layer_for_cell(cell_layers, cid, row_idx)
+            orientation = getattr(layer, "orientacao", None)
+            if orientation is None:
+                continue
+            normalized = self._normalize_orientation_value(orientation)
+            groups_by_orientation.setdefault(normalized, set()).add(cid)
+        return [
+            {"orientation": ori, "cells": set(cells)}
+            for ori, cells in groups_by_orientation.items()
+        ]
+
+    def _build_original_row_simple(
+        self,
+        row_idx: int,
+        cell_layers: dict[str, list[Camada]],
+        cell_order: list[str],
+    ) -> dict[str, Camada]:
+        row: dict[str, Camada] = {}
+        for cid in cell_order:
+            base_layer = self._layer_for_cell(cell_layers, cid, row_idx)
+            row[cid] = copy.copy(base_layer)
+        return row
+
+    def _build_orientation_row_simple(
+        self,
+        row_idx: int,
+        orientation: object,
+        cell_layers: dict[str, list[Camada]],
+        cell_order: list[str],
+    ) -> dict[str, Camada]:
+        row: dict[str, Camada] = {}
+        for cid in cell_order:
+            base_layer = self._layer_for_cell(cell_layers, cid, row_idx)
+            layer_copy = copy.copy(base_layer)
+            current = getattr(base_layer, "orientacao", None)
+            if current is None:
+                layer_copy.orientacao = None
+            elif self._normalize_orientation_value(current) == orientation:
+                layer_copy.orientacao = orientation
+            else:
+                layer_copy.orientacao = None
+            row[cid] = layer_copy
+        return row
+
+    def reorganizar_simples_por_orientacao(self) -> bool:
+        """Reordena por orientação sem inspecionar vizinhança."""
+        if self._project is None or not self._cells:
+            return False
+
+        for cell in self._cells:
+            self._ensure_unique_laminate_for_cell(cell)
+
+        cell_order = [cell.cell_id for cell in self._cells]
+        cell_layers: dict[str, list[Camada]] = {
+            cell.cell_id: list(getattr(cell.laminate, "camadas", []))
+            for cell in self._cells
+        }
+        total_rows = max((len(layers) for layers in cell_layers.values()), default=0)
+        if total_rows <= 0:
+            return False
+
+        if total_rows % 2 == 0:
+            center_indices = {total_rows // 2 - 1, total_rows // 2}
+        else:
+            center_indices = {total_rows // 2}
+
+        pair_iterations = total_rows // 2
+        center_steps = len([idx for idx in center_indices if 0 <= idx < total_rows])
+        progress_steps = max(pair_iterations + center_steps + 2, 1)
+        progress = QtWidgets.QProgressDialog(
+            "Simple reorder in progress...",
+            None,
+            0,
+            progress_steps,
+            self,
+        )
+        progress.setWindowTitle("Simple Reorder")
+        progress.setWindowModality(QtCore.Qt.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.setAutoClose(True)
+        progress.setAutoReset(True)
+        progress.setValue(0)
+        QtWidgets.QApplication.processEvents()
+        current_step = 0
+
+        front_rows: list[dict[str, Camada]] = []
+        back_rows: list[list[dict[str, Camada]]] = []
+        top = 0
+        bottom = total_rows - 1
+
+        while top < bottom:
+            if top in center_indices or bottom in center_indices:
+                break
+
+            top_groups = self._row_orientation_groups_simple(top, cell_layers, cell_order)
+            bottom_groups = self._row_orientation_groups_simple(bottom, cell_layers, cell_order)
+            top_orientations = [group["orientation"] for group in top_groups]
+            bottom_orientations = [group["orientation"] for group in bottom_groups]
+
+            if not top_orientations and not bottom_orientations:
+                top_rows = [self._build_original_row_simple(top, cell_layers, cell_order)]
+                bottom_rows = [self._build_original_row_simple(bottom, cell_layers, cell_order)]
+            else:
+                slot_orientations = list(top_orientations)
+                slot_orientations.extend(
+                    orientation
+                    for orientation in bottom_orientations
+                    if orientation not in slot_orientations
+                )
+                top_rows = [
+                    self._build_orientation_row_simple(top, orientation, cell_layers, cell_order)
+                    for orientation in slot_orientations
+                ]
+                bottom_rows = [
+                    self._build_orientation_row_simple(bottom, orientation, cell_layers, cell_order)
+                    for orientation in slot_orientations
+                ]
+
+            front_rows.extend(top_rows)
+            back_rows.append(bottom_rows)
+            top += 1
+            bottom -= 1
+
+            current_step += 1
+            progress.setValue(current_step)
+            QtWidgets.QApplication.processEvents()
+
+        center_rows: list[dict[str, Camada]] = []
+        for center_idx in sorted(center_indices):
+            if center_idx < 0 or center_idx >= total_rows:
+                continue
+            center_groups = self._row_orientation_groups_simple(
+                center_idx, cell_layers, cell_order
+            )
+            if len(center_groups) <= 1:
+                center_rows.append(
+                    self._build_original_row_simple(center_idx, cell_layers, cell_order)
+                )
+                continue
+            for group in center_groups:
+                center_rows.append(
+                    self._build_orientation_row_simple(
+                        center_idx,
+                        group["orientation"],
+                        cell_layers,
+                        cell_order,
+                    )
+                )
+
+            current_step += 1
+            progress.setValue(current_step)
+            QtWidgets.QApplication.processEvents()
+
+        final_rows: list[dict[str, Camada]] = []
+        final_rows.extend(front_rows)
+        final_rows.extend(center_rows)
+        for bottom_rows in reversed(back_rows):
+            for row in reversed(bottom_rows):
+                final_rows.append(row)
+
+        current_step += 1
+        progress.setValue(current_step)
+        QtWidgets.QApplication.processEvents()
+
+        self._apply_virtual_rows_to_laminates(final_rows, defer_updates=True)
+        self._notify_changes([cell.laminate.nome for cell in self._cells])
+
+        current_step += 1
+        progress.setValue(current_step)
+        QtWidgets.QApplication.processEvents()
+
+        QtWidgets.QMessageBox.information(
+            self,
+            "Simple Reorder",
+            "Simple reorder completed successfully.",
+        )
+        return True
+
+    def _toggle_reorganizar_simples(self, checked: bool) -> None:
+        if checked:
+            if hasattr(self, "btn_reorganize_neighbors") and self.btn_reorganize_neighbors.isChecked():
+                self.btn_reorganize_neighbors.setChecked(False)
+            self._simple_reorder_snapshot = self._capture_virtual_snapshot()
+            applied = self.reorganizar_simples_por_orientacao()
+            if not applied:
+                self._simple_reorder_snapshot = None
+                blocker = QtCore.QSignalBlocker(self.btn_reorganize_simple)
+                self.btn_reorganize_simple.setChecked(False)
+                del blocker
+            return
+
+        snapshot = self._simple_reorder_snapshot
+        self._simple_reorder_snapshot = None
         if snapshot is not None:
             self._restore_virtual_snapshot(snapshot, keep_project_ref=True)
             laminate_names = [cell.laminate.nome for cell in self._cells]
@@ -2771,7 +3054,7 @@ class VirtualStackingWindow(QtWidgets.QDialog):
     def _layer_for_cell(self, cell_layers: dict[str, list[Camada]], cell_id: str, row_idx: int) -> Camada:
         layers = cell_layers.get(cell_id, [])
         if 0 <= row_idx < len(layers):
-            return copy.deepcopy(layers[row_idx])
+            return layers[row_idx]
         return Camada(
             idx=0,
             material="",
@@ -2848,7 +3131,7 @@ class VirtualStackingWindow(QtWidgets.QDialog):
         snapshot: dict[str, Camada] = {}
         for cid in cell_order:
             base_layer = self._layer_for_cell(cell_layers, cid, row_idx)
-            layer_copy = copy.deepcopy(base_layer)
+            layer_copy = copy.copy(base_layer)
             if group is None:
                 if use_original_when_empty or (include_passive and cid in passive_cells):
                     snapshot[cid] = layer_copy
@@ -2895,7 +3178,12 @@ class VirtualStackingWindow(QtWidgets.QDialog):
             )
         return rows
 
-    def _apply_virtual_rows_to_laminates(self, rows: list[dict[str, Camada]]) -> None:
+    def _apply_virtual_rows_to_laminates(
+        self,
+        rows: list[dict[str, Camada]],
+        *,
+        defer_updates: bool = False,
+    ) -> None:
         if not rows:
             return
         new_layers_by_cell: dict[str, list[Camada]] = {cell.cell_id: [] for cell in self._cells}
@@ -2903,14 +3191,24 @@ class VirtualStackingWindow(QtWidgets.QDialog):
             for cid, layer in row.items():
                 layer.idx = idx
                 new_layers_by_cell.setdefault(cid, []).append(layer)
+        changed_laminates: list[Laminado] = []
         for cell in self._cells:
             layers = new_layers_by_cell.get(cell.cell_id, [])
             self._sync_sequence_and_ply_labels(layers)
             cell.laminate.camadas = layers
             model = self._stacking_model_for(cell.laminate)
             if model is not None:
-                model.update_layers(copy.deepcopy(layers))
-            self._after_laminate_changed(cell.laminate)
+                model.update_layers(layers)
+            changed_laminates.append(cell.laminate)
+
+        if defer_updates:
+            self._auto_rename_laminates_batch(changed_laminates)
+            self._mark_project_dirty()
+            self._update_summary_row()
+            return
+
+        for laminate in changed_laminates:
+            self._after_laminate_changed(laminate)
 
     def _sync_sequence_and_ply_labels(self, layers: list[Camada]) -> None:
         if not layers:
@@ -2964,7 +3262,7 @@ class VirtualStackingWindow(QtWidgets.QDialog):
             oriented[cid] = self._normalize_orientation_value(orientation)
 
         if not oriented:
-            return [copy.deepcopy(row)]
+            return [{cid: copy.copy(layer) for cid, layer in row.items()}]
 
         visited: set[str] = set()
         groups: list[tuple[int, set[str]]] = []
@@ -2998,7 +3296,7 @@ class VirtualStackingWindow(QtWidgets.QDialog):
                 base = row.get(cid)
                 if base is None:
                     continue
-                layer_copy = copy.deepcopy(base)
+                layer_copy = copy.copy(base)
                 if cid in oriented:
                     layer_copy.orientacao = oriented[cid]
                 elif cid in passive_cells:
@@ -3016,7 +3314,7 @@ class VirtualStackingWindow(QtWidgets.QDialog):
                 base = row.get(cid)
                 if base is None:
                     continue
-                layer_copy = copy.deepcopy(base)
+                layer_copy = copy.copy(base)
                 if cid in cells:
                     layer_copy.orientacao = oriented[cid]
                 elif include_passive and cid in passive_cells:
@@ -3232,7 +3530,7 @@ class VirtualStackingWindow(QtWidgets.QDialog):
             progress.setValue(current_step)
             QtWidgets.QApplication.processEvents()
 
-            self._apply_virtual_rows_to_laminates(final_rows)
+            self._apply_virtual_rows_to_laminates(final_rows, defer_updates=True)
             self._notify_changes([cell.laminate.nome for cell in self._cells])
 
             current_step += 1
@@ -3311,6 +3609,12 @@ class VirtualStackingWindow(QtWidgets.QDialog):
                 self._toggle_reorganizar_por_vizinhanca(False)
                 blocker = QtCore.QSignalBlocker(self.btn_reorganize_neighbors)
                 self.btn_reorganize_neighbors.setChecked(False)
+                del blocker
+        if hasattr(self, "btn_reorganize_simple"):
+            if self.btn_reorganize_simple.isChecked() or self._simple_reorder_snapshot is not None:
+                self._toggle_reorganizar_simples(False)
+                blocker = QtCore.QSignalBlocker(self.btn_reorganize_simple)
+                self.btn_reorganize_simple.setChecked(False)
                 del blocker
         super().closeEvent(event)
         try:
