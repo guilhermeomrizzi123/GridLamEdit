@@ -115,6 +115,8 @@ COLOR_CENTER_BORDER = QColor(250, 128, 114)  # Salmon highlight for central sequ
 COLOR_CONTOUR_TEXT = QColor(55, 65, 81)  # Dark gray for contour labels
 COLOR_MISSING_LAMINATE_BORDER = QColor(220, 53, 69)  # Red warning border for missing laminate
 COLOR_REVIEW_MISMATCH_BORDER = QColor(220, 53, 69)  # Red border for review mismatches
+COLOR_NEIGHBOR_DIFF_FILL = QColor(220, 53, 69)  # Red fill for neighbor-difference analysis
+COLOR_NEIGHBOR_DIFF_LINE = QColor(220, 53, 69)  # Red line for neighbor-difference analysis
 
 COLOR_AML_SOFT = QColor(78, 153, 223)  # Clear blue for Soft
 COLOR_AML_QUASI = QColor(147, 112, 219)  # Purple for Quasi-iso
@@ -1095,6 +1097,14 @@ class CellNeighborsWindow(QDialog):
         self._review_mismatch_cells: set[str] = set()
         self._review_diff_details: dict[str, list[str]] = {}
         self._review_prev_state: Optional[dict[str, object]] = None
+        self._neighbor_diff_active = False
+        self._neighbor_diff_ui_lock = False
+        self._neighbor_diff_threshold = 0
+        self._neighbor_diff_cells: set[str] = set()
+        self._neighbor_diff_line_keys: set[tuple[tuple[int, int], tuple[int, int]]] = set()
+        self._neighbor_diff_prev_state: Optional[dict[str, object]] = None
+        self._neighbor_diff_direction_mode = "both"
+        self._neighbor_diff_compare_mode = "aml_only"
 
         # Main layout
         main_layout = QVBoxLayout(self)
@@ -1152,7 +1162,13 @@ class CellNeighborsWindow(QDialog):
             "Colorir células por quantidade de camadas (azul claro -> vermelho)"
         )
         self.layer_count_toggle_button.toggled.connect(self._on_layer_count_toggle)
-        toolbar.addWidget(self.layer_count_toggle_button)
+        self.layer_count_toggle_button.hide()
+
+        self.neighbor_diff_button = QPushButton("Diferenças Vizinhas", self)
+        self.neighbor_diff_button.setCheckable(True)
+        self._update_neighbor_diff_tooltip()
+        self.neighbor_diff_button.toggled.connect(self._on_neighbor_diff_toggle)
+        toolbar.addWidget(self.neighbor_diff_button)
 
         # Missing laminate highlight toggle
         self.missing_laminate_button = QPushButton("Sem laminado (0)", self)
@@ -1315,6 +1331,13 @@ class CellNeighborsWindow(QDialog):
         view.viewport().installEventFilter(self)
 
     def _on_drawing_tool_toggled(self, tool: str, checked: bool) -> None:
+        if self._neighbor_diff_ui_lock:
+            action = self._drawing_actions.get(tool)
+            if action is not None and action.isChecked():
+                blocker = QSignalBlocker(action)
+                action.setChecked(False)
+                del blocker
+            return
         if self._review_ui_lock:
             action = self._drawing_actions.get(tool)
             if action is not None and action.isChecked():
@@ -1854,6 +1877,7 @@ class CellNeighborsWindow(QDialog):
         self._ensure_reorder_neighbors_off()
         self._ensure_missing_laminate_off()
         self._ensure_review_off()
+        self._ensure_neighbor_diff_off()
 
         # Clear highlights and proceed with close
         self._clear_disconnected_highlights()
@@ -1864,6 +1888,7 @@ class CellNeighborsWindow(QDialog):
         self._ensure_reorder_neighbors_off()
         self._ensure_missing_laminate_off()
         self._ensure_review_off()
+        self._ensure_neighbor_diff_off()
         super().hideEvent(event)
 
     def reject(self) -> None:
@@ -1873,6 +1898,7 @@ class CellNeighborsWindow(QDialog):
         self._ensure_reorder_neighbors_off()
         self._ensure_missing_laminate_off()
         self._ensure_review_off()
+        self._ensure_neighbor_diff_off()
         self._clear_disconnected_highlights()
         super().reject()
 
@@ -1887,6 +1913,10 @@ class CellNeighborsWindow(QDialog):
     def _ensure_review_off(self) -> None:
         if hasattr(self, "review_toggle_button") and self.review_toggle_button.isChecked():
             self.review_toggle_button.setChecked(False)
+
+    def _ensure_neighbor_diff_off(self) -> None:
+        if hasattr(self, "neighbor_diff_button") and self.neighbor_diff_button.isChecked():
+            self.neighbor_diff_button.setChecked(False)
 
     def _set_reorder_edit_lock(self, locked: bool) -> None:
         if self._reorder_edit_lock == locked:
@@ -1922,6 +1952,8 @@ class CellNeighborsWindow(QDialog):
         self.export_neighbors_button.setEnabled(not locked and not self._missing_laminate_ui_lock and not self._review_ui_lock)
         self.import_neighbors_button.setEnabled(not locked and not self._missing_laminate_ui_lock and not self._review_ui_lock)
         self.print_pdf_button.setEnabled(not locked and not self._missing_laminate_ui_lock and not self._review_ui_lock)
+        if hasattr(self, "neighbor_diff_button"):
+            self.neighbor_diff_button.setEnabled(not locked and not self._missing_laminate_ui_lock and not self._review_ui_lock)
         if hasattr(self, "missing_laminate_button"):
             self.missing_laminate_button.setEnabled(not locked and not self._aml_ui_lock and not self._review_ui_lock)
 
@@ -1969,6 +2001,8 @@ class CellNeighborsWindow(QDialog):
         self.import_neighbors_button.setEnabled(not locked and not self._missing_laminate_ui_lock and not self._review_ui_lock)
         self.print_pdf_button.setEnabled(not locked and not self._missing_laminate_ui_lock and not self._review_ui_lock)
         self.layer_count_toggle_button.setEnabled(not locked and not self._missing_laminate_ui_lock and not self._review_ui_lock)
+        if hasattr(self, "neighbor_diff_button"):
+            self.neighbor_diff_button.setEnabled(not locked and not self._missing_laminate_ui_lock and not self._review_ui_lock)
         if hasattr(self, "missing_laminate_button"):
             self.missing_laminate_button.setEnabled(not locked and not self._reorder_edit_lock and not self._review_ui_lock)
 
@@ -2016,6 +2050,8 @@ class CellNeighborsWindow(QDialog):
         self.export_neighbors_button.setEnabled(not locked and not self._reorder_edit_lock and not self._aml_ui_lock and not self._review_ui_lock)
         self.import_neighbors_button.setEnabled(not locked and not self._reorder_edit_lock and not self._aml_ui_lock and not self._review_ui_lock)
         self.print_pdf_button.setEnabled(not locked and not self._reorder_edit_lock and not self._aml_ui_lock and not self._review_ui_lock)
+        if hasattr(self, "neighbor_diff_button"):
+            self.neighbor_diff_button.setEnabled(not locked and not self._reorder_edit_lock and not self._aml_ui_lock and not self._review_ui_lock)
 
         # Undo/Redo actions
         if locked or self._review_ui_lock:
@@ -2039,6 +2075,8 @@ class CellNeighborsWindow(QDialog):
             self.layer_count_toggle_button.setChecked(False)
         if hasattr(self, "missing_laminate_button"):
             self.missing_laminate_button.setChecked(False)
+        if hasattr(self, "neighbor_diff_button"):
+            self.neighbor_diff_button.setChecked(False)
         cells = []
         self._neighbors = {}
         if model is not None:
@@ -2085,7 +2123,9 @@ class CellNeighborsWindow(QDialog):
             return
         for rec in self._nodes_by_grid.values():
             self._update_node_cell_display(rec)
-        if self._aml_highlight_enabled:
+        if self._neighbor_diff_active:
+            self.update_cell_colors_for_neighbor_diff()
+        elif self._aml_highlight_enabled:
             self.update_cell_colors_for_aml()
         elif self._layer_count_highlight_enabled:
             self.update_cell_colors_for_layer_count()
@@ -2135,7 +2175,7 @@ class CellNeighborsWindow(QDialog):
 
     def _update_command_buttons(self, *args) -> None:
         """Enable/disable Undo/Redo respecting AML lock state."""
-        if self._reorder_edit_lock or self._missing_laminate_ui_lock or self._review_ui_lock:
+        if self._reorder_edit_lock or self._missing_laminate_ui_lock or self._review_ui_lock or self._neighbor_diff_ui_lock:
             self.undo_action.setEnabled(False)
             self.redo_action.setEnabled(False)
             return
@@ -2151,6 +2191,8 @@ class CellNeighborsWindow(QDialog):
         if self._aml_highlight_enabled:
             return
         if self._layer_count_highlight_enabled:
+            return
+        if self._neighbor_diff_active:
             return
         if not self._has_unsaved_changes:
             return
@@ -2245,6 +2287,14 @@ class CellNeighborsWindow(QDialog):
 
     def _on_sequence_changed(self, combo_index: int) -> None:
         """Handle combo change: index 0 => no sequence colouring, else 1-based sequence number."""
+        if self._neighbor_diff_active:
+            if combo_index != 0:
+                self.sequence_combo.blockSignals(True)
+                self.sequence_combo.setCurrentIndex(0)
+                self.sequence_combo.blockSignals(False)
+            self._current_sequence_index = None
+            self.update_cell_colors_for_neighbor_diff()
+            return
         if self._aml_highlight_enabled:
             # Keep AML mode locked to the base ("Nenhuma") sequence
             if combo_index != 0:
@@ -2300,6 +2350,11 @@ class CellNeighborsWindow(QDialog):
         return window
 
     def _on_reorder_neighbors_toggle(self, checked: bool) -> None:
+        if self._neighbor_diff_ui_lock:
+            blocker = QSignalBlocker(self.reorder_neighbors_button)
+            self.reorder_neighbors_button.setChecked(False)
+            del blocker
+            return
         if self._review_ui_lock:
             blocker = QSignalBlocker(self.reorder_neighbors_button)
             self.reorder_neighbors_button.setChecked(False)
@@ -2358,6 +2413,11 @@ class CellNeighborsWindow(QDialog):
         self._refresh_sequence_combo_preserve_selection()
 
     def _on_aml_toggle(self, enabled: bool) -> None:
+        if self._neighbor_diff_ui_lock:
+            blocker = QSignalBlocker(self.aml_toggle_button)
+            self.aml_toggle_button.setChecked(False)
+            del blocker
+            return
         if self._review_ui_lock:
             blocker = QSignalBlocker(self.aml_toggle_button)
             self.aml_toggle_button.setChecked(False)
@@ -2381,6 +2441,11 @@ class CellNeighborsWindow(QDialog):
             self._deactivate_aml_highlight()
 
     def _on_layer_count_toggle(self, enabled: bool) -> None:
+        if self._neighbor_diff_ui_lock:
+            blocker = QSignalBlocker(self.layer_count_toggle_button)
+            self.layer_count_toggle_button.setChecked(False)
+            del blocker
+            return
         if self._review_ui_lock:
             blocker = QSignalBlocker(self.layer_count_toggle_button)
             self.layer_count_toggle_button.setChecked(False)
@@ -2399,6 +2464,11 @@ class CellNeighborsWindow(QDialog):
             self._deactivate_layer_count_highlight()
 
     def _on_missing_laminate_toggle(self, enabled: bool) -> None:
+        if self._neighbor_diff_ui_lock:
+            blocker = QSignalBlocker(self.missing_laminate_button)
+            self.missing_laminate_button.setChecked(False)
+            del blocker
+            return
         if self._review_ui_lock:
             blocker = QSignalBlocker(self.missing_laminate_button)
             self.missing_laminate_button.setChecked(False)
@@ -2425,6 +2495,11 @@ class CellNeighborsWindow(QDialog):
         self._refresh_missing_laminate_button_state()
 
     def _on_review_toggle(self, enabled: bool) -> None:
+        if self._neighbor_diff_ui_lock:
+            blocker = QSignalBlocker(self.review_toggle_button)
+            self.review_toggle_button.setChecked(False)
+            del blocker
+            return
         if enabled:
             if self._model is None:
                 QMessageBox.warning(
@@ -2622,6 +2697,8 @@ class CellNeighborsWindow(QDialog):
         self.export_neighbors_button.setEnabled(not locked and not self._missing_laminate_ui_lock)
         self.import_neighbors_button.setEnabled(not locked and not self._missing_laminate_ui_lock)
         self.print_pdf_button.setEnabled(not locked and not self._missing_laminate_ui_lock)
+        if hasattr(self, "neighbor_diff_button"):
+            self.neighbor_diff_button.setEnabled(not locked and not self._missing_laminate_ui_lock)
         if hasattr(self, "missing_laminate_button"):
             self.missing_laminate_button.setEnabled(not locked and not self._aml_ui_lock)
 
@@ -2636,6 +2713,465 @@ class CellNeighborsWindow(QDialog):
             self._update_command_buttons()
 
         self._update_all_plus_buttons_visibility()
+
+    def _store_neighbor_diff_previous_state(self) -> None:
+        self._neighbor_diff_prev_state = {
+            "sequence_index": self.sequence_combo.currentIndex() if hasattr(self, "sequence_combo") else 0,
+            "reorder": self.reorder_neighbors_button.isChecked(),
+            "aml": self.aml_toggle_button.isChecked(),
+            "layer_count": self.layer_count_toggle_button.isChecked(),
+            "missing": self.missing_laminate_button.isChecked() if hasattr(self, "missing_laminate_button") else False,
+        }
+
+    def _restore_neighbor_diff_previous_state(self) -> None:
+        if not self._neighbor_diff_prev_state:
+            return
+
+        previous = dict(self._neighbor_diff_prev_state)
+        self._neighbor_diff_prev_state = None
+
+        if previous.get("missing") and hasattr(self, "missing_laminate_button"):
+            self.missing_laminate_button.setChecked(True)
+        if previous.get("layer_count"):
+            self.layer_count_toggle_button.setChecked(True)
+        if previous.get("aml"):
+            self.aml_toggle_button.setChecked(True)
+        if previous.get("reorder"):
+            self.reorder_neighbors_button.setChecked(True)
+
+        if hasattr(self, "sequence_combo"):
+            seq_index = int(previous.get("sequence_index", 0) or 0)
+            if 0 <= seq_index < self.sequence_combo.count():
+                self.sequence_combo.setCurrentIndex(seq_index)
+
+    def _set_neighbor_diff_ui_lock(self, locked: bool) -> None:
+        if self._neighbor_diff_ui_lock == locked:
+            return
+        self._neighbor_diff_ui_lock = locked
+
+        if locked:
+            if self._print_selection_active:
+                self._cancel_print_selection()
+                if self.print_pdf_button.isChecked():
+                    blocker = QSignalBlocker(self.print_pdf_button)
+                    self.print_pdf_button.setChecked(False)
+                    del blocker
+                self._apply_drawing_cursor()
+            for action in self._drawing_actions.values():
+                if action.isChecked():
+                    blocker = QSignalBlocker(action)
+                    action.setChecked(False)
+                    del blocker
+            self._drawing_tool = None
+            self._cancel_active_line()
+            self._apply_drawing_cursor()
+
+        drawing_enabled = (
+            not locked
+            and not self._reorder_edit_lock
+            and not self._aml_ui_lock
+            and not self._missing_laminate_ui_lock
+            and not self._review_ui_lock
+        )
+        for action in self._drawing_actions.values():
+            action.setEnabled(drawing_enabled)
+        self._set_drawing_option_widgets_enabled(drawing_enabled)
+
+        self.sequence_combo.setEnabled(
+            not locked
+            and not self._aml_highlight_enabled
+            and not self._layer_count_highlight_enabled
+            and not self._review_ui_lock
+            and not self._missing_laminate_ui_lock
+        )
+        self.sequence_label.setEnabled(
+            not locked
+            and not self._aml_highlight_enabled
+            and not self._layer_count_highlight_enabled
+            and not self._review_ui_lock
+            and not self._missing_laminate_ui_lock
+        )
+
+        buttons_enabled = not locked
+        self.reorder_neighbors_button.setEnabled(
+            buttons_enabled and not self._aml_ui_lock and not self._missing_laminate_ui_lock and not self._review_ui_lock
+        )
+        self.aml_toggle_button.setEnabled(
+            buttons_enabled and not self._reorder_edit_lock and not self._missing_laminate_ui_lock and not self._review_ui_lock
+        )
+        self.layer_count_toggle_button.setEnabled(
+            buttons_enabled and not self._reorder_edit_lock and not self._missing_laminate_ui_lock and not self._review_ui_lock
+        )
+        if hasattr(self, "missing_laminate_button"):
+            self.missing_laminate_button.setEnabled(
+                buttons_enabled and not self._reorder_edit_lock and not self._aml_ui_lock and not self._review_ui_lock
+            )
+        self.review_toggle_button.setEnabled(buttons_enabled and not self._missing_laminate_ui_lock)
+        self.export_neighbors_button.setEnabled(
+            buttons_enabled and not self._reorder_edit_lock and not self._aml_ui_lock and not self._missing_laminate_ui_lock and not self._review_ui_lock
+        )
+        self.import_neighbors_button.setEnabled(
+            buttons_enabled and not self._reorder_edit_lock and not self._aml_ui_lock and not self._missing_laminate_ui_lock and not self._review_ui_lock
+        )
+        self.print_pdf_button.setEnabled(
+            buttons_enabled and not self._reorder_edit_lock and not self._aml_ui_lock and not self._missing_laminate_ui_lock and not self._review_ui_lock
+        )
+
+        if hasattr(self, "neighbor_diff_button"):
+            self.neighbor_diff_button.setEnabled(True)
+
+        if locked:
+            self.undo_action.setEnabled(False)
+            self.redo_action.setEnabled(False)
+        else:
+            self._update_command_buttons()
+
+        self._update_all_plus_buttons_visibility()
+
+    def _on_neighbor_diff_toggle(self, enabled: bool) -> None:
+        if enabled:
+            if self._model is None:
+                QMessageBox.warning(self, "Diferenças por vizinhança", "Nenhum projeto carregado para analisar.")
+                blocker = QSignalBlocker(self.neighbor_diff_button)
+                self.neighbor_diff_button.setChecked(False)
+                del blocker
+                return
+
+            threshold, accepted = QInputDialog.getInt(
+                self,
+                "Diferenças por vizinhança",
+                "Número mínimo de diferenças por par de células:",
+                self._neighbor_diff_threshold if self._neighbor_diff_threshold > 0 else 10,
+                1,
+                9999,
+                1,
+            )
+            if not accepted:
+                blocker = QSignalBlocker(self.neighbor_diff_button)
+                self.neighbor_diff_button.setChecked(False)
+                del blocker
+                return
+
+            compare_mode = self._prompt_neighbor_diff_compare_mode()
+            if compare_mode is None:
+                blocker = QSignalBlocker(self.neighbor_diff_button)
+                self.neighbor_diff_button.setChecked(False)
+                del blocker
+                return
+
+            direction_mode = self._prompt_neighbor_diff_direction_mode()
+            if direction_mode is None:
+                blocker = QSignalBlocker(self.neighbor_diff_button)
+                self.neighbor_diff_button.setChecked(False)
+                del blocker
+                return
+
+            self._store_neighbor_diff_previous_state()
+
+            if self.reorder_neighbors_button.isChecked():
+                self.reorder_neighbors_button.setChecked(False)
+            if self.aml_toggle_button.isChecked():
+                self.aml_toggle_button.setChecked(False)
+            if self.layer_count_toggle_button.isChecked():
+                self.layer_count_toggle_button.setChecked(False)
+            if self.missing_laminate_button.isChecked():
+                self.missing_laminate_button.setChecked(False)
+            if self.review_toggle_button.isChecked():
+                self.review_toggle_button.setChecked(False)
+
+            self._neighbor_diff_threshold = int(threshold)
+            self._neighbor_diff_direction_mode = direction_mode
+            self._neighbor_diff_compare_mode = compare_mode
+            self._update_neighbor_diff_tooltip()
+            self._neighbor_diff_active = True
+            self._set_neighbor_diff_ui_lock(True)
+            self._run_neighbor_diff_analysis()
+        else:
+            self._neighbor_diff_active = False
+            self._neighbor_diff_cells.clear()
+            self._neighbor_diff_line_keys.clear()
+            self._apply_neighbor_diff_line_styles()
+            self._set_neighbor_diff_ui_lock(False)
+            self._restore_neighbor_diff_previous_state()
+            self._on_sequence_changed(self.sequence_combo.currentIndex())
+
+    def _update_neighbor_diff_tooltip(self) -> None:
+        if not hasattr(self, "neighbor_diff_button"):
+            return
+        compare_label = {
+            "aml_only": "Somente AML",
+            "aml_and_layer_count": "AML + total de camadas",
+        }.get(self._neighbor_diff_compare_mode, "Somente AML")
+        direction_label = {
+            "vertical": "Vertical (cima/baixo)",
+            "horizontal": "Horizontal (esquerda/direita)",
+            "both": "Ambas",
+        }.get(self._neighbor_diff_direction_mode, "Ambas")
+        threshold_label = str(self._neighbor_diff_threshold) if self._neighbor_diff_threshold > 0 else "não definido"
+        self.neighbor_diff_button.setToolTip(
+            "Comparar sequências/orientações entre células vizinhas conectadas"
+            f"\nÚltimo modo: {compare_label}"
+            f"\nÚltima direção: {direction_label}"
+            f"\nÚltimo limite: {threshold_label}"
+        )
+
+    def _prompt_neighbor_diff_compare_mode(self) -> Optional[str]:
+        options = [
+            "Somente AML (orientações por sequência)",
+            "AML + diferença no total de camadas",
+        ]
+        default_index = 1 if self._neighbor_diff_compare_mode == "aml_and_layer_count" else 0
+        selected, accepted = QInputDialog.getItem(
+            self,
+            "Diferenças por vizinhança",
+            "Tipo de comparação:",
+            options,
+            default_index,
+            False,
+        )
+        if not accepted:
+            return None
+        if selected == options[1]:
+            return "aml_and_layer_count"
+        return "aml_only"
+
+    def _prompt_neighbor_diff_direction_mode(self) -> Optional[str]:
+        options = [
+            "Vertical (cima/baixo)",
+            "Horizontal (esquerda/direita)",
+            "Ambas (vertical + horizontal)",
+        ]
+        default_index = {
+            "vertical": 0,
+            "horizontal": 1,
+            "both": 2,
+        }.get(self._neighbor_diff_direction_mode, 2)
+        selected, accepted = QInputDialog.getItem(
+            self,
+            "Diferenças por vizinhança",
+            "Direção da análise:",
+            options,
+            default_index,
+            False,
+        )
+        if not accepted:
+            return None
+        if selected == options[0]:
+            return "vertical"
+        if selected == options[1]:
+            return "horizontal"
+        return "both"
+
+    def _run_neighbor_diff_analysis(self) -> None:
+        if self._model is None:
+            self._neighbor_diff_cells.clear()
+            self._neighbor_diff_line_keys.clear()
+            self.update_cell_colors_for_neighbor_diff()
+            return
+
+        connected_pairs = self._collect_connected_neighbor_pairs(self._neighbor_diff_direction_mode)
+        highlighted_cells, qualified_pairs, highlighted_line_keys = self._collect_neighbor_diff_cells_for_threshold(
+            connected_pairs,
+            self._neighbor_diff_threshold,
+            self._neighbor_diff_compare_mode,
+        )
+        self._neighbor_diff_cells = highlighted_cells
+        self._neighbor_diff_line_keys = highlighted_line_keys
+        self.update_cell_colors_for_neighbor_diff()
+
+        mode_label = {
+            "vertical": "vertical (cima/baixo)",
+            "horizontal": "horizontal (esquerda/direita)",
+            "both": "ambas",
+        }.get(self._neighbor_diff_direction_mode, "ambas")
+        compare_label = {
+            "aml_only": "somente AML",
+            "aml_and_layer_count": "AML + total de camadas",
+        }.get(self._neighbor_diff_compare_mode, "somente AML")
+
+        QMessageBox.information(
+            self,
+            "Diferenças por vizinhança",
+            (
+                f"Análise concluída.\n"
+                f"Tipo de comparação: {compare_label}\n"
+                f"Direção analisada: {mode_label}\n"
+                f"Pares conectados analisados: {len(connected_pairs)}\n"
+                f"Pares com {self._neighbor_diff_threshold} ou mais diferenças: {qualified_pairs}\n"
+                f"Células destacadas em vermelho: {len(self._neighbor_diff_cells)}"
+            ),
+        )
+
+    def _collect_connected_neighbor_pairs(self, direction_mode: str) -> list[tuple[str, str]]:
+        if direction_mode == "vertical":
+            allowed_directions = {"up", "down"}
+        elif direction_mode == "horizontal":
+            allowed_directions = {"left", "right"}
+        else:
+            allowed_directions = set(DIR_OFFSETS.keys())
+
+        valid_cells = {
+            rec.cell_id
+            for rec in self._nodes_by_grid.values()
+            if rec.cell_id
+        }
+        pairs: set[tuple[str, str]] = set()
+        for src_cell, mapping in self._neighbors.items():
+            if src_cell not in valid_cells:
+                continue
+            if not isinstance(mapping, dict):
+                continue
+            for direction in DIR_OFFSETS.keys():
+                if direction not in allowed_directions:
+                    continue
+                neighbor_ids = mapping.get(direction, set())
+                if not isinstance(neighbor_ids, set):
+                    try:
+                        neighbor_ids = set(neighbor_ids or [])
+                    except Exception:
+                        neighbor_ids = set()
+                for dst_cell in neighbor_ids:
+                    if not dst_cell or dst_cell not in valid_cells or dst_cell == src_cell:
+                        continue
+                    pair = tuple(sorted((src_cell, dst_cell)))
+                    pairs.add(pair)
+        return sorted(pairs)
+
+    def _collect_neighbor_diff_cells_for_threshold(
+        self,
+        pairs: list[tuple[str, str]],
+        threshold: int,
+        compare_mode: str,
+    ) -> tuple[set[str], int, set[tuple[tuple[int, int], tuple[int, int]]]]:
+        highlighted: set[str] = set()
+        qualifying_pairs = 0
+        line_keys: set[tuple[tuple[int, int], tuple[int, int]]] = set()
+        sequence_cache: dict[str, list[Optional[float]]] = {}
+
+        for cell_a, cell_b in pairs:
+            seq_a = sequence_cache.get(cell_a)
+            if seq_a is None:
+                seq_a = self._collect_cell_sequence_orientations(cell_a)
+                sequence_cache[cell_a] = seq_a
+            seq_b = sequence_cache.get(cell_b)
+            if seq_b is None:
+                seq_b = self._collect_cell_sequence_orientations(cell_b)
+                sequence_cache[cell_b] = seq_b
+
+            diff_count = self._count_sequence_differences(seq_a, seq_b, compare_mode)
+            if diff_count >= threshold:
+                qualifying_pairs += 1
+                highlighted.add(cell_a)
+                highlighted.add(cell_b)
+                line_keys.update(self._collect_line_keys_for_cell_pair(cell_a, cell_b))
+
+        return highlighted, qualifying_pairs, line_keys
+
+    def _collect_line_keys_for_cell_pair(
+        self,
+        cell_a: str,
+        cell_b: str,
+    ) -> set[tuple[tuple[int, int], tuple[int, int]]]:
+        keys: set[tuple[tuple[int, int], tuple[int, int]]] = set()
+        if not cell_a or not cell_b:
+            return keys
+        for key in self._lines_between_nodes.keys():
+            pos_a, pos_b = key
+            rec_a = self._nodes_by_grid.get(pos_a)
+            rec_b = self._nodes_by_grid.get(pos_b)
+            if rec_a is None or rec_b is None:
+                continue
+            pair = {rec_a.cell_id, rec_b.cell_id}
+            if pair == {cell_a, cell_b}:
+                keys.add(key)
+        return keys
+
+    def _apply_default_neighbor_connection_style(self, line: QGraphicsLineItem) -> None:
+        pen = QPen(COLOR_DASH)
+        pen.setStyle(Qt.DashLine)
+        pen.setWidth(3)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        line.setPen(pen)
+        line.setOpacity(0.7)
+
+    def _apply_neighbor_diff_line_styles(self) -> None:
+        for key, line in self._lines_between_nodes.items():
+            if key in self._neighbor_diff_line_keys and self._neighbor_diff_active:
+                pen = QPen(COLOR_NEIGHBOR_DIFF_LINE)
+                pen.setStyle(Qt.DashLine)
+                pen.setWidth(5)
+                pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+                line.setPen(pen)
+                line.setOpacity(1.0)
+            else:
+                self._apply_default_neighbor_connection_style(line)
+
+    def _collect_cell_sequence_orientations(self, cell_id: str) -> list[Optional[float]]:
+        if self._model is None:
+            return []
+        try:
+            cell_to_laminate = getattr(self._model, "cell_to_laminate", {}) or {}
+        except Exception:
+            cell_to_laminate = {}
+        try:
+            laminados = getattr(self._model, "laminados", {}) or {}
+        except Exception:
+            laminados = {}
+
+        laminate_name = cell_to_laminate.get(cell_id)
+        laminado = laminados.get(laminate_name) if laminate_name else None
+        camadas = getattr(laminado, "camadas", []) if laminado else []
+
+        seq: list[Optional[float]] = []
+        for camada in camadas:
+            orient = getattr(camada, "orientacao", None)
+            if orient is None:
+                seq.append(None)
+                continue
+            try:
+                seq.append(float(normalize_angle(orient)))
+            except Exception:
+                try:
+                    seq.append(float(str(orient).replace(",", ".")))
+                except Exception:
+                    seq.append(None)
+        return seq
+
+    @staticmethod
+    def _count_sequence_differences(
+        seq_a: list[Optional[float]],
+        seq_b: list[Optional[float]],
+        compare_mode: str,
+    ) -> int:
+        differences = 0
+        max_common_len = min(len(seq_a), len(seq_b))
+        for idx in range(max_common_len):
+            value_a = seq_a[idx]
+            value_b = seq_b[idx]
+            if value_a is None or value_b is None:
+                continue
+            if not math.isclose(float(value_a), float(value_b), rel_tol=0.0, abs_tol=1e-6):
+                differences += 1
+
+        if compare_mode == "aml_and_layer_count":
+            differences += abs(len(seq_a) - len(seq_b))
+
+        return differences
+
+    def update_cell_colors_for_neighbor_diff(self) -> None:
+        self._apply_neighbor_diff_line_styles()
+        for record in self._nodes_by_grid.values():
+            item = record.item
+            item._orientation_label.setText("")
+            item._aml_label.setText("")
+            highlighted = bool(record.cell_id and record.cell_id in self._neighbor_diff_cells)
+            if highlighted:
+                item.setBrush(QBrush(COLOR_NEIGHBOR_DIFF_FILL))
+            else:
+                item.setBrush(item._normal_brush)
+            self._apply_border_highlight(item, False)
+            item._recenter_label()
+        self._refresh_merged_cell_visuals()
 
     def _show_review_report_dialog(self, mismatch_count: int) -> None:
         dialog = QDialog(self)
@@ -3371,7 +3907,12 @@ class CellNeighborsWindow(QDialog):
                     logger.warning(f"Failed to save cell neighbors: {e}")
 
     def _toggle_print_selection(self, checked: bool) -> None:
-        if checked and (self._reorder_edit_lock or self._missing_laminate_ui_lock or self._review_ui_lock):
+        if checked and (
+            self._reorder_edit_lock
+            or self._missing_laminate_ui_lock
+            or self._review_ui_lock
+            or self._neighbor_diff_ui_lock
+        ):
             blocker = QSignalBlocker(self.print_pdf_button)
             self.print_pdf_button.setChecked(False)
             del blocker
@@ -4829,13 +5370,8 @@ class CellNeighborsWindow(QDialog):
             return
         
         line = QGraphicsLineItem(start_x, start_y, end_x, end_y)
-        pen = QPen(COLOR_DASH)
-        pen.setStyle(Qt.DashLine)
-        pen.setWidth(3)
-        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-        line.setPen(pen)
+        self._apply_default_neighbor_connection_style(line)
         line.setZValue(-2)  # Draw connection lines behind everything
-        line.setOpacity(0.7)  # Subtle glow effect
         self.scene.addItem(line)
         self._lines_between_nodes[key] = line
 
