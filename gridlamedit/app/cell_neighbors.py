@@ -115,6 +115,8 @@ COLOR_CENTER_BORDER = QColor(250, 128, 114)  # Salmon highlight for central sequ
 COLOR_CONTOUR_TEXT = QColor(55, 65, 81)  # Dark gray for contour labels
 COLOR_MISSING_LAMINATE_BORDER = QColor(220, 53, 69)  # Red warning border for missing laminate
 COLOR_REVIEW_MISMATCH_BORDER = QColor(220, 53, 69)  # Red border for review mismatches
+COLOR_REVIEW_MISMATCH_FILL = QColor(220, 53, 69)  # Red fill for review mismatches
+COLOR_REVIEW_OK_FILL = QColor(57, 255, 20)  # Neon green fill for reviewed cells with no mismatch
 COLOR_NEIGHBOR_DIFF_FILL = QColor(220, 53, 69)  # Red fill for neighbor-difference analysis
 COLOR_NEIGHBOR_DIFF_LINE = QColor(220, 53, 69)  # Red line for neighbor-difference analysis
 
@@ -156,7 +158,7 @@ DIR_OFFSETS: dict[str, tuple[int, int]] = {
     "right": (1, 0),
 }
 
-REVIEW_SEQUENCE_PATTERN = re.compile(r"^S\.(\d+)$", re.IGNORECASE)
+REVIEW_SEQUENCE_PATTERN = re.compile(r"^(?:S|SEQ)\s*[\._-]?\s*(\d+)$", re.IGNORECASE)
 REVIEW_PLY_PATTERN = re.compile(r"^PLY\s*[\._-]?\s*(\d+)$", re.IGNORECASE)
 
 
@@ -693,6 +695,7 @@ class CellNodeItem(QGraphicsRectItem):
         self.on_insert_row_below = None
         self.on_delete_col = None
         self.on_delete_row = None
+        self.on_is_review_click_enabled = None
         self.plus_items: dict[str, PlusButtonItem] = {}
         self.plus_lines: dict[str, QGraphicsLineItem] = {}
         self._neighbors: dict[str, Optional[str]] = {"up": None, "down": None, "left": None, "right": None}
@@ -962,6 +965,18 @@ class CellNodeItem(QGraphicsRectItem):
         if event.button() == Qt.RightButton:
             self._show_context_menu(event.screenPos())
             event.accept()
+        elif event.button() == Qt.LeftButton and callable(self.on_select_cell):
+            review_click_enabled = False
+            if callable(self.on_is_review_click_enabled):
+                try:
+                    review_click_enabled = bool(self.on_is_review_click_enabled())
+                except Exception:
+                    review_click_enabled = False
+            if review_click_enabled:
+                self.on_select_cell()
+                event.accept()
+                return
+            super().mousePressEvent(event)
         else:
             super().mousePressEvent(event)
 
@@ -1094,9 +1109,10 @@ class CellNeighborsWindow(QDialog):
         self._missing_laminate_toggle_active = False
         self._review_ui_lock = False
         self._review_active = False
-        self._review_payload: Optional[dict[str, dict[int, Optional[float]]]] = None
+        self._review_payload: Optional[dict[str, list[Optional[float]]]] = None
+        self._review_compared_cells: set[str] = set()
         self._review_mismatch_cells: set[str] = set()
-        self._review_diff_details: dict[str, list[str]] = {}
+        self._review_diff_details: dict[str, list[tuple[int, Optional[float], Optional[float]]]] = {}
         self._review_prev_state: Optional[dict[str, object]] = None
         self._neighbor_diff_active = False
         self._neighbor_diff_ui_lock = False
@@ -2124,7 +2140,9 @@ class CellNeighborsWindow(QDialog):
             return
         for rec in self._nodes_by_grid.values():
             self._update_node_cell_display(rec)
-        if self._neighbor_diff_active:
+        if self._review_active:
+            self.update_cell_colors_for_review()
+        elif self._neighbor_diff_active:
             self.update_cell_colors_for_neighbor_diff()
         elif self._aml_highlight_enabled:
             self.update_cell_colors_for_aml()
@@ -2132,6 +2150,8 @@ class CellNeighborsWindow(QDialog):
             self.update_cell_colors_for_layer_count()
         elif self._current_sequence_index is not None:
             self.update_cell_colors_for_sequence(self._current_sequence_index)
+        else:
+            self.update_cell_colors_for_sequence(None)
         self._refresh_missing_laminate_highlight()
         self._refresh_sequence_combo_preserve_selection()
 
@@ -2560,7 +2580,7 @@ class CellNeighborsWindow(QDialog):
 
             self._review_active = True
             try:
-                mismatches, details, compared_pairs = self._collect_review_mismatches(payload, invalid_cells)
+                mismatches, details, compared_pairs, compared_cells = self._collect_review_mismatches(payload, invalid_cells)
             except Exception as exc:
                 logging.exception("Erro ao coletar divergências do review: %s", exc)
                 QMessageBox.warning(
@@ -2590,27 +2610,19 @@ class CellNeighborsWindow(QDialog):
             
             self._review_payload = payload
             self._review_diff_details = details
+            self._review_compared_cells = compared_cells
             
             try:
-                self._set_review_mismatch_highlight(mismatches)
+                self._set_review_highlight(compared_cells, mismatches)
             except Exception as exc:
                 logging.exception("Erro ao aplicar highlight: %s", exc)
             
             self._set_review_ui_lock(True)
-
-            try:
-                self._show_review_report_dialog(len(mismatches))
-            except Exception as exc:
-                logging.exception("Erro ao exibir diálogo: %s", exc)
-                QMessageBox.warning(
-                    self,
-                    "Review",
-                    f"Erro ao exibir relatório.\nErro: {exc}",
-                )
         else:
             self._review_active = False
             self._clear_review_mismatch_highlight()
             self._review_payload = None
+            self._review_compared_cells.clear()
             self._review_diff_details = {}
             self._set_review_ui_lock(False)
             self._restore_review_previous_state()
@@ -3201,11 +3213,55 @@ class CellNeighborsWindow(QDialog):
         dialog.setLayout(layout)
         dialog.exec()
 
-    def _build_review_report_text(self) -> str:
+    def _show_review_cell_report_dialog(self, cell_id: str) -> None:
+        if not cell_id:
+            return
+        rows = self._review_diff_details.get(cell_id, [])
+        if not rows:
+            return
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"Review - {cell_id}")
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(12)
+
+        has_mismatch = cell_id in self._review_mismatch_cells
+        header = QLabel(
+            (
+                f"Comparação da célula {cell_id} - status: DIFERENÇA"
+                if has_mismatch
+                else f"Comparação da célula {cell_id} - status: OK"
+            ),
+            dialog,
+        )
+        header.setWordWrap(True)
+        layout.addWidget(header)
+
+        text = QTextEdit(dialog)
+        text.setReadOnly(True)
+        text.setMinimumSize(QSize(640, 360))
+        text.setHtml(self._build_review_report_html(cell_ids=[cell_id]))
+        layout.addWidget(text)
+
+        button_box = QDialogButtonBox(QDialogButtonBox.Ok, dialog)
+        ok_button = button_box.button(QDialogButtonBox.Ok)
+        if ok_button is not None:
+            ok_button.setText("OK")
+        button_box.accepted.connect(dialog.accept)
+        layout.addWidget(button_box)
+
+        dialog.setLayout(layout)
+        dialog.exec()
+
+    def _build_review_report_text(self, cell_ids: Optional[list[str]] = None) -> str:
         if not self._review_diff_details:
             return "Nenhuma diferença encontrada."
         lines: list[str] = []
-        for cell_id in sorted(self._review_diff_details.keys()):
+        selected_ids = sorted(cell_ids) if cell_ids else sorted(self._review_diff_details.keys())
+        for cell_id in selected_ids:
+            if cell_id not in self._review_diff_details:
+                continue
             lines.append(f"{cell_id}:")
             lines.append(f"{'Linha':<6} {'Catia Review':<12} {'Projeto':<12} {'Status':<12}")
             lines.append("-" * 50)
@@ -3223,7 +3279,7 @@ class CellNeighborsWindow(QDialog):
             lines.append("")
         return "\n".join(lines).strip()
 
-    def _build_review_report_html(self) -> str:
+    def _build_review_report_html(self, cell_ids: Optional[list[str]] = None) -> str:
         if not self._review_diff_details:
             return "<p>Nenhuma diferença encontrada.</p>"
         
@@ -3232,7 +3288,10 @@ class CellNeighborsWindow(QDialog):
         ]
         
         try:
-            for cell_id in sorted(self._review_diff_details.keys()):
+            selected_ids = sorted(cell_ids) if cell_ids else sorted(self._review_diff_details.keys())
+            for cell_id in selected_ids:
+                if cell_id not in self._review_diff_details:
+                    continue
                 html_lines.append(f"<h3 style='margin-top: 20px; margin-bottom: 10px; color: #333;'>{cell_id}</h3>")
                 html_lines.append("""
                     <table border='1' cellpadding='8' cellspacing='0' style='border-collapse: collapse; width: 100%; max-width: 600px;'>
@@ -3302,6 +3361,17 @@ class CellNeighborsWindow(QDialog):
             raise ValueError("Arquivo vazio.")
 
         header = [col.strip() for col in rows[0]]
+        sequence_col: Optional[int] = None
+        ply_col: Optional[int] = None
+        for idx, label in enumerate(header):
+            normalized = (label or "").strip().lower()
+            if normalized == "sequence":
+                sequence_col = idx
+            elif normalized in {"ply/insert", "ply insert", "ply"} or (
+                "ply" in normalized and "insert" in normalized
+            ):
+                ply_col = idx
+
         cell_columns: dict[int, str] = {}
         for idx, label in enumerate(header):
             if CELL_ID_PATTERN.fullmatch(label or ""):
@@ -3315,6 +3385,14 @@ class CellNeighborsWindow(QDialog):
         invalid_cells: set[str] = set()
 
         for row in rows[1:]:
+            if sequence_col is not None and ply_col is not None:
+                seq_value = str(row[sequence_col]).strip() if sequence_col < len(row) else ""
+                ply_value = str(row[ply_col]).strip() if ply_col < len(row) else ""
+                if not REVIEW_SEQUENCE_PATTERN.fullmatch(seq_value):
+                    continue
+                if not REVIEW_PLY_PATTERN.fullmatch(ply_value):
+                    continue
+
             for col_idx, cell_id in cell_columns.items():
                 if col_idx >= len(row):
                     continue
@@ -3341,16 +3419,22 @@ class CellNeighborsWindow(QDialog):
         self,
         payload: dict[str, list[Optional[float]]],
         invalid_cells: set[str],
-    ) -> tuple[set[str], dict[str, list[tuple[int, Optional[float], Optional[float]]]], int]:
+    ) -> tuple[
+        set[str],
+        dict[str, list[tuple[int, Optional[float], Optional[float]]]],
+        int,
+        set[str],
+    ]:
         """Compare file values vs project values sequentially, skipping empty sequences.
-        Returns: (mismatch_cells, details dict with comparison rows, compared_pairs).
+        Returns: (mismatch_cells, details dict with comparison rows, compared_pairs, compared_cells).
         Details format: {cell_id: [(row_idx, file_value, project_value), ...], ...}
         """
         mismatches: set[str] = set(invalid_cells)
         details: dict[str, list[tuple[int, Optional[float], Optional[float]]]] = {}
         compared_pairs = 0
+        compared_cells: set[str] = set()
         if self._model is None:
-            return mismatches, details, compared_pairs
+            return mismatches, details, compared_pairs, compared_cells
 
         try:
             cell_to_laminate = getattr(self._model, "cell_to_laminate", {}) or {}
@@ -3388,6 +3472,8 @@ class CellNeighborsWindow(QDialog):
             has_mismatch = False
             common_rows = min(len(file_values), len(model_values))
             compared_pairs += common_rows
+            if common_rows > 0:
+                compared_cells.add(cell_id)
 
             for row_idx in range(common_rows):
                 file_val = file_values[row_idx]
@@ -3397,27 +3483,48 @@ class CellNeighborsWindow(QDialog):
                 if not math.isclose(float(file_val), float(model_val), rel_tol=0.0, abs_tol=1e-6):
                     has_mismatch = True
 
+            if comparison_rows:
+                details[cell_id] = comparison_rows
             if has_mismatch:
                 mismatches.add(cell_id)
-                details[cell_id] = comparison_rows
 
-        return mismatches, details, compared_pairs
+        compared_cells.update(invalid_cells)
+        return mismatches, details, compared_pairs, compared_cells
+
+    def _set_review_highlight(self, compared_cells: set[str], mismatch_cells: set[str]) -> None:
+        self._review_compared_cells = set(compared_cells)
+        self._review_mismatch_cells = set(mismatch_cells)
+        self.update_cell_colors_for_review()
 
     def _set_review_mismatch_highlight(self, mismatch_cells: set[str]) -> None:
         self._review_mismatch_cells = set(mismatch_cells)
         self.refresh_from_model()
 
     def _clear_review_mismatch_highlight(self) -> None:
-        if not self._review_mismatch_cells:
+        if not self._review_mismatch_cells and not self._review_compared_cells:
             return
         self._review_mismatch_cells.clear()
+        self._review_compared_cells.clear()
         self.refresh_from_model()
 
     def _apply_review_border_if_needed(self, record: _NodeRecord, item: CellNodeItem) -> None:
-        if not self._review_active:
-            return
-        if record.cell_id and record.cell_id in self._review_mismatch_cells:
-            item.set_border_highlight(COLOR_REVIEW_MISMATCH_BORDER, CENTER_BORDER_WIDTH)
+        return
+
+    def update_cell_colors_for_review(self) -> None:
+        for record in self._nodes_by_grid.values():
+            item = record.item
+            item._orientation_label.setText("")
+            item._aml_label.setText("")
+            cell_id = record.cell_id
+            if not cell_id or not self._review_active or cell_id not in self._review_compared_cells:
+                item.setBrush(item._normal_brush)
+            elif cell_id in self._review_mismatch_cells:
+                item.setBrush(QBrush(COLOR_REVIEW_MISMATCH_FILL))
+            else:
+                item.setBrush(QBrush(COLOR_REVIEW_OK_FILL))
+            item.set_border_highlight(None, BASE_BORDER_WIDTH)
+            item._recenter_label()
+        self._refresh_merged_cell_visuals()
 
     def _show_aml_formula_dialog(self) -> bool:
         dialog = QDialog(self)
@@ -4908,6 +5015,8 @@ class CellNeighborsWindow(QDialog):
         self._nodes_by_grid[grid_pos] = record
 
         def on_select_cell():
+            if self._handle_review_cell_click(record):
+                return
             self._prompt_select_cell(record)
 
         def on_add_neighbor(direction: str):
@@ -4934,11 +5043,23 @@ class CellNeighborsWindow(QDialog):
         item.on_insert_row_below = lambda: self._insert_row_below(record.grid_pos[1])
         item.on_delete_col = lambda: self._delete_col(record.grid_pos[0])
         item.on_delete_row = lambda: self._delete_row(record.grid_pos[1])
+        item.on_is_review_click_enabled = lambda: self._review_active and self._review_ui_lock
 
         # Expand scene to accommodate new node
         self._expand_scene_rect()
         
         return record
+
+    def _handle_review_cell_click(self, record: _NodeRecord) -> bool:
+        if not self._review_active or not self._review_ui_lock:
+            return False
+        cell_id = record.cell_id
+        if not cell_id:
+            return True
+        if cell_id not in self._review_compared_cells:
+            return True
+        self._show_review_cell_report_dialog(cell_id)
+        return True
 
     def _format_laminate_label(self, cell_id: Optional[str]) -> str:
         if not cell_id or self._model is None:
