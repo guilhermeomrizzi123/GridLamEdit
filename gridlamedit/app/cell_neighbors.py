@@ -157,6 +157,7 @@ DIR_OFFSETS: dict[str, tuple[int, int]] = {
 }
 
 REVIEW_SEQUENCE_PATTERN = re.compile(r"^S\.(\d+)$", re.IGNORECASE)
+REVIEW_PLY_PATTERN = re.compile(r"^PLY\s*[\._-]?\s*(\d+)$", re.IGNORECASE)
 
 
 def opposite(dir_name: str) -> str:
@@ -2524,17 +2525,11 @@ class CellNeighborsWindow(QDialog):
             if self.missing_laminate_button.isChecked():
                 self.missing_laminate_button.setChecked(False)
 
-            if not self._run_review_reorder():
-                QMessageBox.warning(
-                    self,
-                    "Review",
-                    "Não foi possível reordenar por vizinhança. Corrija os avisos e tente novamente.",
-                )
-                blocker = QSignalBlocker(self.review_toggle_button)
-                self.review_toggle_button.setChecked(False)
-                del blocker
-                self._restore_review_previous_state()
-                return
+            QMessageBox.information(
+                self,
+                "Review",
+                "Ao exportar os dados de review no Catia, selecione o formato .txt.",
+            )
 
             file_path, _ = QFileDialog.getOpenFileName(
                 self,
@@ -2550,7 +2545,7 @@ class CellNeighborsWindow(QDialog):
                 return
 
             try:
-                payload, max_seq_idx, invalid_cells = self._parse_review_file(Path(file_path))
+                payload, invalid_cells = self._parse_review_file(Path(file_path))
             except Exception as exc:
                 QMessageBox.warning(
                     self,
@@ -2564,13 +2559,54 @@ class CellNeighborsWindow(QDialog):
                 return
 
             self._review_active = True
-            mismatches, details = self._collect_review_mismatches(payload, max_seq_idx, invalid_cells)
+            try:
+                mismatches, details, compared_pairs = self._collect_review_mismatches(payload, invalid_cells)
+            except Exception as exc:
+                logging.exception("Erro ao coletar divergências do review: %s", exc)
+                QMessageBox.warning(
+                    self,
+                    "Review",
+                    f"Erro ao processar o review.\nErro: {exc}",
+                )
+                self._review_active = False
+                blocker = QSignalBlocker(self.review_toggle_button)
+                self.review_toggle_button.setChecked(False)
+                del blocker
+                self._restore_review_previous_state()
+                return
+            
+            if compared_pairs == 0:
+                QMessageBox.information(
+                    self,
+                    "Review",
+                    "Nenhuma célula com dados foi encontrada para comparação.\nVerifique se:\n- O arquivo contém células (C#)\n- O projeto tem laminados atribuídos às células",
+                )
+                self._review_active = False
+                blocker = QSignalBlocker(self.review_toggle_button)
+                self.review_toggle_button.setChecked(False)
+                del blocker
+                self._restore_review_previous_state()
+                return
+            
             self._review_payload = payload
             self._review_diff_details = details
-            self._set_review_mismatch_highlight(mismatches)
+            
+            try:
+                self._set_review_mismatch_highlight(mismatches)
+            except Exception as exc:
+                logging.exception("Erro ao aplicar highlight: %s", exc)
+            
             self._set_review_ui_lock(True)
 
-            self._show_review_report_dialog(len(mismatches))
+            try:
+                self._show_review_report_dialog(len(mismatches))
+            except Exception as exc:
+                logging.exception("Erro ao exibir diálogo: %s", exc)
+                QMessageBox.warning(
+                    self,
+                    "Review",
+                    f"Erro ao exibir relatório.\nErro: {exc}",
+                )
         else:
             self._review_active = False
             self._clear_review_mismatch_highlight()
@@ -2578,44 +2614,6 @@ class CellNeighborsWindow(QDialog):
             self._review_diff_details = {}
             self._set_review_ui_lock(False)
             self._restore_review_previous_state()
-
-    def _run_review_reorder(self) -> bool:
-        window = self._ensure_virtual_stacking_window()
-        if window is None:
-            return False
-
-        already_active = False
-        if hasattr(window, "btn_reorganize_neighbors"):
-            already_active = window.btn_reorganize_neighbors.isChecked()
-        else:
-            already_active = bool(getattr(window, "_neighbors_reorder_snapshot", None))
-
-        if already_active:
-            return True
-
-        progress = QProgressDialog(
-            "Reordenando por vizinhança...",
-            None,
-            0,
-            0,
-            self,
-        )
-        progress.setWindowModality(Qt.WindowModal)
-        progress.setMinimumDuration(0)
-        progress.setAutoClose(True)
-        progress.setAutoReset(True)
-        progress.show()
-        QApplication.processEvents()
-
-        try:
-            if hasattr(window, "btn_reorganize_neighbors"):
-                window.btn_reorganize_neighbors.setChecked(True)
-                QApplication.processEvents()
-                return window.btn_reorganize_neighbors.isChecked()
-            applied = window.reorganizar_por_vizinhanca()
-            return bool(applied)
-        finally:
-            progress.close()
 
     def _store_review_previous_state(self) -> None:
         self._review_prev_state = {
@@ -3190,7 +3188,7 @@ class CellNeighborsWindow(QDialog):
         text = QTextEdit(dialog)
         text.setReadOnly(True)
         text.setMinimumSize(QSize(640, 360))
-        text.setText(self._build_review_report_text())
+        text.setHtml(self._build_review_report_html())
         layout.addWidget(text)
 
         button_box = QDialogButtonBox(QDialogButtonBox.Ok, dialog)
@@ -3209,28 +3207,101 @@ class CellNeighborsWindow(QDialog):
         lines: list[str] = []
         for cell_id in sorted(self._review_diff_details.keys()):
             lines.append(f"{cell_id}:")
-            for detail in self._review_diff_details[cell_id]:
-                lines.append(f"  - {detail}")
+            lines.append(f"{'Linha':<6} {'Catia Review':<12} {'Projeto':<12} {'Status':<12}")
+            lines.append("-" * 50)
+            for row_idx, file_val, proj_val in self._review_diff_details[cell_id]:
+                file_str = f"{file_val:.1f}°" if file_val is not None else "(vazio)"
+                proj_str = f"{proj_val:.1f}°" if proj_val is not None else "(vazio)"
+                if file_val is not None and proj_val is not None:
+                    if math.isclose(float(file_val), float(proj_val), rel_tol=0.0, abs_tol=1e-6):
+                        status = "OK"
+                    else:
+                        status = "DIFERENÇA"
+                else:
+                    status = "AUSENTE"
+                lines.append(f"{row_idx:<6} {file_str:<12} {proj_str:<12} {status:<12}")
             lines.append("")
         return "\n".join(lines).strip()
 
+    def _build_review_report_html(self) -> str:
+        if not self._review_diff_details:
+            return "<p>Nenhuma diferença encontrada.</p>"
+        
+        html_lines: list[str] = [
+            "<html><body style='font-family: Arial, sans-serif; margin: 16px;'>"
+        ]
+        
+        try:
+            for cell_id in sorted(self._review_diff_details.keys()):
+                html_lines.append(f"<h3 style='margin-top: 20px; margin-bottom: 10px; color: #333;'>{cell_id}</h3>")
+                html_lines.append("""
+                    <table border='1' cellpadding='8' cellspacing='0' style='border-collapse: collapse; width: 100%; max-width: 600px;'>
+                    <thead>
+                        <tr style='background-color: #4CAF50; color: white; font-weight: bold;'>
+                            <th style='text-align: center; width: 60px;'>Linha</th>
+                            <th style='text-align: center; width: 150px;'>Catia Review</th>
+                            <th style='text-align: center; width: 150px;'>Projeto</th>
+                            <th style='text-align: center; width: 100px;'>Status</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                """)
+                
+                for row_idx, file_val, proj_val in self._review_diff_details[cell_id]:
+                    try:
+                        file_str = f"{float(file_val):.1f}°" if file_val is not None else "—"
+                    except (ValueError, TypeError):
+                        file_str = str(file_val) if file_val is not None else "—"
+                    
+                    try:
+                        proj_str = f"{float(proj_val):.1f}°" if proj_val is not None else "—"
+                    except (ValueError, TypeError):
+                        proj_str = str(proj_val) if proj_val is not None else "—"
+                    
+                    try:
+                        if file_val is not None and proj_val is not None:
+                            is_match = math.isclose(float(file_val), float(proj_val), rel_tol=0.0, abs_tol=1e-6)
+                            status = "✓ OK" if is_match else "✗ DIFERENÇA"
+                            bg_color = "#E8F5E9" if is_match else "#FFEBEE"
+                            text_color = "#2E7D32" if is_match else "#C62828"
+                        else:
+                            is_match = file_val == proj_val
+                            status = "✓ OK" if is_match else "✗ AUSENTE"
+                            bg_color = "#E8F5E9" if is_match else "#FFEBEE"
+                            text_color = "#2E7D32" if is_match else "#C62828"
+                    except (ValueError, TypeError):
+                        is_match = False
+                        status = "✗ ERRO"
+                        bg_color = "#FFF3E0"
+                        text_color = "#E65100"
+                    
+                    html_lines.append(f"""
+                        <tr style='background-color: {bg_color};'>
+                            <td style='text-align: center; color: #333;'>{row_idx}</td>
+                            <td style='text-align: center; color: #333;'>{file_str}</td>
+                            <td style='text-align: center; color: #333;'>{proj_str}</td>
+                            <td style='text-align: center; color: {text_color}; font-weight: bold;'>{status}</td>
+                        </tr>
+                    """)
+                
+                html_lines.append("</tbody></table>")
+        except Exception as exc:
+            logging.exception("Erro ao construir HTML do relatório: %s", exc)
+            html_lines.append(f"<p style='color: red;'>Erro ao gerar relatório: {exc}</p>")
+        
+        html_lines.append("</body></html>")
+        return "".join(html_lines)
+
     def _parse_review_file(
         self, file_path: Path
-    ) -> tuple[dict[str, dict[int, Optional[float]]], int, set[str]]:
+    ) -> tuple[dict[str, list[Optional[float]]], set[str]]:
+        """Parse review file, extracting non-empty orientation values per cell as simple lists."""
         text = file_path.read_text(encoding="utf-8", errors="replace")
         rows = list(csv.reader(text.splitlines(), delimiter="\t"))
         if not rows:
             raise ValueError("Arquivo vazio.")
 
         header = [col.strip() for col in rows[0]]
-        sequence_idx = None
-        for idx, label in enumerate(header):
-            if label.lower() == "sequence":
-                sequence_idx = idx
-                break
-        if sequence_idx is None:
-            raise ValueError("Coluna 'Sequence' não encontrada.")
-
         cell_columns: dict[int, str] = {}
         for idx, label in enumerate(header):
             if CELL_ID_PATTERN.fullmatch(label or ""):
@@ -3238,55 +3309,48 @@ class CellNeighborsWindow(QDialog):
         if not cell_columns:
             raise ValueError("Nenhuma coluna de célula encontrada.")
 
-        cell_map: dict[str, dict[int, Optional[float]]] = {
-            cell_id: {} for cell_id in cell_columns.values()
+        cell_map: dict[str, list[Optional[float]]] = {
+            cell_id: [] for cell_id in cell_columns.values()
         }
         invalid_cells: set[str] = set()
-        max_seq_idx = 0
 
         for row in rows[1:]:
-            if sequence_idx >= len(row):
-                continue
-            seq_text = str(row[sequence_idx]).strip()
-            match = REVIEW_SEQUENCE_PATTERN.match(seq_text)
-            if not match:
-                continue
-            seq_idx = int(match.group(1))
-            max_seq_idx = max(max_seq_idx, seq_idx)
-
             for col_idx, cell_id in cell_columns.items():
                 if col_idx >= len(row):
                     continue
                 raw_value = str(row[col_idx]).strip()
-                if not raw_value:
-                    continue
-                if raw_value.lower() == "empty":
+                if not raw_value or raw_value.lower() == "empty":
                     continue
                 try:
                     normalized = float(normalize_angle(raw_value))
+                    cell_map[cell_id].append(normalized)
                 except Exception:
                     try:
                         normalized = float(raw_value.replace(",", "."))
+                        cell_map[cell_id].append(normalized)
                     except Exception:
                         invalid_cells.add(cell_id)
                         continue
-                cell_map.setdefault(cell_id, {})[seq_idx] = normalized
 
-        if max_seq_idx <= 0:
-            raise ValueError("Nenhuma sequência válida encontrada.")
+        if not any(cell_map.values()):
+            raise ValueError("Nenhuma orientação válida encontrada.")
 
-        return cell_map, max_seq_idx, invalid_cells
+        return cell_map, invalid_cells
 
     def _collect_review_mismatches(
         self,
-        payload: dict[str, dict[int, Optional[float]]],
-        max_seq_idx: int,
+        payload: dict[str, list[Optional[float]]],
         invalid_cells: set[str],
-    ) -> tuple[set[str], dict[str, list[str]]]:
+    ) -> tuple[set[str], dict[str, list[tuple[int, Optional[float], Optional[float]]]], int]:
+        """Compare file values vs project values sequentially, skipping empty sequences.
+        Returns: (mismatch_cells, details dict with comparison rows, compared_pairs).
+        Details format: {cell_id: [(row_idx, file_value, project_value), ...], ...}
+        """
         mismatches: set[str] = set(invalid_cells)
-        details: dict[str, list[str]] = {cell: ["Valor inválido no arquivo de review."] for cell in invalid_cells}
+        details: dict[str, list[tuple[int, Optional[float], Optional[float]]]] = {}
+        compared_pairs = 0
         if self._model is None:
-            return mismatches, details
+            return mismatches, details, compared_pairs
 
         try:
             cell_to_laminate = getattr(self._model, "cell_to_laminate", {}) or {}
@@ -3299,51 +3363,45 @@ class CellNeighborsWindow(QDialog):
 
         for record in self._nodes_by_grid.values():
             cell_id = record.cell_id
-            if not cell_id:
+            if not cell_id or cell_id not in payload:
                 continue
-            if cell_id not in payload:
-                continue
+
             laminate_name = cell_to_laminate.get(cell_id)
             laminado = laminados.get(laminate_name) if laminate_name else None
             camadas = getattr(laminado, "camadas", []) if laminado else []
 
-            model_seq_map: dict[int, Optional[float]] = {}
-            for idx, camada in enumerate(camadas):
-                seq_label = str(getattr(camada, "sequence", "") or "").strip()
-                seq_match = REVIEW_SEQUENCE_PATTERN.match(seq_label)
-                seq_idx = int(seq_match.group(1)) if seq_match else idx + 1
+            model_values: list[Optional[float]] = []
+            for camada in camadas:
                 model_raw = getattr(camada, "orientacao", None)
                 if model_raw is None:
-                    model_seq_map[seq_idx] = None
                     continue
                 try:
-                    model_seq_map[seq_idx] = float(normalize_angle(model_raw))
+                    model_values.append(float(normalize_angle(model_raw)))
                 except Exception:
                     try:
-                        model_seq_map[seq_idx] = float(model_raw)
+                        model_values.append(float(model_raw))
                     except Exception:
-                        model_seq_map[seq_idx] = None
+                        pass
 
-            for seq_idx, model_value in model_seq_map.items():
-                if seq_idx > max_seq_idx:
-                    continue
-                file_value = payload.get(cell_id, {}).get(seq_idx)
+            file_values = payload.get(cell_id, [])
+            comparison_rows = []
+            has_mismatch = False
+            common_rows = min(len(file_values), len(model_values))
+            compared_pairs += common_rows
 
-                if file_value is None and model_value is None:
-                    continue
-                if file_value is None or model_value is None:
-                    mismatches.add(cell_id)
-                    details.setdefault(cell_id, []).append(
-                        f"S.{seq_idx}: arquivo={file_value if file_value is not None else 'vazio'}; projeto={model_value if model_value is not None else 'vazio'}"
-                    )
-                    continue
-                if not math.isclose(float(file_value), float(model_value), rel_tol=0.0, abs_tol=1e-6):
-                    mismatches.add(cell_id)
-                    details.setdefault(cell_id, []).append(
-                        f"S.{seq_idx}: arquivo={file_value}; projeto={model_value}"
-                    )
+            for row_idx in range(common_rows):
+                file_val = file_values[row_idx]
+                model_val = model_values[row_idx]
+                comparison_rows.append((row_idx + 1, file_val, model_val))
 
-        return mismatches, details
+                if not math.isclose(float(file_val), float(model_val), rel_tol=0.0, abs_tol=1e-6):
+                    has_mismatch = True
+
+            if has_mismatch:
+                mismatches.add(cell_id)
+                details[cell_id] = comparison_rows
+
+        return mismatches, details, compared_pairs
 
     def _set_review_mismatch_highlight(self, mismatch_cells: set[str]) -> None:
         self._review_mismatch_cells = set(mismatch_cells)
