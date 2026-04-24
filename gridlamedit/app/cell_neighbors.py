@@ -3291,7 +3291,7 @@ class CellNeighborsWindow(QDialog):
             if cell_id not in self._review_diff_details:
                 continue
             lines.append(f"{cell_id}:")
-            lines.append(f"{'Linha':<6} {'Catia Review':<12} {'Projeto':<12} {'Status':<12}")
+            lines.append(f"{'Linha':<6} {'Info From Catia':<18} {'Info From Current Project':<26} {'Status':<12}")
             lines.append("-" * 50)
             for row_idx, file_val, proj_val in self._review_diff_details[cell_id]:
                 file_str = f"{file_val:.1f}°" if file_val is not None else "(vazio)"
@@ -3326,8 +3326,8 @@ class CellNeighborsWindow(QDialog):
                     <thead>
                         <tr style='background-color: #4CAF50; color: white; font-weight: bold;'>
                             <th style='text-align: center; width: 60px;'>Linha</th>
-                            <th style='text-align: center; width: 150px;'>Catia Review</th>
-                            <th style='text-align: center; width: 150px;'>Projeto</th>
+                            <th style='text-align: center; width: 180px;'>Info From Catia</th>
+                            <th style='text-align: center; width: 220px;'>Info From Current Project</th>
                             <th style='text-align: center; width: 100px;'>Status</th>
                         </tr>
                     </thead>
