@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Dict, Optional, Tuple
 
 from PySide6.QtCore import QPointF, QRectF, QRect, Qt, QSize, QLineF, QSignalBlocker
-from PySide6.QtGui import QColor, QFont, QPainterPath, QPen, QAction, QUndoStack, QUndoCommand, QLinearGradient, QRadialGradient, QBrush, QIcon, QPainter, QTextOption, QPixmap, QPdfWriter, QPageSize, QPageLayout
+from PySide6.QtGui import QColor, QFont, QFontMetricsF, QPainterPath, QPen, QAction, QUndoStack, QUndoCommand, QLinearGradient, QRadialGradient, QBrush, QIcon, QPainter, QTextOption, QPixmap, QPdfWriter, QPageSize, QPageLayout
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
@@ -650,6 +650,8 @@ class CellNodeItem(QGraphicsRectItem):
         lf.setPointSize(max(8, f.pointSize() - 2))
         self._laminate_label.setFont(lf)
         self._laminate_label.setBrush(COLOR_TEXT)
+        self._laminate_label_base_size = max(1.0, float(lf.pointSizeF()))
+        self._laminate_label_min_size = 6.0
         # AML type overlay at top-center
         self._aml_label = QGraphicsSimpleTextItem("", self)
         af: QFont = self._aml_label.font()
@@ -707,7 +709,33 @@ class CellNodeItem(QGraphicsRectItem):
 
     def set_laminate_text(self, text: str) -> None:
         self._laminate_label.setText(text or "")
+        self._fit_laminate_text_to_cell()
         self._recenter_label()
+
+    def _fit_laminate_text_to_cell(self) -> None:
+        text = self._laminate_label.text() or ""
+        current_font = self._laminate_label.font()
+        if not text:
+            if abs(current_font.pointSizeF() - self._laminate_label_base_size) > 0.01:
+                current_font.setPointSizeF(self._laminate_label_base_size)
+                self._laminate_label.setFont(current_font)
+            return
+
+        available_width = max(1.0, self.rect().width() - 8.0)
+        target_size = self._laminate_label_base_size
+        min_size = min(self._laminate_label_min_size, target_size)
+
+        while target_size > min_size:
+            test_font = QFont(current_font)
+            test_font.setPointSizeF(target_size)
+            metrics = QFontMetricsF(test_font)
+            if metrics.horizontalAdvance(text) <= available_width:
+                break
+            target_size = max(min_size, target_size - 0.5)
+
+        if abs(current_font.pointSizeF() - target_size) > 0.01:
+            current_font.setPointSizeF(target_size)
+            self._laminate_label.setFont(current_font)
 
     def set_contour_texts(self, contours: Tuple[str, str, str, str]) -> None:
         mapping = {
